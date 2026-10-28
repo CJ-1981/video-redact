@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan Report — SPEC-VID-001</title>
+<style>
+  :root {
+    --bg: #FAF9F5; --paper: #FFFFFF; --ink: #141413; --clay: #D97757;
+    --muted: #87867F; --line: #D1CFC5; --ok: #788C5D; --warn: #B85C3E;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px; line-height: 1.6; padding: 40px 20px 80px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  header { background: var(--paper); border: 1.5px solid var(--line); border-radius: 12px; padding: 24px 28px; margin-bottom: 20px; }
+  header h1 { font-size: 20px; font-weight: 700; }
+  header .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  section { background: var(--paper); border: 1.5px solid var(--line); border-radius: 12px; padding: 20px 24px; margin-bottom: 20px; }
+  section h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 12px; }
+  .goal { border-left: 4px solid var(--clay); padding: 12px 16px; background: #FBF6F2; border-radius: 8px; font-size: 16px; }
+  .audit-score { display: inline-block; padding: 4px 12px; border-radius: 4px; font-weight: 700; font-size: 14px; }
+  .audit-score.PASS { background: #E8EEDC; color: var(--ok); }
+  .audit-score.FAIL { background: #FBE9E3; color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  .placeholder { color: var(--muted); font-style: italic; }
+  ul.checklist { list-style: none; }
+  ul.checklist li { padding: 4px 0; }
+  .milestones { display: flex; flex-wrap: wrap; gap: 8px; }
+  .milestone { padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Client-Side Video Redaction Web App: Face &amp; License Plate Detection</h1>
+    <div class="sub">SPEC-VID-001 · Plan Report</div>
+  </header>
+
+  <section>
+    <h2>Goal</h2>
+    <div class="goal">no single unredacted frame of a detected object is exportable</div>
+  </section>
+
+  <section>
+    <h2>Plan-Auditor Verdict</h2>
+    
+    <p class="placeholder">audit verdict unavailable</p>
+    
+  </section>
+
+  <section>
+    <h2>Autonomy Contract (8 fields)</h2>
+    <table>
+      <tr><th>Field</th><th>Derived Value</th></tr>
+      
+      <tr>
+        <td><strong>goal</strong></td>
+        <td>no single unredacted frame of a detected object is exportable</td>
+      </tr>
+      
+      <tr>
+        <td><strong>scope</strong></td>
+        <td>undetermined — no REQ bullets found in §B scope</td>
+      </tr>
+      
+      <tr>
+        <td><strong>non-goals</strong></td>
+        <td>undetermined — no &#39;### Out of Scope —&#39; H3 headings in §B</td>
+      </tr>
+      
+      <tr>
+        <td><strong>tools-permissions</strong></td>
+        <td>undetermined — settings.json absent or unreadable</td>
+      </tr>
+      
+      <tr>
+        <td><strong>stopping-condition</strong></td>
+        <td>undetermined — no AC rows found in acceptance.md §D</td>
+      </tr>
+      
+      <tr>
+        <td><strong>evidence</strong></td>
+        <td>19 Given-When-Then &#39;Then&#39; clauses</td>
+      </tr>
+      
+      <tr>
+        <td><strong>escalation</strong></td>
+        <td>undetermined — no open-questions / blocker cross-references in plan.md</td>
+      </tr>
+      
+      <tr>
+        <td><strong>budget</strong></td>
+        <td>tier=; phase=v1.0.0; milestone_count=0</td>
+      </tr>
+      
+    </table>
+  </section>
+
+  <section>
+    <h2>Milestones</h2>
+    
+    <p class="placeholder">no milestones found in plan.md §F</p>
+    
+  </section>
+
+  <footer>Rendered by MoAI plan report · open this file in a browser to review offline</footer>
+</div>
+</body>
+</html>

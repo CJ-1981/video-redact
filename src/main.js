@@ -15,6 +15,8 @@
  *   inferenceRow(caps)                 EP policy → AC-17 "Inference" row
  *   epLabel(ep)                        effective EP → status suffix label
  *   formatVersionBadge({version, buildDate})  footer version badge text
+ *   clampStageHeight(px, viewportH)    stage-height clamp (v1.2.0 handle)
+ *   nextStageHeight(px, delta, vh)     handle keyboard step (v1.2.0)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -26,6 +28,12 @@
  * bar (jump/frame-step/play-pause/speed/timecode driven by video media
  * events) and REQ-106 fullscreen preview (requestFullscreen with a
  * `.preview-zoom` in-page fallback + editor.redraw() resize kicks).
+ *
+ * v1.2.0 wiring: the #stage-resize-handle between the preview stage and the
+ * transport bar — pointer drag / ArrowUp / ArrowDown resize the stage via the
+ * `--stage-h` custom property (clamped 220 px – 75vh), double-click resets;
+ * every height change kicks editor.redraw() so the overlay re-scales to the
+ * new layout × devicePixelRatio (the same seam as fullscreen/zoom).
  *
  * NOTE: the string 'video-redact dev shell' (set on <body data-app-shell>)
  * is asserted by tests/unit/scaffold.test.js against the built artifact.
@@ -226,6 +234,55 @@ export function formatVersionBadge({ version, buildDate } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Preview-stage height model (pure; v1.2.0 drag handle)
+// ---------------------------------------------------------------------------
+
+/** Historical/default preview-stage height, CSS px (index.html fallback). */
+export const DEFAULT_STAGE_HEIGHT_PX = 320;
+/** Lower clamp bound — a stage below this is useless for review. */
+export const STAGE_MIN_HEIGHT_PX = 220;
+/** Keyboard step (ArrowUp / ArrowDown on the focused handle), CSS px. */
+export const STAGE_HEIGHT_STEP_PX = 24;
+/** Upper clamp bound as a fraction of the viewport height (75vh). */
+const STAGE_MAX_VIEWPORT_FRACTION = 0.75;
+
+/**
+ * Clamp a desired preview-stage height into [220, round(0.75·viewportH)] as
+ * an integer. PURE. The 75vh bound is recomputed against the CURRENT
+ * viewport on every call, so a window resize re-clamps on the next drag /
+ * key step. Degradations: a non-finite `px` falls back to the default height
+ * before clamping; a non-finite/≤ 0 `viewportH` drops the upper bound (min
+ * still enforced) — a tiny viewport can never push the max below the min.
+ *
+ * @param {number} px Desired stage height, CSS px.
+ * @param {number} viewportH Viewport height, CSS px (window.innerHeight).
+ * @returns {number} Clamped integer stage height.
+ */
+export function clampStageHeight(px, viewportH) {
+  let max = Infinity;
+  if (Number.isFinite(viewportH) && viewportH > 0) {
+    max = Math.max(Math.round(viewportH * STAGE_MAX_VIEWPORT_FRACTION), STAGE_MIN_HEIGHT_PX);
+  }
+  const desired = Number.isFinite(px) ? Math.round(px) : DEFAULT_STAGE_HEIGHT_PX;
+  return Math.min(Math.max(desired, STAGE_MIN_HEIGHT_PX), max);
+}
+
+/**
+ * One stage-height step (v1.2.0 keyboard parity: ArrowUp/ArrowDown ±24 px)
+ * — `px` moved by `deltaPx`, then clamped by clampStageHeight. PURE.
+ *
+ * @param {number} px Current stage height, CSS px.
+ * @param {number} deltaPx Signed step (+ = taller), CSS px.
+ * @param {number} viewportH Viewport height, CSS px.
+ * @returns {number} New clamped integer stage height.
+ */
+export function nextStageHeight(px, deltaPx, viewportH) {
+  const step = Number.isFinite(deltaPx) ? deltaPx : 0;
+  const from = Number.isFinite(px) ? px : DEFAULT_STAGE_HEIGHT_PX;
+  return clampStageHeight(from + step, viewportH);
+}
+
+// ---------------------------------------------------------------------------
 // REQ-021 error mapping tables (pure)
 // ---------------------------------------------------------------------------
 
@@ -397,6 +454,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     video: /** @type {HTMLVideoElement | null} */ ($('preview-video')),
     overlayCanvas: /** @type {HTMLCanvasElement | null} */ ($('overlay-canvas')),
     fullscreenButton: /** @type {HTMLButtonElement | null} */ ($('preview-fullscreen')),
+    stageResizeHandle: /** @type {HTMLElement | null} */ ($('stage-resize-handle')),
     transportStart: /** @type {HTMLButtonElement | null} */ ($('transport-start')),
     transportBack: /** @type {HTMLButtonElement | null} */ ($('transport-back')),
     transportPlay: /** @type {HTMLButtonElement | null} */ ($('transport-play')),
@@ -1172,12 +1230,99 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     updateFullscreenButton();
     triggerPreviewResize();
   });
-  window.addEventListener('resize', triggerPreviewResize);
+  window.addEventListener('resize', () => {
+    // v1.2.0: re-clamp the stage against the new viewport (75vh bound) —
+    // applyStageHeight ends in the same redraw kick as before.
+    applyStageHeight(stageHeight);
+  });
   // Escape exits the in-page fallback (native fullscreen gets it for free).
   doc.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && isZoomFallback()) exitEnlarge();
   });
   updateFullscreenButton();
+
+  // --- Stage height resize (v1.2.0 #stage-resize-handle) -------------------------
+
+  /**
+   * Viewport height the 75vh clamp runs against; 0 (→ unbounded max inside
+   * clampStageHeight) when innerHeight is unavailable.
+   */
+  function stageViewportH() {
+    const h = doc.defaultView ? doc.defaultView.innerHeight : NaN;
+    return Number.isFinite(h) && h > 0 ? h : 0;
+  }
+
+  /** Live stage height (source of truth once the user first resizes). */
+  let stageHeight = DEFAULT_STAGE_HEIGHT_PX;
+
+  /**
+   * Single stage-height mutation path: clamp → apply the `--stage-h` custom
+   * property on #preview-stage (index.html sizes the stage with it; video +
+   * overlay canvas keep their absolute fill) → aria-valuenow → editor
+   * redraw() so the overlay re-scales to the new layout × DPR.
+   */
+  function applyStageHeight(px) {
+    stageHeight = clampStageHeight(px, stageViewportH());
+    if (els.previewStage) {
+      els.previewStage.style.setProperty('--stage-h', `${stageHeight}px`);
+    }
+    if (els.stageResizeHandle) {
+      els.stageResizeHandle.setAttribute('aria-valuenow', String(stageHeight));
+    }
+    triggerPreviewResize();
+  }
+
+  const resizeHandle = els.stageResizeHandle;
+  if (resizeHandle) {
+    /** Live pointer drag: pointerdown anchor + height at anchor. */
+    let drag = /** @type {{startY: number, startH: number} | null} */ (null);
+
+    resizeHandle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      drag = { startY: e.clientY, startH: stageHeight };
+      try {
+        resizeHandle.setPointerCapture(e.pointerId);
+      } catch {
+        /* detached handle — capture is best-effort */
+      }
+      e.preventDefault();
+    });
+    resizeHandle.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      // Dragging UP grows the stage (the stage/handle boundary follows the
+      // pointer); clampStageHeight recomputes the 75vh bound per move.
+      applyStageHeight(drag.startH + (drag.startY - e.clientY));
+    });
+    const endDrag = (e) => {
+      if (!drag) return;
+      drag = null;
+      try {
+        resizeHandle.releasePointerCapture(e.pointerId);
+      } catch {
+        /* never captured or already released */
+      }
+      applyStageHeight(stageHeight); // drag end: final clamp + redraw kick
+    };
+    resizeHandle.addEventListener('pointerup', endDrag);
+    resizeHandle.addEventListener('pointercancel', endDrag);
+    resizeHandle.addEventListener('dblclick', () => {
+      applyStageHeight(DEFAULT_STAGE_HEIGHT_PX);
+    });
+    resizeHandle.addEventListener('keydown', (e) => {
+      const step =
+        e.key === 'ArrowUp'
+          ? STAGE_HEIGHT_STEP_PX
+          : e.key === 'ArrowDown'
+            ? -STAGE_HEIGHT_STEP_PX
+            : 0;
+      if (step === 0) return;
+      e.preventDefault();
+      // Stop the doc-level shortcuts: ArrowUp/Down would otherwise ALSO
+      // frame-step the video in review/done (the handle is not a button).
+      e.stopPropagation();
+      applyStageHeight(nextStageHeight(stageHeight, step, stageViewportH()));
+    });
+  }
 
   // --- Keyboard (design-direction: space / ← / → / B in review states) ----------
 

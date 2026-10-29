@@ -232,13 +232,17 @@
     .cap-block { color: var(--alert); }
 
     /* ── Preview stage ── */
+    /* v1.2.0: height is owned by the --stage-h custom property (fallback =
+       the historical 320 px layout) so the drag handle below the stage can
+       resize it; video + overlay canvas keep their absolute inset:0 fill. */
     #preview-stage {
       position: relative;
       background: var(--bg-inset);
       border: 1px solid var(--line);
       border-radius: var(--radius);
       overflow: hidden;
-      min-height: 320px;
+      height: var(--stage-h, 320px);
+      min-height: 220px;
     }
     #preview-video, #overlay-canvas {
       position: absolute;
@@ -267,6 +271,7 @@
     #preview-stage:fullscreen {
       border: none;
       border-radius: 0;
+      height: auto; /* UA forces 100% — never the drag-handle height */
       min-height: 0;
     }
     #preview-stage.preview-zoom {
@@ -275,7 +280,37 @@
       z-index: 40;
       border: none;
       border-radius: 0;
+      height: auto; /* inset:0 stretches — never the drag-handle height */
       min-height: 0;
+    }
+
+    /* ── Stage resize handle (v1.2.0): slim grabber between the preview
+       stage and the transport bar; drag ↕ / ArrowUp / ArrowDown resize the
+       stage via --stage-h, double-click resets. Wired by main.js. ── */
+    #stage-resize-handle {
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 12px;
+      margin: -2px 0;
+      border-radius: 7px;
+      cursor: ns-resize;
+      touch-action: none;
+      user-select: none;
+      color: var(--ink);
+    }
+    #stage-resize-handle .grip {
+      font-size: 11px;
+      line-height: 1;
+      letter-spacing: 4px;
+      margin-right: -4px; /* balance the trailing letter-spacing */
+      pointer-events: none;
+    }
+    #stage-resize-handle:hover { color: var(--accent); }
+    #stage-resize-handle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
 
     /* ── Transport bar (SPEC-VID-002 REQ-105) ── */
@@ -525,6 +560,9 @@
           <video id="preview-video" playsinline></video>
           <canvas id="overlay-canvas"></canvas>
           <button id="preview-fullscreen" type="button" title="Enlarge preview" aria-label="Enlarge preview">⛶</button>
+        </div>
+        <div id="stage-resize-handle" role="separator" aria-orientation="horizontal" aria-valuemin="220" tabindex="0" aria-label="Resize preview height" title="Drag to resize the preview — double-click resets the height">
+          <span class="grip" aria-hidden="true">⋮⋮</span>
         </div>
         <div id="transport-bar" role="group" aria-label="Playback transport">
           <button id="transport-start" type="button" title="Jump to start" aria-label="Jump to start">⏮</button>

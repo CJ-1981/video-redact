@@ -12,7 +12,7 @@ Local, in-browser video redaction: faces and license plates are detected automat
 | --- | --- |
 | ![Review — pixel-truthful preview, timeline chips, track list](docs/screenshots/03-review.png) | ![Export — download started, all steps done](docs/screenshots/04-export.png) |
 
-1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.1.0 · built 2026-10-29`).
+1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.2.0 · built 2026-10-29`).
 2. **Capability** — after opening a file, the app reports container/codec/resolution/fps/audio plus decode and encode probes *before* Analyze is offered. Undecodable files are blocked here, with guidance.
 3. **Review** — detected tracks render as colored chips over their redacted span; the preview is pixel-truthful (it draws the exact pixelation the export burns in). Toggle any track, scrub, or draw manual regions (`B`).
 4. **Export** — re-encoded H.264/MP4 (VP9/WebM fallback) with redactions burned in; original audio is packet-copied bit-for-bit.
@@ -93,7 +93,7 @@ npm run gate          # lint && typecheck && test && build
 
 ## Versioning
 
-Current version: **1.1.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.1.0 · built 2026-10-29`) and in the console at boot. Dev mode (unbuilt) shows `dev build (unbuilt)`.
+Current version: **1.2.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.2.0 · built 2026-10-29`) and in the console at boot. Dev mode (unbuilt) shows `dev build (unbuilt)`.
 
 ## Known limitations (v1)
 

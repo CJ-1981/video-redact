@@ -6,6 +6,14 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-10-29
+
+Preview ergonomics follow-up to SPEC-VID-002: the preview stage is resizable.
+
+### Added
+
+- Draggable preview-height handle between the preview stage and the transport bar: drag it up/down to resize the preview (clamped to 220 px – 75% of the viewport height, recomputed while dragging), double-click to reset to the default height, and ArrowUp/ArrowDown on the focused handle steps ±24 px (`role="separator"` semantics with a live `aria-valuenow`). The stage height is driven by the `--stage-h` custom property and every change re-scales the pixel-truthful overlay through the editor's existing `redraw()` path — the same seam as fullscreen/zoom.
+
 ## [1.1.0] — 2026-10-29
 
 SPEC-VID-002 — review UX & manual redaction enhancements from real-world field feedback.

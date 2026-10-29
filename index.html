@@ -157,6 +157,8 @@
     }
     #app-header h1 span { color: var(--accent); }
     #app-header .tagline { color: var(--ink); font-size: 12px; margin-top: 2px; }
+    /* v1.6.0: Clear + Open-another-file share one header slot */
+    #header-actions { display: flex; align-items: center; gap: 8px; flex: none; }
     #stepper {
       display: flex;
       gap: 4px;
@@ -678,7 +680,14 @@
       <h1>Video <span>Redact</span></h1>
       <div class="tagline">Faces &amp; plates pixelated locally — nothing leaves this device</div>
     </div>
-    <button id="change-file" type="button" hidden>Open another file</button>
+    <div id="header-actions">
+      <!-- v1.6.0: full unload & reset — aborts in-flight passes, frees the
+           decoder + blob URL, sweeps export temps, resets every panel back to
+           the landing view. Hidden at the gate step (nothing to clear);
+           shown from ready → done. Wired by main.js clearAll(). -->
+      <button id="clear-file" type="button" hidden>✕ Clear</button>
+      <button id="change-file" type="button" hidden>Open another file</button>
+    </div>
     <ol id="stepper" aria-label="Workflow steps">
       <li id="step-gate" data-step="gate" aria-current="step"><span class="num">①</span> Capability check</li>
       <li id="step-analyze" data-step="analyze"><span class="num">②</span> Analyze</li>

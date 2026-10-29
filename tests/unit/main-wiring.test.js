@@ -349,6 +349,84 @@ describe('main-wiring: threshold compare view model (v1.5.0 REQ-113/114)', () =>
   });
 });
 
+describe('main-wiring: CLEAR transition (v1.6.0 clear-all)', () => {
+  const STEPS = ['gate', 'ready', 'analyzing', 'review', 'exporting', 'done'];
+
+  it("deriveStep: CLEAR lands on 'gate' from every legal step", () => {
+    for (const step of STEPS) {
+      expect(main.deriveStep(step, 'CLEAR')).toBe('gate');
+    }
+  });
+
+  it('CLEAR is total — no step can escape the machine via it, and gate re-arms FILE_OPENED only', () => {
+    for (const step of STEPS) {
+      const next = main.deriveStep(step, 'CLEAR');
+      expect(next).toBe('gate');
+      // The landing step renders as the gate stepper entry…
+      expect(main.stepperModel(next).current).toBe('step-gate');
+      // …and only FILE_OPENED / CLEAR are legal from there.
+      expect(main.deriveStep(next, 'ANALYZE_START')).toBeNull();
+      expect(main.deriveStep(next, 'EXPORT_START')).toBeNull();
+    }
+  });
+
+  it('CLEAR from an unknown state still derives null (machine stays closed)', () => {
+    expect(main.deriveStep('bogus', 'CLEAR')).toBeNull();
+  });
+
+  it('CLEAR is a legal transition from every step the reducer knows about', () => {
+    // Structural guard: every step listed in the reducer carries CLEAR — a
+    // future step added without it fails here instead of trapping users in
+    // a state the Clear button cannot leave.
+    for (const step of STEPS) {
+      expect(main.deriveStep(step, 'CLEAR'), step).toBe('gate');
+    }
+  });
+});
+
+describe('main-wiring: DEFAULT_SETTINGS factory (v1.6.0)', () => {
+  it('returns the baked defaults: face 0.60, plate 0.25, dashcam off, plateStride unset', () => {
+    expect(main.DEFAULT_SETTINGS()).toEqual({
+      confFace: 0.6,
+      confPlate: 0.25,
+      dashcamMode: false,
+      plateStride: undefined,
+    });
+  });
+
+  it('returns a FRESH object per call — the shared default can never be mutated', () => {
+    const a = main.DEFAULT_SETTINGS();
+    const b = main.DEFAULT_SETTINGS();
+    expect(a).not.toBe(b);
+    a.confFace = 0.9;
+    a.dashcamMode = true;
+    expect(main.DEFAULT_SETTINGS()).toEqual({
+      confFace: 0.6,
+      confPlate: 0.25,
+      dashcamMode: false,
+      plateStride: undefined,
+    });
+  });
+
+  it('agrees with the slider-range defaults (single source of truth, REQ-113)', () => {
+    const s = main.DEFAULT_SETTINGS();
+    expect(s.confFace).toBe(main.THRESHOLD_FACE_RANGE.default);
+    expect(s.confPlate).toBe(main.THRESHOLD_PLATE_RANGE.default);
+  });
+});
+
+describe('main-wiring: fileInputNeedsReset (v1.6.0)', () => {
+  it('flags a populated input (same-file re-select would not fire change)', () => {
+    expect(main.fileInputNeedsReset('video.mp4')).toBe(true);
+  });
+
+  it('accepts an already-empty input and non-string values', () => {
+    expect(main.fileInputNeedsReset('')).toBe(false);
+    expect(main.fileInputNeedsReset(undefined)).toBe(false);
+    expect(main.fileInputNeedsReset(null)).toBe(false);
+  });
+});
+
 describe('main-wiring: module import safety', () => {
   it('imports in node without touching the DOM (no auto-mount side effects)', async () => {
     // Re-import resolves the same namespace; assert the pure surface exists.
@@ -368,6 +446,8 @@ describe('main-wiring: module import safety', () => {
       'buildThresholdPanels',
       'formatThresholdCaption',
       'applyThresholdLevel',
+      'DEFAULT_SETTINGS',
+      'fileInputNeedsReset',
       'mountApp',
     ]) {
       expect(typeof mod[name], `main.${name}`).toBe('function');

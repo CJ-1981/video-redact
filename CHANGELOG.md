@@ -6,6 +6,14 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-29
+
+A "✕ Clear" button that unloads the current video and resets the whole app to the landing view.
+
+### Added
+
+- Clear button (header, next to "Open another file"): aborts any in-flight analysis or export first (their stale callbacks are dropped via the generation counter), destroys the review editor (cancelling the preview frame loops and listeners), revokes the preview blob URL, unloads the video element (`src` removed + `load()` — decoder freed) and disposes the mediabunny `Input`, then sweeps any leftover OPFS export temp (`exports/redact-export-*`, the REQ-019/AC-14 hygiene on explicit clear). The file input is reset so re-selecting the SAME file fires `change` again, the stepper returns to the Capability-check gate via a new total `CLEAR` transition (legal from every step), and every panel returns to its landing state: capability report cleared, sensitivity sliders restored from a single `DEFAULT_SETTINGS()` factory (face 0.60 / plate 0.25, dashcam off), progress bars to 0, track list + timeline emptied, export status/progress cleared, transport reset (pause glyph, 1×, 0:00.0), toasts dismissed — confirmed with a "Cleared — ready for the next video." toast. The model cache (IndexedDB), the preview-stage height, the version badge and the model attribution panel survive a clear.
+
 ## [1.5.0] — 2026-10-29
 
 Configurable detection sensitivity and a single-frame threshold comparison preview (SPEC-VID-002 amendments REQ-113/114).

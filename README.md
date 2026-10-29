@@ -39,6 +39,7 @@ Then open <http://localhost:8000/dist/index.html>. Or skip the local setup entir
 - **Tracking** — detections are linked into persistent labeled tracks ("Face #1", "Plate #4") with IoU-gated association and a constant-velocity Kalman filter; gaps are interpolated, and every span is padded ±5 frame periods and dilated 15% (7.5% per side) so no unredacted frame of a detected object survives (privacy-critical AC-05).
 - **Review** — timeline chips, per-track redact/keep-visible toggles, manual drawn regions, and a pixel-truthful preview (preview and export share the same pixelation code path).
 - **Export** — every frame is decoded, redactions burned into the pixels, and the video re-encoded (H.264/MP4 primary → software H.264 → VP9/WebM fallback ladder); audio packets are copied without re-encoding (AAC → MP4, Opus/Vorbis → WebM). Output streams to disk-backed storage (OPFS / File System Access) with progress and cancellation.
+- **Clear** — the header "✕ Clear" button aborts any in-flight pass, unloads the video (blob URL, decoder, export temps) and resets every panel to the landing view; the model cache and your preview-stage height survive.
 
 ## Privacy
 

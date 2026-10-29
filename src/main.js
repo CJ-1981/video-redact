@@ -28,10 +28,26 @@
  *   formatThresholdCaption(panel)      "≥0.60 · 2 faces · 1 plate" (REQ-114)
  *   applyThresholdLevel(level, settings)
  *                                      panel click → both slider values (REQ-114)
+ *   DEFAULT_SETTINGS()                 fresh default-settings factory (v1.6.0):
+ *                                      the single source of truth used by BOTH
+ *                                      the initial mount state and clearAll
+ *   fileInputNeedsReset(value)         true when a file input still carries a
+ *                                      selection (v1.6.0 — clearing it lets
+ *                                      re-selecting the SAME file re-fire
+ *                                      the input's `change` event)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
  * It never mutates module behavior — modules are integrated as-is.
+ *
+ * v1.6.0 wiring: the header #clear-file button ("✕ Clear") calls clearAll() —
+ * aborts any in-flight analyze/export, bumps the generation counter so stale
+ * callbacks drop, destroys the editor (cancels rVFC/rAF loops), revokes the
+ * preview blob URL, unloads the video element (decoder free), disposes the
+ * mediabunny Input, sweeps leftover OPFS export temps, resets the file input
+ * (re-selecting the same file re-fires `change`), and restores every panel to
+ * the landing view via the stepper's 'CLEAR' transition (every step → gate).
+ * The model cache (IndexedDB), the stage height and the version badge SURVIVE.
  *
  * SPEC-VID-002 wiring (all DOM-side, untested in node like the rest of
  * mountApp): REQ-103 trim hooks (editor chip-edge drag → trimTrack),
@@ -111,32 +127,43 @@ const BUILD_DATE = globalThis.__BUILD_DATE__ ?? '';
  * before ready; no Export without review state"). Cancellation is modeled
  * as the success event carrying a cancelled flag (AC-03 partial review;
  * export cancel is an EXPORT_FAIL with a cancelled marker at the callsite).
+ *
+ * v1.6.0: 'CLEAR' (the header ✕ Clear button) is legal from EVERY step and
+ * always lands on 'gate' — the app shell resets to the landing view; the
+ * DOM-side clearAll() owns the teardown (abort, editor destroy, media
+ * unload, panel reset) that makes the state jump safe.
  */
 const STEP_TRANSITIONS = {
   gate: {
     FILE_OPENED: 'ready',
+    CLEAR: 'gate',
   },
   ready: {
     ANALYZE_START: 'analyzing',
     FILE_OPENED: 'ready',
+    CLEAR: 'gate',
   },
   analyzing: {
     ANALYZE_FINISH: 'review',
     ANALYZE_FAIL: 'ready',
+    CLEAR: 'gate',
   },
   review: {
     ANALYZE_START: 'analyzing', // re-analyze (e.g. dashcam toggle changed)
     EXPORT_START: 'exporting',
     FILE_OPENED: 'ready',
+    CLEAR: 'gate',
   },
   exporting: {
     EXPORT_DONE: 'done',
     EXPORT_FAIL: 'review',
+    CLEAR: 'gate',
   },
   done: {
     ANALYZE_START: 'analyzing',
     EXPORT_START: 'exporting', // re-export after tweaking tracks
     FILE_OPENED: 'ready',
+    CLEAR: 'gate',
   },
 };
 
@@ -146,7 +173,7 @@ const STEP_TRANSITIONS = {
  *
  * @param {import('./types.js').AppState['step']} step
  * @param {'FILE_OPENED'|'ANALYZE_START'|'ANALYZE_FINISH'|'ANALYZE_FAIL'|
- *          'EXPORT_START'|'EXPORT_DONE'|'EXPORT_FAIL'} event
+ *          'EXPORT_START'|'EXPORT_DONE'|'EXPORT_FAIL'|'CLEAR'} event
  * @returns {import('./types.js').AppState['step'] | null}
  */
 export function deriveStep(step, event) {
@@ -437,6 +464,44 @@ export function applyThresholdLevel(level, settings = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Clear/reset settings model (pure; v1.6.0)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fresh default analysis settings (v1.6.0). PURE factory — a NEW object per
+ * call so the shared default can never be mutated by a caller. The SINGLE
+ * source of truth for both the initial mount state and clearAll's reset:
+ * the analyze-panel controls are always restored from here, never from
+ * hand-copied literals. Values are the pre-1.5.0 baked gates (face 0.60,
+ * plate 0.25 — THRESHOLD_*__RANGE defaults), dashcam off, plateStride left
+ * undefined so analyze.js applies its own DEFAULT_PLATE_STRIDE.
+ *
+ * @returns {{confFace: number, confPlate: number, dashcamMode: boolean,
+ *            plateStride: number | undefined}}
+ */
+export function DEFAULT_SETTINGS() {
+  return {
+    confFace: THRESHOLD_FACE_RANGE.default,
+    confPlate: THRESHOLD_PLATE_RANGE.default,
+    dashcamMode: false,
+    plateStride: undefined,
+  };
+}
+
+/**
+ * True when a file input still carries a selection (v1.6.0). An input with a
+ * non-empty value will NOT fire another `change` event if the user re-selects
+ * the SAME file — the classic pitfall clearAll must defeat. Trivial, but
+ * exported so the contract is pinned by a unit test.
+ *
+ * @param {unknown} value A file input's `.value`.
+ * @returns {boolean}
+ */
+export function fileInputNeedsReset(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+// ---------------------------------------------------------------------------
 // REQ-021 error mapping tables (pure)
 // ---------------------------------------------------------------------------
 
@@ -653,6 +718,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     attribution: $('model-attribution'),
     toastRegion: $('toast-region'),
     changeFile: /** @type {HTMLButtonElement | null} */ ($('change-file')),
+    clearFile: /** @type {HTMLButtonElement | null} */ ($('clear-file')),
     appVersion: $('app-version'),
   };
 
@@ -765,6 +831,10 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     }
     if (els.exportCancel) els.exportCancel.hidden = !exporting;
     if (els.changeFile) els.changeFile.hidden = app.step === 'gate';
+    // v1.6.0: the Clear button mirrors #change-file — hidden at the gate
+    // step (nothing to clear), shown whenever a file is loaded so a click
+    // can also abort an in-flight analyze/export.
+    if (els.clearFile) els.clearFile.hidden = app.step === 'gate';
   }
 
   function showIntake() {
@@ -822,6 +892,9 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   renderVersionBadge();
   applyStepper();
   updateButtons();
+  // v1.6.0: the analyze-panel controls start from the SAME factory clearAll
+  // restores them with — one source of truth for the default settings.
+  applySettings(DEFAULT_SETTINGS());
   showIntake();
   void sweepExportTemps();
 
@@ -1053,6 +1126,147 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     });
   }
   els.changeFile?.addEventListener('click', () => els.fileInput?.click());
+
+  // --- Clear (v1.6.0): full unload & reset back to the landing view ----------
+  //
+  // Teardown checklist (in order):
+  //   a. abort in-flight analyze/export + bump app.gen (stale callbacks drop);
+  //   b. editor.destroy() — cancels the rVFC/rAF preview loop, removes every
+  //      editor listener (timeline, track list, canvas drag, Escape);
+  //   c. media unload — revoke the blob URL, video.removeAttribute('src') +
+  //      video.load() (frees the decoder, currentTime → 0), dispose the
+  //      mediabunny Input, drop app.file/input/meta/caps/tracks references;
+  //   d. OPFS hygiene — sweep leftover exports/redact-export-* temps;
+  //   e. #file-input.value = '' — re-selecting the SAME file re-fires change;
+  //   f. UI reset — stepper → gate ('CLEAR' transition), capability report,
+  //      analyze panel (sliders via DEFAULT_SETTINGS, dashcam, progress,
+  //      status, compare), track list + timeline, export panel, transport,
+  //      fullscreen/zoom, toasts, back to the intake view;
+  //   g. confirmation toast.
+  //   SURVIVES: the model cache (IndexedDB — clearModelCache is deliberately
+  //   NOT used), the preview-stage height, the version badge, the model
+  //   attribution panel.
+
+  /**
+   * OPFS hygiene for an explicit clear (v1.6.0): silently delete any leftover
+   * `exports/redact-export-*` temp — the AC-14 crash sweep's delete path
+   * without the prompt (REQ-019 hygiene applies on clear too).
+   */
+  async function purgeExportTemps() {
+    try {
+      const root = await globalThis.navigator?.storage?.getDirectory?.();
+      if (!root) return;
+      const dir = await root.getDirectoryHandle(STAGING_DIR);
+      if (typeof dir.entries !== 'function') return;
+      for await (const [name, kind] of /** @type {AsyncIterableIterator<[string, string]>} */ (dir.entries())) {
+        if (kind !== 'file' || !String(name).startsWith(STAGING_PREFIX)) continue;
+        try {
+          await discardExportTemp(`${STAGING_DIR}/${name}`);
+        } catch {
+          /* a stuck temp must never block a clear */
+        }
+      }
+    } catch {
+      /* no OPFS or no exports/ dir — nothing to clean */
+    }
+  }
+
+  /**
+   * Push a settings object into the analyze-panel controls (sliders, live
+   * readouts, dashcam toggle). DOM-side helper shared by the initial mount
+   * state and clearAll — both start from DEFAULT_SETTINGS().
+   * @param {{confFace: number, confPlate: number, dashcamMode: boolean}} settings
+   */
+  function applySettings(settings) {
+    if (els.confFace) els.confFace.value = String(settings.confFace);
+    if (els.confPlate) els.confPlate.value = String(settings.confPlate);
+    if (els.dashcamToggle) els.dashcamToggle.checked = settings.dashcamMode === true;
+    syncThresholdReadouts();
+  }
+
+  function clearAll() {
+    // (a) In-flight work dies FIRST: abort the passes, then bump the
+    // generation so every stale async completion (analyze, export, compare)
+    // drops silently instead of touching the reset UI.
+    if (app.step === 'analyzing') analyzeCtl?.abort();
+    if (app.step === 'exporting') exportCtl?.abort();
+    analyzeCtl = null;
+    exportCtl = null;
+    app.gen += 1;
+
+    // (b) Editor teardown: cancels the preview frame loop and detaches every
+    // editor-side listener before the media element is unloaded.
+    editor?.destroy();
+    editor = null;
+
+    // (c) Media unload: free the decoder + the blob, drop all file state.
+    if (app.objectUrl) {
+      URL.revokeObjectURL(app.objectUrl);
+      app.objectUrl = null;
+    }
+    const v = els.video;
+    if (v) {
+      v.pause();
+      v.removeAttribute('src');
+      v.load(); // empty resource selection: frees the decoder, resets time
+      v.playbackRate = 1;
+    }
+    // mediabunny Input.dispose() cancels in-flight reads and closes decoders
+    // (verified in node_modules/mediabunny .d.ts); degrade to a plain
+    // reference drop if a future build drops the method.
+    const input = /** @type {{dispose?: () => void} | null} */ (app.input);
+    if (input && typeof input.dispose === 'function') {
+      try {
+        input.dispose();
+      } catch {
+        /* already disposed / racing the abort — the drop is what matters */
+      }
+    }
+    app.input = null;
+    app.file = null;
+    app.meta = null;
+    app.caps = null;
+    app.tracks = [];
+    app.manualNextId = 1;
+
+    // (d) OPFS hygiene (REQ-019/AC-14 on explicit clear).
+    void purgeExportTemps();
+
+    // (e) Without this, re-selecting the SAME file never fires `change`.
+    if (els.fileInput && fileInputNeedsReset(els.fileInput.value)) {
+      els.fileInput.value = '';
+    }
+
+    // (f) UI reset — the exact landing view.
+    app.step = deriveStep(app.step, 'CLEAR') ?? 'gate';
+    applyStepper();
+    updateButtons();
+    applySettings(DEFAULT_SETTINGS());
+    resetAnalyzeUi();
+    resetExportUi();
+    if (els.trackList) els.trackList.textContent = '';
+    if (els.chips) els.chips.replaceChildren();
+    if (els.playhead) els.playhead.style.left = '0%';
+    refreshTrackUi(); // the "No tracks yet" hint returns
+    renderCapReport(null, null); // hides + empties the capability report
+    renderGuidance({ messages: [] }, null); // hides + empties the guidance
+    if (els.thresholdPanels) els.thresholdPanels.replaceChildren();
+    if (els.compareStatus) els.compareStatus.textContent = '';
+    if (els.compareTime) {
+      els.compareTime.max = '0';
+      els.compareTime.value = '0';
+    }
+    syncSpeedSelects();
+    updateTransportUi(); // pause glyph, 1× selectors, 0:00.0 timecodes
+    exitPreview(); // leave fullscreen/zoom if the stage was enlarged
+    if (els.toastRegion) els.toastRegion.replaceChildren();
+    showIntake();
+
+    // (g) Confirmation. The model attribution panel is untouched.
+    toast('Cleared — ready for the next video.', { kind: 'ok' });
+  }
+
+  els.clearFile?.addEventListener('click', () => clearAll());
 
   // --- Analyze pass (REQ-009 / AC-03) --------------------------------------------
 

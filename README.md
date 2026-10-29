@@ -55,6 +55,22 @@ Then open <http://localhost:8000/dist/index.html>.
 
 4K HEVC (iPhone) input requires hardware HEVC decode in the browser — the capability report tells you before any work starts, and suggests re-recording in H.264 ("Most Compatible") when unavailable.
 
+## Android recordings
+
+Yes — modern Android camera output is the app's fully-supported path. Recorded on-device or moved to a desktop:
+
+| Recording | Support |
+| --- | --- |
+| Standard camera video (MP4, H.264 + AAC) | Fully supported — hardware decode, hardware encode, audio packet-copied |
+| Screen recordings (MP4/H.264, WebM/VP9) | Fully supported; VP9 input takes the WebM export branch (Opus audio copied) |
+| Third-party app containers (MKV, TS) | Readable containers; codec support follows the browser's decoders |
+| "High efficiency" HEVC mode (flagships) | Needs hardware HEVC decode in the browser; the capability report blocks with guidance if unavailable |
+| HDR10+/HLG 10-bit | Decodes; exports tone-mapped to 8-bit SDR (HDR metadata not preserved — warned in the UI) |
+| Slow motion (120/240 fps) | Works; detection time scales linearly with frame count (a 1-min 240 fps clip ≈ 14,400 frames to sweep) |
+| 8K (Samsung flagships) | H.264 export beyond probed levels is unsupported — the capability report offers VP9/WebM fallback or explains the limit |
+
+**On-device vs. desktop.** Chrome for Android can open files, decode (including hardware HEVC on modern SoCs), and deliver exports via the download path — but 4K analysis on a phone runs for minutes and recent Android Chrome may not expose WebGPU for every device. The practical recommendation: **record on Android, process on a desktop Chrome/Edge**, where WebGPU makes analysis roughly 10–20× faster than the WASM fallback.
+
 ## Development
 
 ```sh

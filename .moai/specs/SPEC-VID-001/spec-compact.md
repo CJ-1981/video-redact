@@ -1,6 +1,6 @@
 # SPEC-VID-001 — Compact (run-phase load artifact)
 
-Source: spec.md v1.0.1. Requirements GEARS-notation, condensed. Full text: `spec.md`.
+Source: spec.md v1.0.1. Status: implemented (v1.0.0 shipped 2026-10-29 — see CHANGELOG.md). Requirements GEARS-notation, condensed. Full text: `spec.md`.
 
 ## Requirements (21, in 5 modules)
 

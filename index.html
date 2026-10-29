@@ -366,10 +366,24 @@
 
     /* ── Footer + toasts ── */
     #keyboard-hints {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
       padding: 10px 20px;
       border-top: 1px solid var(--line);
       color: var(--ink);
       font-size: 12px;
+    }
+    #keyboard-hints .hints { min-width: 0; }
+    #app-version {
+      flex: none;
+      font-family: var(--font-num);
+      font-size: 11px;
+      letter-spacing: 0.02em;
+      color: var(--ink);
+      opacity: 0.85;
+      white-space: nowrap;
     }
     #toast-region {
       position: fixed;
@@ -514,7 +528,8 @@
   </main>
 
   <footer id="keyboard-hints">
-    <kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>←</kbd>/<kbd>→</kbd> frame step&ensp;·&ensp;<kbd>B</kbd> draw manual box&ensp;·&ensp;click a timeline chip to scrub &amp; toggle
+    <span class="hints"><kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>←</kbd>/<kbd>→</kbd> frame step&ensp;·&ensp;<kbd>B</kbd> draw manual box&ensp;·&ensp;click a timeline chip to scrub &amp; toggle</span>
+    <span id="app-version" class="num"></span>
   </footer>
 
   <div id="toast-region" role="status" aria-live="polite"></div>

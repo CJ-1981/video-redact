@@ -23,6 +23,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEV_TAG = '<script type="module" src="./src/main.js"></script>';
 
+// Build-time stamping (v1.0.0 formal semver start): the version comes from
+// package.json (single source of truth) and the build date from the current
+// UTC calendar date. Injected as esbuild `define` member-expression keys so
+// src/main.js's `globalThis.__APP_VERSION__` reads become inline literals in
+// the bundle; unbundled dev mode falls back to 'dev' / '' at runtime.
+const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+const APP_VERSION = String(pkg.version ?? 'dev');
+const BUILD_DATE = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+
 const result = await build({
   entryPoints: [join(ROOT, 'src', 'main.js')],
   bundle: true,
@@ -31,6 +40,10 @@ const result = await build({
   write: false,
   // CDN bare specifiers resolve through the importmap embedded in index.html.
   external: ['mediabunny', 'onnxruntime-web'],
+  define: {
+    'globalThis.__APP_VERSION__': JSON.stringify(APP_VERSION),
+    'globalThis.__BUILD_DATE__': JSON.stringify(BUILD_DATE),
+  },
   logLevel: 'warning',
 });
 

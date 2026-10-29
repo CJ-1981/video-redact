@@ -14,6 +14,7 @@
  *   metaSummaryRows(meta)              MediaMeta → table view model
  *   inferenceRow(caps)                 EP policy → AC-17 "Inference" row
  *   epLabel(ep)                        effective EP → status suffix label
+ *   formatVersionBadge({version, buildDate})  footer version badge text
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -55,6 +56,15 @@ const MODEL_DISPLAY_NAMES = {
   yunet: 'YuNet face detection',
   'plate-yolov9t': 'YOLOv9-t license plates',
 };
+
+/**
+ * Build-time stamps (v1.0.0 formal semver start). tools/inline.mjs injects
+ * real values via esbuild `define` on the `globalThis.*` member expressions,
+ * so the bundled dist shows the shipped version + build UTC date; unbundled
+ * dev mode (npm run dev) falls back to the 'dev' badge.
+ */
+const APP_VERSION = globalThis.__APP_VERSION__ ?? 'dev';
+const BUILD_DATE = globalThis.__BUILD_DATE__ ?? '';
 
 // ---------------------------------------------------------------------------
 // Stepper state machine: gate → ready → analyzing → review → exporting → done
@@ -187,6 +197,25 @@ export function formatClock(sec) {
   const s = Math.round((sec - m * 60) * 10) / 10;
   if (s >= 60) return `${m + 1}:00.0`;
   return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`;
+}
+
+/**
+ * Version + build date → footer badge text (#app-version). The shipped
+ * artifact stamps both at build time (tools/inline.mjs esbuild `define`);
+ * dev mode runs unbundled and shows the fallback badge.
+ *
+ *   {version: '1.0.0', buildDate: '2026-10-29'} → 'v1.0.0 · built 2026-10-29'
+ *   {version: '1.0.0', buildDate: ''}           → 'v1.0.0'
+ *   {version: 'dev'} / missing                  → 'dev build (unbuilt)'
+ *
+ * @param {{version?: string | null, buildDate?: string | null}} [parts]
+ * @returns {string}
+ */
+export function formatVersionBadge({ version, buildDate } = {}) {
+  const v = String(version ?? '').trim();
+  if (v.length === 0 || v === 'dev') return 'dev build (unbuilt)';
+  const d = String(buildDate ?? '').trim();
+  return d.length > 0 ? `v${v} · built ${d}` : `v${v}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +410,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     attribution: $('model-attribution'),
     toastRegion: $('toast-region'),
     changeFile: /** @type {HTMLButtonElement | null} */ ($('change-file')),
+    appVersion: $('app-version'),
   };
 
   // --- REQ-004 secure-context gate: block everything, wire nothing --------
@@ -546,6 +576,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   // --- Startup renders --------------------------------------------------------
 
   renderAttribution();
+  renderVersionBadge();
   applyStepper();
   updateButtons();
   showIntake();
@@ -562,6 +593,17 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       li.textContent = `${display} (${model.version}, ${formatBytes(model.bytes)}) — ${model.license} — ${model.source}`;
       ul.appendChild(li);
     }
+  }
+
+  /**
+   * Footer version badge (#app-version) + the once-per-boot console echo for
+   * support diagnostics — the exact shipped build, copied verbatim from the
+   * badge into bug reports.
+   */
+  function renderVersionBadge() {
+    const badge = formatVersionBadge({ version: APP_VERSION, buildDate: BUILD_DATE });
+    if (els.appVersion) els.appVersion.textContent = badge;
+    console.info(`video-redact ${badge} — all processing stays on this device`);
   }
 
   /** AC-14 crash-recovery sweep: offer deletion of orphaned export temps. */

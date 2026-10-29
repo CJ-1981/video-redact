@@ -54,3 +54,14 @@
   - gate: `npm run gate` (lint 0 · typecheck 0 · 303 tests · build 121.1 KiB dist) exit 0
   - artifacts: dist/index.html = single self-contained file (importmap-pinned CDN deps, no local src references)
 - phase_19_git: committed to main (user-selected direct-to-main; no remote — no push)
+
+## Sync Phase (2026-10-29)
+
+- sync_manager_docs: docs authored from repo sources (module headers, index.html, package.json, tools/, spec set)
+- docs_authored: README.md (root) · CHANGELOG.md · .moai/project/product.md · .moai/project/structure.md · .moai/project/tech.md · .moai/project/codemaps/{pipeline,modules,state}.md · docs/README.md
+- screenshots: docs/screenshots/{01-landing,02-capability,03-review,04-export}.png (1280×800@2x, captured from the real dist via tools/capture-docs.mjs; version badge visible in shots)
+- spec_transition: spec.md frontmatter status planned → implemented (body untouched); spec-compact.md header notes the implemented status
+- release_version: 1.0.0 (package.json single source of truth; build stamps footer badge + console at boot; build date = UTC date of `npm run build`)
+- changelog: [1.0.0] — 2026-10-29 (Keep a Changelog; features, verification evidence, engineering fixes: YuNet 0-255 BGR + double-sigmoid scoring, CORS-safe HF model mirror, OPFS temp/blob download race, preview dilation parity)
+- verification_at_sync: unit 310/310 re-run green (12 files) · `npm run build` re-run green (dist 125,085 bytes, APP_VERSION "1.0.0" + BUILD_DATE stamped) · E2E 6/6 and gate from final run record
+- sync_complete_at: 2026-10-29

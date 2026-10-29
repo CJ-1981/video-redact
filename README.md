@@ -1,0 +1,87 @@
+# Video Redact
+
+Local, in-browser video redaction: faces and license plates are detected automatically, reviewed on a timeline, and pixelated **burned into the exported pixels** — nothing is ever uploaded. There is no server; the shipped artifact is a single self-contained `index.html`.
+
+| Landing | Capability report |
+| --- | --- |
+| ![Landing — drop zone and stepper](docs/screenshots/01-landing.png) | ![Capability report before analyze](docs/screenshots/02-capability.png) |
+
+| Review | Export |
+| --- | --- |
+| ![Review — pixel-truthful preview, timeline chips, track list](docs/screenshots/03-review.png) | ![Export — download started, all steps done](docs/screenshots/04-export.png) |
+
+1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.0.0 · built 2026-10-29`).
+2. **Capability** — after opening a file, the app reports container/codec/resolution/fps/audio plus decode and encode probes *before* Analyze is offered. Undecodable files are blocked here, with guidance.
+3. **Review** — detected tracks render as colored chips over their redacted span; the preview is pixel-truthful (it draws the exact pixelation the export burns in). Toggle any track, scrub, or draw manual regions (`B`).
+4. **Export** — re-encoded H.264/MP4 (VP9/WebM fallback) with redactions burned in; original audio is packet-copied bit-for-bit.
+
+## Quick start
+
+Requires Node >= 20 and a Chromium-based browser.
+
+```sh
+npm install
+npm run build        # bundles src/ into the single-file dist/index.html
+npm run dev          # serves the repo root at http://127.0.0.1:8000
+```
+
+Then open <http://localhost:8000/dist/index.html>.
+
+**Serve over localhost — never `file://`.** The app needs secure-context APIs (WebCodecs, IndexedDB, OPFS, WASM); under `file://` it deliberately blocks all processing and shows serve instructions (`python3 -m http.server 8000`, `npx serve`). `python3 -m http.server 8000` or `npx serve` from the repo root work just as well.
+
+## What it does
+
+- **Ingest** — demuxes `.mov` / MP4 / WebM locally via mediabunny 1.63.0, including iPhone HEVC `.mov` (hardware decode required) and ProRes via the `@mediabunny/prores` extension. Metadata and rotation are reported before any processing.
+- **Capability gate** — per-track decode probes (`track.canDecode()`) and export-encode probes (WebCodecs `isConfigSupported`, H.264 level ladder + VP9) are shown as a report; undecodable input is blocked with actionable guidance and no partial processing.
+- **Detection** — YuNet face detection (2023mar, 640×640 letterboxed) and YOLOv9-t-640 end-to-end license-plate detection, running via onnxruntime-web 1.31.1 with a WebGPU → WASM execution-provider ladder. "Dashcam mode" adds a second tiled pass for small/distant plates.
+- **Tracking** — detections are linked into persistent labeled tracks ("Face #1", "Plate #4") with IoU-gated association and a constant-velocity Kalman filter; gaps are interpolated, and every span is padded ±5 frame periods and dilated 15% (7.5% per side) so no unredacted frame of a detected object survives (privacy-critical AC-05).
+- **Review** — timeline chips, per-track redact/keep-visible toggles, manual drawn regions, and a pixel-truthful preview (preview and export share the same pixelation code path).
+- **Export** — every frame is decoded, redactions burned into the pixels, and the video re-encoded (H.264/MP4 primary → software H.264 → VP9/WebM fallback ladder); audio packets are copied without re-encoding (AAC → MP4, Opus/Vorbis → WebM). Output streams to disk-backed storage (OPFS / File System Access) with progress and cancellation.
+
+## Privacy
+
+- **Detection only** — no face recognition, no OCR, no license-plate character reading, no identity matching.
+- **All processing on-device** — video bytes never leave the machine. The only network requests are the pinned CDN libraries and the two ONNX model weights on **first run** (about 8 MB of weights; ≤ 40 MB total first load); afterwards weights load from an IndexedDB cache (`video-redact-models`) with zero network traffic.
+- **No telemetry, no analytics, no fonts, no accounts.** A Content-Security-Policy enumerates every allowed network host; nothing else can egress.
+- **Model licenses & attribution** — YuNet ([opencv/face_detection_yunet](https://huggingface.co/opencv/face_detection_yunet), MIT) and YOLOv9-t license plates ([ankandrew/open-image-models](https://github.com/ankandrew/open-image-models), MIT repo license), shown in the app's Models panel. The plate model is fetched from a Hugging Face mirror of the upstream GitHub release asset because GitHub release assets send no CORS headers.
+
+## Browser support
+
+| Browser | Inference | Notes |
+| --- | --- | --- |
+| Chrome / Edge (recent) | WebGPU, WASM fallback | Recommended |
+| Safari | WASM directly (WebKit policy) | Works; slower analyze |
+| Firefox | WebGPU attempt, WASM fallback | Works; capability gate explains limits |
+
+4K HEVC (iPhone) input requires hardware HEVC decode in the browser — the capability report tells you before any work starts, and suggests re-recording in H.264 ("Most Compatible") when unavailable.
+
+## Development
+
+```sh
+npm run dev           # static server on 127.0.0.1:8000 (no-store; serves src/ ES modules)
+npm test              # vitest unit suite (node environment)
+npm run test:coverage # v8 coverage; >= 85% line gate on the 8 logic modules
+npm run test:e2e      # Playwright, Chromium, serial workers (needs: npx playwright install chromium)
+npm run build         # tools/inline.mjs -> single-file dist/index.html (~122 KiB)
+npm run lint          # eslint (flat config)
+npm run typecheck     # tsc --noEmit (checkJs over JSDoc types)
+npm run gate          # lint && typecheck && test && build
+```
+
+- **Layout** — `index.html` (dev shell: importmap pins, CSP, UI), `src/` (one module per pipeline stage; JSDoc-typed via `src/types.js`), `tools/` (dev server, inliner, fixture/screenshot/debug scripts), `tests/unit/`, `tests/e2e/`, `tests/fixtures/`, `docs/screenshots/`.
+- **Single-file build** — `tools/inline.mjs` bundles `src/main.js` with esbuild (CDN bare specifiers stay external and resolve through the dist importmap), inlines the bundle into `index.html`, stamps `__APP_VERSION__`/`__BUILD_DATE__`, and fails the build if any `src/` reference leaks.
+- **Testing** — TDD per module: pure logic (tracker, redact geometry, timeline model, detector decode, exporter ladder) is unit-tested in node with seams/mocks; the browser stack (decode, inference, export burn-in) is covered by six Playwright end-to-end tests across five spec files, including an auto-detect journey with a real YuNet detection and an offline-models run.
+- **Specs** — requirements and architecture live under `.moai/specs/SPEC-VID-001/` (spec, design, ADRs, acceptance criteria).
+
+## Versioning
+
+Current version: **1.0.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.0.0 · built 2026-10-29`) and in the console at boot. Dev mode (unbuilt) shows `dev build (unbuilt)`.
+
+## Known limitations (v1)
+
+- Pixelate is the only redaction style (no blur, no solid fill).
+- No plate OCR / character reading and no face recognition — detection + redaction only.
+- No audio redaction or audio editing; audio is copied as-is.
+- iPhone HDR/Dolby Vision footage exports tone-mapped to SDR (warned in the UI).
+- One file per session — no batch processing.
+- Pixelation is obfuscation, not cryptography (the app says so; the minimum block-size rule keeps regions practically unreadable).

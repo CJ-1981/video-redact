@@ -2,6 +2,8 @@
 
 Local, in-browser video redaction: faces and license plates are detected automatically, reviewed on a timeline, and pixelated **burned into the exported pixels** — nothing is ever uploaded. There is no server; the shipped artifact is a single self-contained `index.html`.
 
+**Live app**: <https://cj-1981.github.io/video-redact/> (served over HTTPS, so it runs directly in the browser — every push to `main` rebuilds and redeploys it via GitHub Actions; the footer badge shows the version + build date).
+
 | Landing | Capability report |
 | --- | --- |
 | ![Landing — drop zone and stepper](docs/screenshots/01-landing.png) | ![Capability report before analyze](docs/screenshots/02-capability.png) |
@@ -25,9 +27,9 @@ npm run build        # bundles src/ into the single-file dist/index.html
 npm run dev          # serves the repo root at http://127.0.0.1:8000
 ```
 
-Then open <http://localhost:8000/dist/index.html>.
+Then open <http://localhost:8000/dist/index.html>. Or skip the local setup entirely and use the hosted page: <https://cj-1981.github.io/video-redact/>.
 
-**Serve over localhost — never `file://`.** The app needs secure-context APIs (WebCodecs, IndexedDB, OPFS, WASM); under `file://` it deliberately blocks all processing and shows serve instructions (`python3 -m http.server 8000`, `npx serve`). `python3 -m http.server 8000` or `npx serve` from the repo root work just as well.
+**Serve over localhost — never `file://`.** The app needs secure-context APIs (WebCodecs, IndexedDB, OPFS, WASM); under `file://` it deliberately blocks all processing and shows serve instructions (`python3 -m http.server 8000`, `npx serve`). `python3 -m http.server 8000` or `npx serve` from the repo root work just as well — and the GitHub Pages deployment is already HTTPS, so it is a secure context by default.
 
 ## What it does
 

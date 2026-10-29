@@ -63,3 +63,9 @@ v1.1.0 iterates the review experience of SPEC-VID-001: a solid-black redaction s
 
 - Miss analysis (2026-10-29 field report): portrait 540×960 frame, driver face ~40-60 px through glass, wheel-occluded → below conf 0.6 at full-frame 640 scale; horizontal-only tiling yields k=1 for portrait → no mitigation; detector fired at ~0:10 when face filled frame.
 - SPEC-VID-001 (base requirements; all still in force except where REQ-103/101 extend them).
+
+## Amendments — v1.3.0 (2026-10-29, field feedback round 2)
+
+- **REQ-108** — The track list shall expose per-track independent time editing: editable start/end inputs (clock format, committed on change/blur) that trim the track via the same trim path as chip dragging, updating preview, chips, and export span immediately.
+- **REQ-109** — Manual tracks shall receive distinct categorical palette colors (same TRACK_COLORS sequence as auto tracks) instead of a shared fixed color; manual identity remains distinguishable (outline/label), not by color collision.
+- **REQ-110** — During a chip-edge trim drag the chip's rendered length shall update live (and the row span readout with it); the operation must be visually self-evident. [Bug: v1.1.0/v1.2.0 trim drag updated the span but not the rendered chip.]

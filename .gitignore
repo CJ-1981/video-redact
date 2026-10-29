@@ -257,3 +257,8 @@ dist-ssr/
 .agents/skills/*/*/*secret*
 .agents/skills/*/*/*key*
 .agents/skills/*/*/*token*
+
+# SPEC-VID-001 build/test artifacts
+test-results/
+coverage/
+playwright-report/

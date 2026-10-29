@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Video Redact — Local Privacy Redaction</title>
+
+  <!--
+    Privacy envelope: the ONLY network egress ever allowed is the pinned CDNs
+    (library bundles + model weights — code and weights only, never user data)
+    plus blob:/data: for local media. User video bytes never leave the device.
+    The script and style CSP directives allow 'unsafe-inline' because the
+    shipped artifact is a single self-contained HTML file (tools/inline.mjs).
+    'wasm-unsafe-eval' is required by onnxruntime-web's WASM inference engine
+    (WebAssembly.compile/validate only — no JS eval unlocked); WASM bytes can
+    still only arrive from connect-src-approved hosts.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://esm.sh; connect-src 'self' https://cdn.jsdelivr.net https://esm.sh https://huggingface.co https://*.hf.co https://cas-bridge.xethub.hf.co https://transfer.xethub.hf.co https://github.com https://objects.githubusercontent.com https://release-assets.githubusercontent.com blob: data:; worker-src blob:; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'unsafe-inline'" />
+
+  <!-- Pinned runtime libraries (bare specifiers; see ADR-2 / plan §B). -->
+  <!-- @MX:NOTE version coupling: the onnxruntime-web importmap pin (1.31.1) and
+       the ort.env.wasm.wasmPaths jsDelivr root (ORT_VERSION in src/detector.js)
+       MUST stay the same version — bundle/wasm mismatch is a boot failure (plan R3). -->
+  <script type="importmap">
+    {
+      "imports": {
+        "mediabunny": "https://cdn.jsdelivr.net/npm/mediabunny@1.63.0/dist/bundles/mediabunny.min.mjs",
+        "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.all.bundle.min.mjs"
+      }
+    }
+  </script>
+
+  <style>
+    /* ── Color world (design-direction.md — graphite base, signal accents) ── */
+    :root {
+      --bg-base: #111418;        /* near-black slate canvas            */
+      --bg-panel: #1A1F26;       /* panels — video is the brightest thing */
+      --bg-inset: #0C0F12;       /* wells: timeline track, progress rail */
+      --line: #2A313B;           /* hairline borders                    */
+      --ink-hi: #E8ECF1;         /* primary text                        */
+      --ink: #9AA4B2;            /* neutral secondary — never for state */
+      --accent: #F5A623;         /* signal amber — progress, redacting  */
+      --safe: #3ECF8E;           /* keep-visible (track toggled off)    */
+      --alert: #E5484D;          /* manual regions, failures, blockers  */
+      /* Categorical track palette (boxes, chips, list rows share it) */
+      --track-1: #2DD4BF; --track-2: #A78BFA; --track-3: #FB7185;
+      --track-4: #A3E635; --track-5: #38BDF8; --track-6: #F472B6;
+      --track-7: #FBBF24; --track-8: #34D399;
+      --radius: 10px;
+      --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-num: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-base);
+      color: var(--ink-hi);
+      font-family: var(--font-ui);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    /* Timecodes and counters always align in mono numerals */
+    .num {
+      font-family: var(--font-num);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.01em;
+    }
+    h2 {
+      margin: 0 0 8px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--ink);
+    }
+    kbd {
+      padding: 1px 6px;
+      border: 1px solid var(--line);
+      border-bottom-width: 2px;
+      border-radius: 5px;
+      background: var(--bg-panel);
+      font-family: var(--font-num);
+      font-size: 11px;
+      color: var(--ink-hi);
+    }
+    button, select {
+      font: inherit;
+      color: var(--ink-hi);
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px 14px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--ink); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #14100A;
+      font-weight: 600;
+    }
+
+    /* ── Serve gate (REQ-004): full-screen block when !isSecureContext ── */
+    #serve-gate {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: grid;
+      place-items: center;
+      background: var(--bg-base);
+      padding: 24px;
+    }
+    #serve-gate .gate-card {
+      max-width: 560px;
+      background: var(--bg-panel);
+      border: 1px solid var(--alert);
+      border-radius: var(--radius);
+      padding: 28px 32px;
+    }
+    #serve-gate h1 { margin: 0 0 8px; font-size: 20px; }
+    #serve-gate p { color: var(--ink); margin: 0 0 16px; }
+    #serve-gate code {
+      display: block;
+      margin: 8px 0;
+      padding: 10px 14px;
+      background: var(--bg-inset);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font-family: var(--font-num);
+      font-size: 13px;
+      color: var(--accent);
+      user-select: all;
+    }
+
+    /* ── Header + stepper ── */
+    #app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    #app-header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    #app-header h1 span { color: var(--accent); }
+    #app-header .tagline { color: var(--ink); font-size: 12px; margin-top: 2px; }
+    #stepper {
+      display: flex;
+      gap: 4px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    #stepper li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      color: var(--ink);
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+    #stepper li .num { font-size: 12px; }
+    #stepper li[aria-current="step"] {
+      border-color: var(--accent);
+      color: var(--ink-hi);
+    }
+    #stepper li[aria-current="step"] .num { color: var(--accent); }
+    #stepper li.done { color: var(--safe); }
+
+    /* ── Main layout ── */
+    #app-main { flex: 1; min-height: 0; display: flex; padding: 20px; }
+    #intake-panel { width: 100%; display: flex; flex-direction: column; gap: 16px; }
+    #workspace {
+      flex: 1;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 16px;
+      align-items: start;
+    }
+    #stage-column { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+
+    /* ── Drop zone + capability report ── */
+    #drop-zone {
+      display: grid;
+      place-items: center;
+      gap: 4px;
+      min-height: 260px;
+      padding: 40px;
+      text-align: center;
+      background: var(--bg-panel);
+      border: 2px dashed var(--line);
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    #drop-zone:hover, #drop-zone:focus-visible, #drop-zone.dragover {
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 6%, var(--bg-panel));
+      outline: none;
+    }
+    .drop-title { margin: 0; font-size: 17px; font-weight: 600; }
+    .drop-hint { margin: 0; color: var(--ink); font-size: 13px; }
+
+    #cap-report {
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+    }
+    #cap-report table { width: 100%; border-collapse: collapse; }
+    #cap-report td { padding: 4px 8px 4px 0; color: var(--ink); }
+    #cap-report td:last-child { text-align: right; color: var(--ink-hi); font-family: var(--font-num); }
+    #cap-guidance { margin: 10px 0 0; color: var(--alert); font-weight: 500; }
+    .cap-ok { color: var(--safe); }
+    .cap-block { color: var(--alert); }
+
+    /* ── Preview stage ── */
+    #preview-stage {
+      position: relative;
+      background: var(--bg-inset);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      min-height: 320px;
+    }
+    #preview-video, #overlay-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    #preview-video { display: block; }
+
+    /* ── Timeline strip (signature element) ── */
+    #timeline {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      user-select: none;
+    }
+    #timeline .timecode { color: var(--ink); font-size: 12px; min-width: 64px; }
+    #timeline .timecode:last-child { text-align: right; }
+    #timeline-track {
+      position: relative;
+      flex: 1;
+      height: 44px;
+      background: var(--bg-inset);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    #track-chips { position: absolute; inset: 0; }
+    #playhead {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: 2px;
+      background: var(--accent);
+      box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+      pointer-events: none;
+    }
+
+    /* ── Right rail ── */
+    #right-rail {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 0;
+    }
+    #right-rail section {
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+    .progress-rail {
+      height: 6px;
+      background: var(--bg-inset);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 120ms linear;
+    }
+    .stat-line { margin: 4px 0 8px; color: var(--ink); font-size: 12.5px; }
+    .stat-line b { color: var(--ink-hi); font-weight: 600; }
+    label.toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      color: var(--ink-hi);
+      font-size: 13px;
+      cursor: pointer;
+    }
+    label.toggle input { accent-color: var(--accent); }
+
+    #track-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+    .track-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .track-row .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+    .track-row .label { flex: 1; font-size: 13px; }
+    .track-row .span { color: var(--ink); font-size: 11.5px; }
+    .track-row.enabled-off { opacity: 0.55; }
+    .track-row.enabled-off .label { color: var(--safe); text-decoration: line-through; }
+    .track-row.manual .swatch { background: var(--alert); }
+    #track-list-empty { margin: 4px 0 0; color: var(--ink); font-size: 12.5px; }
+
+    .warn-note {
+      margin: 10px 0;
+      padding: 8px 12px;
+      border-left: 3px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 8%, var(--bg-inset));
+      border-radius: 0 6px 6px 0;
+      color: var(--ink-hi);
+      font-size: 12.5px;
+    }
+    #export-status { min-height: 1.2em; color: var(--ink); font-size: 12.5px; }
+    #export-button { width: 100%; margin-top: 4px; }
+
+    #model-attribution ul { margin: 0; padding: 0 0 0 16px; color: var(--ink); font-size: 12px; }
+    #model-attribution li { margin-bottom: 6px; overflow-wrap: anywhere; }
+
+    /* ── Footer + toasts ── */
+    #keyboard-hints {
+      padding: 10px 20px;
+      border-top: 1px solid var(--line);
+      color: var(--ink);
+      font-size: 12px;
+    }
+    #toast-region {
+      position: fixed;
+      left: 50%;
+      bottom: 52px;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 50;
+      pointer-events: none;
+    }
+    .toast {
+      padding: 10px 18px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--bg-panel);
+      color: var(--ink-hi);
+      font-size: 13px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    }
+    .toast.error { border-color: var(--alert); color: var(--alert); }
+    .toast.ok { border-color: var(--safe); }
+
+    [hidden] { display: none !important; }
+
+    @media (max-width: 900px) {
+      #workspace { grid-template-columns: 1fr; }
+      #stepper li { padding: 6px 8px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Serve-over-localhost gate (REQ-004): shown by main.js when !isSecureContext; all handlers no-op. -->
+  <section id="serve-gate" hidden role="alertdialog" aria-labelledby="serve-gate-title">
+    <div class="gate-card">
+      <h1 id="serve-gate-title">Serve this app over localhost</h1>
+      <p>
+        This page was opened from <code>file://</code>. Browsers block the secure APIs the app needs
+        (WebCodecs, IndexedDB, WASM) there, so redaction is disabled. Run one of these from the app
+        folder and open the printed localhost URL instead:
+      </p>
+      <code>python3 -m http.server 8000</code>
+      <code>npx serve</code>
+    </div>
+  </section>
+
+  <header id="app-header">
+    <div>
+      <h1>Video <span>Redact</span></h1>
+      <div class="tagline">Faces &amp; plates pixelated locally — nothing leaves this device</div>
+    </div>
+    <button id="change-file" type="button" hidden>Open another file</button>
+    <ol id="stepper" aria-label="Workflow steps">
+      <li id="step-gate" data-step="gate" aria-current="step"><span class="num">①</span> Capability check</li>
+      <li id="step-analyze" data-step="analyze"><span class="num">②</span> Analyze</li>
+      <li id="step-review" data-step="review"><span class="num">③</span> Review</li>
+      <li id="step-export" data-step="export"><span class="num">④</span> Export</li>
+    </ol>
+  </header>
+
+  <main id="app-main">
+    <!-- Step ①: file intake + capability honesty moment -->
+    <section id="intake-panel">
+      <div id="drop-zone" role="button" tabindex="0" aria-label="Choose a video file to redact">
+        <p class="drop-title">Drop a video to redact</p>
+        <p class="drop-hint">or click to browse — MP4 / MOV / WebM, processed entirely on this device</p>
+        <input id="file-input" type="file" accept="video/*,.mp4,.mov,.m4v,.webm" hidden />
+      </div>
+
+      <section id="cap-report" hidden aria-live="polite">
+        <h2>Capability report</h2>
+        <table id="cap-report-body"></table>
+        <p id="cap-guidance" hidden></p>
+      </section>
+    </section>
+
+    <!-- Steps ②–④: preview + timeline (left), pass/track/export rail (right) -->
+    <div id="workspace" hidden>
+      <section id="stage-column">
+        <div id="preview-stage">
+          <video id="preview-video" playsinline></video>
+          <canvas id="overlay-canvas"></canvas>
+        </div>
+        <section id="timeline" aria-label="Track timeline — click a chip to scrub and toggle its redaction">
+          <span id="timeline-current" class="num timecode">0:00.0</span>
+          <div id="timeline-track">
+            <div id="track-chips"></div>
+            <div id="playhead"></div>
+          </div>
+          <span id="timeline-duration" class="num timecode">0:00.0</span>
+        </section>
+      </section>
+
+      <aside id="right-rail">
+        <section id="analyze-panel" aria-label="Analyze pass">
+          <h2>Analyze</h2>
+          <button id="analyze-button" type="button" class="primary" style="width:100%" disabled>Analyze</button>
+          <div id="analyze-progress" class="progress-rail" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div id="analyze-progress-bar" class="progress-bar"></div>
+          </div>
+          <p class="stat-line num"><b id="analyze-frames">0</b>/<span id="analyze-total">0</span> frames · <b id="analyze-fps">0.0</b> fps · ETA <b id="analyze-eta">—</b></p>
+          <p id="analyze-status" class="stat-line" role="status"></p>
+          <label class="toggle" for="dashcam-toggle">
+            <input type="checkbox" id="dashcam-toggle" />
+            Dashcam mode <span style="color: var(--ink)">(tiled pass for small plates)</span>
+          </label>
+          <button id="analyze-cancel" type="button" hidden>Cancel analysis</button>
+        </section>
+
+        <section id="tracks-panel" aria-label="Detected tracks">
+          <h2>Tracks</h2>
+          <ul id="track-list"></ul>
+          <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
+        </section>
+
+        <section id="export-panel" aria-label="Export settings">
+          <h2>Export</h2>
+          <label for="export-quality">Quality</label>
+          <select id="export-quality">
+            <option value="high" selected>High — match source resolution</option>
+            <option value="balanced">Balanced — halved resolution</option>
+          </select>
+          <p class="warn-note">Pixelation is burned into the exported video. The preview above is pixel-truthful: what you see is exactly what ships.</p>
+          <div id="export-progress" class="progress-rail" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div id="export-progress-bar" class="progress-bar"></div>
+          </div>
+          <button id="export-button" type="button" class="primary">Export redacted video</button>
+          <button id="export-cancel" type="button" hidden style="width:100%">Cancel export</button>
+          <p id="export-status" class="num" role="status"></p>
+        </section>
+
+        <section id="model-attribution" aria-label="Model attribution">
+          <h2>Models</h2>
+          <ul>
+            <li>YuNet face detection (2023mar, 232 KB) — MIT — huggingface.co/opencv/face_detection_yunet</li>
+            <li>YOLOv9-t license plates (640 end-to-end, 7.8 MB) — MIT — github.com/ankandrew/open-image-models</li>
+          </ul>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <footer id="keyboard-hints">
+    <kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>←</kbd>/<kbd>→</kbd> frame step&ensp;·&ensp;<kbd>B</kbd> draw manual box&ensp;·&ensp;click a timeline chip to scrub &amp; toggle
+  </footer>
+
+  <div id="toast-region" role="status" aria-live="polite"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

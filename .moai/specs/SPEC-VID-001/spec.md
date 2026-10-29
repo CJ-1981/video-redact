@@ -1,7 +1,7 @@
 ---
 id: SPEC-VID-001
 title: "Client-Side Video Redaction Web App: Face & License Plate Detection"
-version: "1.0.0"
+version: "1.0.1"
 status: planned
 created: 2026-10-28
 updated: 2026-10-28

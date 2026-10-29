@@ -17,7 +17,7 @@ Full REQ → AC mapping: REQ-001/002 → AC-02 · REQ-003 → AC-11 · REQ-004 �
 ### AC-03 — Analyze pass with progress and cancellation (REQ-009)
 - **Given** an analyzed-eligible video
 - **When** the user starts Analyze and later presses Cancel
-- **Then** progress (frame count, fps, ETA, track count) is displayed while running; after Cancel the app shows the tracks found so far in the Review editor with no partial-file residue. (Export progress monotonicity is asserted in AC-12/AC-14 flows.)
+- **Then** progress (frame count, fps, ETA, track count) is displayed while running; after Cancel the app shows the tracks found so far in the Review editor with no partial-file residue. (Export progress monotonicity is bound by perf gate P-3 and exercised in AC-12/AC-14 flows.)
 
 ### AC-04 — Face detected, pixelated, burned in **[PRIVACY-BLOCKING]** (REQ-005, REQ-016, REQ-017)
 - **Given** a fixture clip containing a clearly visible synthetic face patch

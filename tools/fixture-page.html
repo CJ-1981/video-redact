@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>video-redact fixture generation page (dev tool — not shipped)</title>
+  <!--
+    Same importmap pins as index.html so tools/make-fixture.mjs encodes the
+    synthetic fixture with the EXACT mediabunny version the app ships with,
+    and so the detectable-face phase (faces.mp4) can run the PRODUCTION
+    detector — tools/make-fixture.mjs imports /src/detector.js from this page,
+    whose lazy `import('onnxruntime-web')` resolves through the pin below.
+    Served over localhost (secure context) so WebCodecs encoders are exposed.
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "mediabunny": "https://cdn.jsdelivr.net/npm/mediabunny@1.63.0/dist/bundles/mediabunny.min.mjs",
+        "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.all.bundle.min.mjs"
+      }
+    }
+  </script>
+</head>
+<body>
+  <p>fixture generation page — driven by tools/make-fixture.mjs</p>
+</body>
+</html>

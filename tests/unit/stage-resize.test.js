@@ -23,8 +23,7 @@ import {
   STAGE_HEIGHT_STEP_PX,
   STAGE_MIN_HEIGHT_PX,
   clampStageHeight,
-  nextStageHeight,
-} from '../../src/main.js';
+  nextStageHeight, dragStageHeight } from '../../src/main.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -157,5 +156,27 @@ describe('stage-resize-handle static wiring (index.html contract)', () => {
     // Fullscreen/zoom modes must release the fixed height (UA/inset sizing).
     expect(html).toMatch(/#preview-stage:fullscreen\s*\{[^}]*height: auto;/);
     expect(html).toMatch(/#preview-stage\.preview-zoom\s*\{[^}]*height: auto;/);
+  });
+});
+
+describe('dragStageHeight — pointer direction (v1.3.1 regression pin)', () => {
+
+  it('dragging DOWN (clientY grows) makes the stage TALLER — bottom edge follows the pointer', () => {
+    // start 320; pointer moves 80px down the screen
+    expect(dragStageHeight(400, 480, 320)).toBe(400);
+    expect(dragStageHeight(400, 560, 320)).toBe(480);
+  });
+
+  it('dragging UP (clientY shrinks) makes the stage SHORTER', () => {
+    expect(dragStageHeight(400, 320, 320)).toBe(240);
+    expect(dragStageHeight(400, 240, 320)).toBe(160);
+  });
+
+  it('no pointer movement keeps the anchored height; non-finite degrades safely', () => {
+    expect(dragStageHeight(400, 400, 320)).toBe(320);
+    // non-finite anchor Y -> no movement, anchored height kept
+    expect(dragStageHeight(Number.NaN, 480, 320)).toBe(320);
+    // non-finite anchored height -> default 320 base, movement still applied
+    expect(dragStageHeight(400, 480, Number.NaN)).toBe(400);
   });
 });

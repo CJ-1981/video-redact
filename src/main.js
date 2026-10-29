@@ -17,6 +17,7 @@
  *   formatVersionBadge({version, buildDate})  footer version badge text
  *   clampStageHeight(px, viewportH)    stage-height clamp (v1.2.0 handle)
  *   nextStageHeight(px, delta, vh)     handle keyboard step (v1.2.0)
+ *   dragStageHeight(startY, y, startH) pointer-drag height (v1.3.1 direction fix)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -280,6 +281,23 @@ export function nextStageHeight(px, deltaPx, viewportH) {
   const step = Number.isFinite(deltaPx) ? deltaPx : 0;
   const from = Number.isFinite(px) ? px : DEFAULT_STAGE_HEIGHT_PX;
   return clampStageHeight(from + step, viewportH);
+}
+
+/**
+ * Pointer-drag height (v1.3.1 direction fix): the handle is the stage's
+ * BOTTOM edge, so it follows the pointer — moving the pointer DOWN
+ * (clientY > startY) grows the stage.PURE; the caller clamps via
+ * applyStageHeight (live 75vh bound). Direction is pinned by unit test.
+ *
+ * @param {number} startY Pointer Y at drag start (CSS px).
+ * @param {number} clientY Current pointer Y (CSS px).
+ * @param {number} startH Stage height at drag start (CSS px).
+ * @returns {number} Unclamped new stage height.
+ */
+export function dragStageHeight(startY, clientY, startH) {
+  const dy = Number.isFinite(clientY) && Number.isFinite(startY) ? clientY - startY : 0;
+  const from = Number.isFinite(startH) ? startH : DEFAULT_STAGE_HEIGHT_PX;
+  return from + dy;
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,9 +1307,10 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     });
     resizeHandle.addEventListener('pointermove', (e) => {
       if (!drag) return;
-      // Dragging UP grows the stage (the stage/handle boundary follows the
-      // pointer); clampStageHeight recomputes the 75vh bound per move.
-      applyStageHeight(drag.startH + (drag.startY - e.clientY));
+      // Direct manipulation: the handle IS the stage's bottom edge, so the
+      // edge follows the pointer — drag DOWN = taller. clampStageHeight
+      // recomputes the 75vh bound per move.
+      applyStageHeight(dragStageHeight(drag.startY, e.clientY, drag.startH));
     });
     const endDrag = (e) => {
       if (!drag) return;

@@ -74,3 +74,8 @@ Initial release — SPEC-VID-001: client-side video redaction web app (faces & l
 - Plate model URL: the canonical GitHub release asset sends no CORS headers on any redirect hop, making it unfetchable from a browser — switched to a Hugging Face mirror serving the same bytes (size-pinned) with CORS `*`.
 - Export delivery race: the Blob download could be canceled by premature deletion of the OPFS staging temp — temp cleanup now happens strictly after delivery or cancellation.
 - Preview dilation parity: the editor preview did not dilate redaction boxes exactly like the export burn-in — both paths now share the same `redact.pixelateFrame` seam, keeping the preview pixel-truthful.
+
+## [1.3.1] — 2026-10-29
+
+### Fixed
+- Preview resize handle worked in the opposite direction: dragging DOWN now makes the video TALLER (the handle is the stage's bottom edge and follows the pointer). Keyboard parity unchanged (ArrowUp = taller). Direction pinned by unit tests.

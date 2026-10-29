@@ -456,3 +456,58 @@ describe('main-wiring: module import safety', () => {
     await expect(mod.mountApp(null)).resolves.toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.6.1 REG-2 — doc-shortcut focus gating (shortcutEnabledFor)
+// ---------------------------------------------------------------------------
+
+/** Minimal focus-target stub: `closest` mirrors the Element API the handler
+ * relies on; `isTyping` decides whether the stub matches the surfaces. */
+function focusStub(isTyping) {
+  return {
+    closest: (selector) => (isTyping ? { matched: selector } : null),
+  };
+}
+
+describe('shortcutEnabledFor — typing-surface exclusion (v1.6.1 REG-2)', () => {
+
+  it('enables shortcuts for a BUTTON focus (the regression: clicked controls)', () => {
+    expect(main.shortcutEnabledFor(focusStub(false))).toBe(true);
+  });
+
+  it('enables shortcuts for a missing/dead target (body, event retargeted)', () => {
+    expect(main.shortcutEnabledFor(null)).toBe(true);
+    expect(main.shortcutEnabledFor(undefined)).toBe(true);
+    expect(main.shortcutEnabledFor({})).toBe(true); // no closest() → enabled
+  });
+
+  it('disables shortcuts inside input / select / textarea / contenteditable', () => {
+    expect(main.shortcutEnabledFor(focusStub(true))).toBe(false);
+  });
+
+  it('keeps the exclusion for a focused track-row time input (.span-input)', () => {
+    // The REQ-108 time fields are text inputs — typing "m:ss.s" must never
+    // frame-step the video, so they stay excluded.
+    const spanInput = focusStub(true);
+    expect(main.shortcutEnabledFor(spanInput, {
+      exclude: main.SHORTCUT_TYPING_SELECTOR,
+    })).toBe(false);
+  });
+
+  it('honors an explicit exclude override', () => {
+    expect(main.shortcutEnabledFor(focusStub(true), { exclude: 'textarea' })).toBe(false);
+    expect(main.shortcutEnabledFor(focusStub(false), { exclude: 'textarea' })).toBe(true);
+    // non-string exclude falls back to the typing-surface selector
+    expect(main.shortcutEnabledFor(focusStub(true), { exclude: 42 })).toBe(false);
+  });
+
+  it('the default selector covers every typing surface and NO buttons', () => {
+    expect(main.SHORTCUT_TYPING_SELECTOR).toBe('input, select, textarea, [contenteditable]');
+    expect(main.SHORTCUT_TYPING_SELECTOR).not.toContain('button');
+  });
+
+  it('the export surface grew with the v1.6.1 helpers', () => {
+    expect(typeof main.shortcutEnabledFor).toBe('function');
+    expect(typeof main.SHORTCUT_TYPING_SELECTOR).toBe('string');
+  });
+});

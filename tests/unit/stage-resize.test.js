@@ -180,3 +180,47 @@ describe('dragStageHeight — pointer direction (v1.3.1 regression pin)', () => 
     expect(dragStageHeight(400, 480, Number.NaN)).toBe(400);
   });
 });
+
+describe('clampStageHeight — reserved-space fit bound (v1.6.1 REG-3)', () => {
+
+  it('defaults to the plain 75vh clamp when reservedH is omitted/0/invalid', () => {
+    expect(clampStageHeight(2000, 800)).toBe(600);
+    expect(clampStageHeight(2000, 800, 0)).toBe(600);
+    expect(clampStageHeight(2000, 800, Number.NaN)).toBe(600);
+    expect(clampStageHeight(2000, 800, -5)).toBe(600);
+    // no usable viewport → no upper bound at all (documented degradation;
+    // min-only behavior, matches the pre-v1.6.1 2-arg contract)
+    expect(clampStageHeight(2000, Number.NaN, 330)).toBe(2000);
+  });
+
+  it('caps the stage at viewportH − reservedH when that is tighter than 75vh', () => {
+    // 800px viewport: 75vh = 600, fit = 800 − 330 = 470 → the fit bound wins
+    expect(clampStageHeight(2000, 800, 330)).toBe(470);
+    // fractional reserved is floored so the fit bound stays integral
+    expect(clampStageHeight(2000, 800, 330.7)).toBe(469);
+    // phone-sized viewport (REG-3 field report): 75vh alone spills the footer
+    expect(clampStageHeight(2000, 844, 420)).toBe(424);
+  });
+
+  it('keeps the 75vh bound when the viewport has room to spare', () => {
+    expect(clampStageHeight(2000, 1080, 200)).toBe(810); // fit 880 > 75vh 810
+  });
+
+  it('never lets the max drop below the 220 px min (tiny viewports)', () => {
+    expect(clampStageHeight(2000, 280, 200)).toBe(220); // fit 80 → min wins
+    expect(clampStageHeight(2000, 800, 1000)).toBe(220); // reserved > viewport
+  });
+
+  it('min still beats desired AND max below it', () => {
+    expect(clampStageHeight(100, 800, 330)).toBe(220);
+  });
+});
+
+describe('nextStageHeight — reservedH pass-through (v1.6.1 REG-3)', () => {
+
+  it('keyboard steps clamp against the fit bound too', () => {
+    expect(nextStageHeight(400, 100, 800, 500)).toBe(300); // 500 + 100 → fit 300
+    expect(nextStageHeight(400, 100, 800)).toBe(500); // no reserved → 75vh 600
+    expect(nextStageHeight(400, -100, 800, 500)).toBe(300); // shrinking unaffected
+  });
+});

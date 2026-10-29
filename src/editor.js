@@ -13,6 +13,9 @@
  *                                REQ-103 + v1.3.0 REQ-110 outward zones)
  *        effectiveEdgePx()     → edge-zone width for a pointer kind
  *                                (v1.4.0 REQ-112: 6 px fine, 14 px touch)
+ *        timelineTimeAt()      → seek time for a pointer x on the axis
+ *                                (v1.6.1 REG-1)
+ *        CLICK_SEEK_MAX_DRAG_PX  click-vs-drag movement threshold (REG-1)
  *        toggleTrack()         → immutable enabled-flip (REQ-014)
  *        trimTrack()           → immutable span trim (SPEC-VID-002 REQ-103)
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
@@ -36,7 +39,12 @@
  * ---------------------------------------------------------------------------
  *
  *   Timeline (#timeline strip, single-lane chips):
- *     click            → onSeek(time under pointer)      — chip or bare rail
+ *     click            → onSeek(time under pointer)      — chip, bare rail,
+ *                        timecode labels (clamped to the ends). The time maps
+ *                        through the CHIPS-layer rect (the axis the chips and
+ *                        playhead live in — v1.6.1 REG-1), and a press→release
+ *                        pair that MOVED more than CLICK_SEEK_MAX_DRAG_PX is a
+ *                        drag, not a click (no seek).
  *     dblclick on chip → hitTestTimeline → onToggle(id, !enabled)
  *                        (the two preceding clicks also seek — harmless)
  *     drag a chip EDGE (± 6 px zone; ± 14 px on touch — REQ-112)
@@ -50,8 +58,13 @@
  *                        maps the pointer through the chips-layer rect. Each
  *                        pointermove re-emits the span → onTrimTrack →
  *                        refresh → the chip length and the row span readout
- *                        update LIVE. The click that follows the drag is
- *                        suppressed.
+ *                        update LIVE. The click that follows a trim is
+ *                        suppressed EXACTLY ONCE (v1.6.1 REG-1: the
+ *                        suppression can no longer latch — a pointercancel
+ *                        resets it, and a pointerup without a follow-up click
+ *                        expires it — a canceled gesture must never eat the
+ *                        NEXT click). Drags from a chip body or bare rail
+ *                        never trim and never seek (body is not a scrubber).
  *
  *   Track list (#track-list rows, rendered by the editor):
  *     checkbox change  → onToggle(trackId, checked)
@@ -122,6 +135,40 @@ export const CHIP_EDGE_PX_COARSE = 14;
  */
 export function effectiveEdgePx(coarse) {
   return coarse === true ? CHIP_EDGE_PX_COARSE : CHIP_EDGE_PX;
+}
+
+/**
+ * Movement (CSS px, squared-distance radius) above which a strip
+ * pointerdown/up pair counts as a DRAG, not a click — a drag released on the
+ * strip must never seek (v1.6.1 REG-1: "click-seek on pointerup only if the
+ * movement is under the threshold"). Sits between the fine (6 px) and coarse
+ * (14 px) edge zones so an edge-grab wiggle never degenerates into a seek.
+ * @type {number}
+ */
+export const CLICK_SEEK_MAX_DRAG_PX = 8;
+
+/**
+ * Map a pointer x on the timeline to a seek time. PURE (v1.6.1 REG-1 seam,
+ * unit-tested): x/width → fraction of `durationSec`, clamped into
+ * [0, durationSec] — clicks on the timecode labels or strip padding seek to
+ * the ends. A degenerate width or duration yields 0 (never NaN).
+ *
+ * The axis rect MUST be the chips layer (#timeline-track / #track-chips — the
+ * space hitTestTimeline maps and the playhead is positioned in), not the full
+ * #timeline strip: mapping through the strip made every seek land off the
+ * clicked point by the combined width of the timecodes + padding (up to
+ * ~10% of the video — the field-reported "clicking no longer jumps where I
+ * click").
+ *
+ * @param {number} x Pointer x within the axis rect, CSS px.
+ * @param {number} width Axis rect width, CSS px (same space as `x`).
+ * @param {number} durationSec Video duration (> 0).
+ * @returns {number} Seek time in seconds, clamped.
+ */
+export function timelineTimeAt(x, width, durationSec) {
+  if (!(width > 0) || !(Number.isFinite(durationSec) && durationSec > 0)) return 0;
+  const t = ((Number.isFinite(x) ? x : 0) / width) * durationSec;
+  return Math.min(Math.max(t, 0), durationSec);
 }
 
 /** Manual-drag rubber band (REQ-109: manual tracks themselves use the
@@ -1111,6 +1158,8 @@ export function mountEditor(els, hooks) {
   let trimDrag = /** @type {{id: number, zone: 'start'|'end', moved: boolean} | null} */ (null);
   /** A trim drag swallowed the pointer: the follow-up click must not seek. */
   let suppressClick = false;
+  /** Strip pointerdown anchor for the click-vs-drag movement check (REG-1). */
+  let downPos = /** @type {{x: number, y: number} | null} */ (null);
   /** Chip element whose inline cursor we overrode for the edge affordance. */
   let hoverChip = /** @type {HTMLElement | null} */ (null);
 
@@ -1130,15 +1179,30 @@ export function mountEditor(els, hooks) {
   }
 
   function onTimelineClick(e) {
+    // v1.6.1 REG-1: the suppression is consumed by exactly one click — and it
+    // can never be LEFT armed by a canceled gesture (see onChipsPointerCancel
+    // and endTrimDrag), so a latched flag can no longer eat a later click.
     if (suppressClick) {
       suppressClick = false; // the pointerup of a trim drag — not a seek
       return;
     }
-    const p = timelinePos(e);
+    // A press→release that moved is a drag, not a click: never seek (the
+    // browser still fires `click` after a large same-element drag).
+    if (downPos) {
+      const dx = e.clientX - downPos.x;
+      const dy = e.clientY - downPos.y;
+      downPos = null;
+      if (dx * dx + dy * dy > CLICK_SEEK_MAX_DRAG_PX * CLICK_SEEK_MAX_DRAG_PX) return;
+    }
+    // Seek axis = the CHIPS layer (the rect hitTestTimeline maps and the
+    // playhead is positioned in). Mapping through the full strip rect put
+    // every seek off the clicked point by the timecodes + padding width
+    // (field-reported REG-1); points on the labels/padding clamp to the ends.
+    const p = chipsPos(e) ?? timelinePos(e);
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    callSeek(clampTime((p.x / p.width) * d));
+    callSeek(timelineTimeAt(p.x, p.width, d));
   }
 
   function onTimelineDblClick(e) {
@@ -1177,6 +1241,7 @@ export function mountEditor(els, hooks) {
   }
 
   function onChipsPointerDown(e) {
+    downPos = { x: e.clientX, y: e.clientY }; // click-vs-drag anchor (REG-1)
     if (e.button !== 0) return;
     const p = chipsPos(e);
     if (!p) return;
@@ -1208,11 +1273,20 @@ export function mountEditor(els, hooks) {
     if (!trimDrag) return;
     if (trimDrag.moved) applyTrimDrag(e.clientX);
     trimDrag = null;
+    downPos = null;
     try {
       timeline.releasePointerCapture(e.pointerId);
     } catch {
       /* never captured or already released */
     }
+    // v1.6.1 REG-1: expire the suppression if the follow-up click never
+    // arrives (release off-strip after a failed capture, etc.) — it must not
+    // latch onto the NEXT click. When the click does exist it is dispatched
+    // synchronously after pointerup, i.e. before this timer, so a real trim's
+    // click is still suppressed exactly once.
+    setTimeout(() => {
+      suppressClick = false;
+    }, 0);
   }
 
   function onChipsPointerUp(e) {
@@ -1220,7 +1294,13 @@ export function mountEditor(els, hooks) {
   }
 
   function onChipsPointerCancel() {
-    trimDrag = null; // cancelled drag: suppress the click all the same
+    // v1.6.1 REG-1: a canceled gesture (touch scroll taking over the strip,
+    // palm rejection, …) never produces a click, so BOTH gesture flags must
+    // reset here. Leaving suppressClick armed used to eat the NEXT click —
+    // the field-reported "clicking the timeline no longer seeks".
+    trimDrag = null;
+    suppressClick = false;
+    downPos = null;
     resetChipCursor();
   }
 
@@ -1274,6 +1354,10 @@ export function mountEditor(els, hooks) {
       if (Number.isFinite(id)) {
         callSetStyle(id, target.value === 'solid' ? 'solid' : 'pixelate');
       }
+      // v1.6.1 REG-2: release focus after the choice so the doc-level
+      // transport shortcuts keep working (selects are a typing surface while
+      // focused; a committed choice is done with it).
+      if (typeof target.blur === 'function') target.blur();
       return;
     }
     if (isSpanInput(target)) {
@@ -1430,6 +1514,7 @@ export function mountEditor(els, hooks) {
     if (disposeManual) disposeManual();
     trimDrag = null;
     suppressClick = false;
+    downPos = null;
     hoverChip = null;
     pendingBox = null;
     if (ctx && canvas && canvas.width > 0) {

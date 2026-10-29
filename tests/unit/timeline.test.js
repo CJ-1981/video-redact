@@ -13,7 +13,9 @@ import {
   MIN_TRACK_SPAN_S,
   CHIP_EDGE_PX,
   CHIP_EDGE_PX_COARSE,
+  CLICK_SEEK_MAX_DRAG_PX,
   effectiveEdgePx,
+  timelineTimeAt,
   renderTimeline,
   hitTestTimeline,
   toggleTrack,
@@ -857,5 +859,34 @@ describe('manualTrackFromBox palette colors (REQ-109)', () => {
     const track = manualTrackFromBox(1, 1, box, 10);
     const vm = renderTimeline([track], 10, 0);
     expect(vm.chips[0].color).toBe(TRACK_COLORS[0]);
+  });
+});
+
+describe('timelineTimeAt — pointer x → seek time (v1.6.1 REG-1)', () => {
+
+  it('maps the axis-rect fraction linearly onto the duration', () => {
+    expect(timelineTimeAt(100, 400, 10)).toBeCloseTo(2.5, 10);
+    expect(timelineTimeAt(0, 400, 10)).toBe(0);
+    expect(timelineTimeAt(400, 400, 10)).toBe(10);
+    expect(timelineTimeAt(201, 402, 3.04)).toBeCloseTo(1.52, 10);
+  });
+
+  it('clamps points outside the axis (timecode labels / strip padding) to the ends', () => {
+    expect(timelineTimeAt(-80, 402, 3.04)).toBe(0);
+    expect(timelineTimeAt(500, 402, 3.04)).toBe(3.04);
+  });
+
+  it('degrades safely: zero width, zero/NaN duration, NaN x → 0 (never NaN)', () => {
+    expect(timelineTimeAt(100, 0, 10)).toBe(0);
+    expect(timelineTimeAt(100, 400, 0)).toBe(0);
+    expect(timelineTimeAt(100, 400, Number.NaN)).toBe(0);
+    expect(timelineTimeAt(Number.NaN, 400, 10)).toBe(0);
+  });
+
+  it('click-vs-drag movement threshold sits between the fine and coarse edge zones', () => {
+    // An edge-grab wiggle (≤ 6 px fine zone) must never read as a seek drag,
+    // and the threshold must stay below the coarse grab zone (14 px).
+    expect(CLICK_SEEK_MAX_DRAG_PX).toBeGreaterThanOrEqual(CHIP_EDGE_PX);
+    expect(CLICK_SEEK_MAX_DRAG_PX).toBeLessThan(CHIP_EDGE_PX_COARSE);
   });
 });

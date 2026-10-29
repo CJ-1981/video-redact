@@ -15,11 +15,17 @@
  *   inferenceRow(caps)                 EP policy → AC-17 "Inference" row
  *   epLabel(ep)                        effective EP → status suffix label
  *   formatVersionBadge({version, buildDate})  footer version badge text
- *   clampStageHeight(px, viewportH)    stage-height clamp (v1.2.0 handle)
+ *   clampStageHeight(px, viewportH, reservedH)
+ *                                      stage-height clamp (v1.2.0 handle;
+ *                                      v1.6.1 REG-3 adds the reserved-space
+ *                                      fit bound)
  *   nextStageHeight(px, delta, vh)     handle keyboard step (v1.2.0)
  *   dragStageHeight(startY, y, startH) pointer-drag height (v1.3.1 direction fix)
  *   transportGlyph(paused)             play/pause glyph (v1.4.0 REQ-111)
  *   normalizePlaybackRate(rate)        rate clamp to finite > 0 (v1.4.0)
+ *   SHORTCUT_TYPING_SELECTOR / shortcutEnabledFor(focusEl, opts)
+ *                                      doc-shortcut focus gating — typing
+ *                                      surfaces only (v1.6.1 REG-2)
  *   OVERLAY_HIDE_MS                    overlay auto-hide delay (v1.4.0 REQ-111)
  *   THRESHOLD_LEVELS / THRESHOLD_FACE_RANGE / THRESHOLD_PLATE_RANGE /
  *   THRESHOLD_PANEL_FRACTION           compare constants (v1.5.0 REQ-113/114)
@@ -294,21 +300,40 @@ export const STAGE_HEIGHT_STEP_PX = 24;
 const STAGE_MAX_VIEWPORT_FRACTION = 0.75;
 
 /**
- * Clamp a desired preview-stage height into [220, round(0.75·viewportH)] as
- * an integer. PURE. The 75vh bound is recomputed against the CURRENT
- * viewport on every call, so a window resize re-clamps on the next drag /
- * key step. Degradations: a non-finite `px` falls back to the default height
- * before clamping; a non-finite/≤ 0 `viewportH` drops the upper bound (min
- * still enforced) — a tiny viewport can never push the max below the min.
+ * Clamp a desired preview-stage height to the usable viewport as an integer.
+ * PURE. The bound is the SMALLER of:
+ *   - the classic 75vh fraction (round(0.75·viewportH)), and
+ *   - the fit bound `viewportH − reservedH` (v1.6.1 REG-3), so the stage can
+ *     never push the transport bar and timeline into/past the footer on
+ *     short viewports. The 75vh bound is recomputed against the CURRENT
+ *     viewport on every call, so a window resize re-clamps on the next drag /
+ *     key step.
+ *
+ * `reservedH` is everything around the stage that must stay visible —
+ * header + footer + #app-main vertical padding + every #stage-column child
+ * except the stage itself (handle, transport, hint, timeline + flex gaps);
+ * mountApp measures it live (stageReservedHeight). Degradations: a non-finite
+ * `px` falls back to the default height before clamping; a non-finite/≤ 0
+ * `viewportH` drops BOTH upper bounds (min still enforced); a non-finite/≤ 0
+ * `reservedH` drops just the fit bound (plain 75vh clamp). The lower clamp
+ * always wins: a tiny viewport can never push the max below the min — below
+ * that point overlap is accepted by design (a 220 px stage is the last
+ * usable review size).
  *
  * @param {number} px Desired stage height, CSS px.
  * @param {number} viewportH Viewport height, CSS px (window.innerHeight).
+ * @param {number} [reservedH] Vertical space around the stage that must stay
+ *     visible, CSS px (0 = unknown → plain 75vh clamp).
  * @returns {number} Clamped integer stage height.
  */
-export function clampStageHeight(px, viewportH) {
+export function clampStageHeight(px, viewportH, reservedH = 0) {
   let max = Infinity;
   if (Number.isFinite(viewportH) && viewportH > 0) {
-    max = Math.max(Math.round(viewportH * STAGE_MAX_VIEWPORT_FRACTION), STAGE_MIN_HEIGHT_PX);
+    let cap = Math.round(viewportH * STAGE_MAX_VIEWPORT_FRACTION);
+    if (Number.isFinite(reservedH) && reservedH > 0) {
+      cap = Math.min(cap, Math.floor(viewportH - reservedH));
+    }
+    max = Math.max(cap, STAGE_MIN_HEIGHT_PX);
   }
   const desired = Number.isFinite(px) ? Math.round(px) : DEFAULT_STAGE_HEIGHT_PX;
   return Math.min(Math.max(desired, STAGE_MIN_HEIGHT_PX), max);
@@ -321,12 +346,13 @@ export function clampStageHeight(px, viewportH) {
  * @param {number} px Current stage height, CSS px.
  * @param {number} deltaPx Signed step (+ = taller), CSS px.
  * @param {number} viewportH Viewport height, CSS px.
+ * @param {number} [reservedH] Reserved space around the stage (v1.6.1 REG-3).
  * @returns {number} New clamped integer stage height.
  */
-export function nextStageHeight(px, deltaPx, viewportH) {
+export function nextStageHeight(px, deltaPx, viewportH, reservedH = 0) {
   const step = Number.isFinite(deltaPx) ? deltaPx : 0;
   const from = Number.isFinite(px) ? px : DEFAULT_STAGE_HEIGHT_PX;
-  return clampStageHeight(from + step, viewportH);
+  return clampStageHeight(from + step, viewportH, reservedH);
 }
 
 /**
@@ -502,6 +528,47 @@ export function fileInputNeedsReset(value) {
 }
 
 // ---------------------------------------------------------------------------
+// Doc-shortcut focus gating (pure; v1.6.1 REG-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Focus surfaces the transport shortcuts must yield to (v1.6.1 REG-2): the
+ * places where keystrokes MEAN typing or native widget behavior — text inputs
+ * (track-row time fields), selects (open dropdowns, option arrows),
+ * textareas, contenteditable. PURE — unit-tested via shortcutEnabledFor.
+ *
+ * Buttons are deliberately NOT excluded: excluding them stranded the
+ * shortcuts whenever focus stayed on a clicked control (a focused button made
+ * Space RE-ACTIVATE THE BUTTON — re-stepping frames, exiting fullscreen —
+ * instead of toggling playback). Focused buttons are safe now: pointer
+ * activation blurs them (mountApp wiring), and the Space branch preventDefaults
+ * the browser's key-activation so exactly one toggle happens.
+ * @type {string}
+ */
+export const SHORTCUT_TYPING_SELECTOR = 'input, select, textarea, [contenteditable]';
+
+/**
+ * Whether the document-level transport shortcuts may run for a keydown whose
+ * target is `focusEl` (v1.6.1 REG-2). PURE: enabled when the element is
+ * missing/dead (body) or NOT inside the typing surfaces; disabled inside
+ * input/select/textarea/[contenteditable] — the track-row time inputs keep
+ * their exclusion (typing m:ss.s must never frame-step the video).
+ *
+ * @param {Element | null | undefined} focusEl The keydown event's target
+ *     (the focused element).
+ * @param {{exclude?: string}} [opts] Override selector for callers that need
+ *     a narrower/wider exclusion (defaults to SHORTCUT_TYPING_SELECTOR).
+ * @returns {boolean} True when the shortcuts should fire.
+ */
+export function shortcutEnabledFor(focusEl, opts = {}) {
+  const selector = typeof opts.exclude === 'string' ? opts.exclude : SHORTCUT_TYPING_SELECTOR;
+  if (!focusEl || typeof /** @type {{closest?: unknown}} */ (focusEl).closest !== 'function') {
+    return true;
+  }
+  return /** @type {Element} */ (focusEl).closest(selector) == null;
+}
+
+// ---------------------------------------------------------------------------
 // REQ-021 error mapping tables (pure)
 // ---------------------------------------------------------------------------
 
@@ -662,6 +729,9 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   const els = {
     serveGate: $('serve-gate'),
     stepper: $('stepper'),
+    appMain: $('app-main'),
+    stageColumn: $('stage-column'),
+    keyboardHints: $('keyboard-hints'),
     intakePanel: $('intake-panel'),
     dropZone: $('drop-zone'),
     fileInput: /** @type {HTMLInputElement | null} */ ($('file-input')),
@@ -799,6 +869,35 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       bar.style.opacity = '1';
       const clamped = Math.min(1, Math.max(0, ratio));
       bar.style.width = `${Math.round(clamped * 1000) / 10}%`;
+    }
+  }
+
+  // --- v1.6.1 REG-2: pointer-activated controls release focus --------------
+  //
+  // Browsers focus a control on mousedown and LEAVE it focused after the
+  // click. With the old T-602 exclusion (any `button`/`select` target
+  // disabled the doc-level shortcuts), every clicked control then silently
+  // ate Space/←/→: Space re-ACTIVATED the focused button instead (re-stepped
+  // frames, exited fullscreen) — the field-reported dead keyboard transport.
+  // Two-part fix: (1) these helpers blur transport/overlay/fullscreen/handle/
+  // style-select/action controls after POINTER activation so focus returns to
+  // <body> (keyboard activation keeps focus — Enter/Space still run the
+  // focused control for a11y), and (2) the doc handler now excludes only the
+  // typing surfaces (shortcutEnabledFor) and preventDefaults Space so a
+  // focused button can never double-fire.
+
+  /** Blur `el` after a pointer click (buttons — not selects, not the handle). */
+  function blurAfterClick(el) {
+    if (el && typeof el.blur === 'function') {
+      el.addEventListener('click', () => el.blur());
+    }
+  }
+
+  /** Blur `el` after a committed choice (selects — blur-to-open would close
+   * the native dropdown before any option could be picked). */
+  function blurAfterChange(el) {
+    if (el && typeof el.blur === 'function') {
+      el.addEventListener('change', () => el.blur());
     }
   }
 
@@ -1126,6 +1225,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     });
   }
   els.changeFile?.addEventListener('click', () => els.fileInput?.click());
+  blurAfterClick(els.changeFile);
 
   // --- Clear (v1.6.0): full unload & reset back to the landing view ----------
   //
@@ -1267,6 +1367,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   }
 
   els.clearFile?.addEventListener('click', () => clearAll());
+  blurAfterClick(els.clearFile);
 
   // --- Analyze pass (REQ-009 / AC-03) --------------------------------------------
 
@@ -1436,7 +1537,9 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   }
 
   els.analyzeButton?.addEventListener('click', () => startAnalyze());
+  blurAfterClick(els.analyzeButton);
   els.analyzeCancel?.addEventListener('click', () => analyzeCtl?.abort());
+  blurAfterClick(els.analyzeCancel);
 
   // --- Detection sensitivity + single-frame threshold compare (REQ-113/114) ----
 
@@ -1523,6 +1626,9 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       cap.textContent = formatThresholdCaption(vm);
       item.append(canvas, cap);
       item.addEventListener('click', () => applyLevelToSliders(vm.level));
+      // v1.6.1 REG-2: the panel is a <button> — release focus after the click
+      // so the doc-level transport shortcuts keep working.
+      item.addEventListener('click', () => item.blur());
       frag.appendChild(item);
     }
     els.thresholdPanels.replaceChildren(frag);
@@ -1586,6 +1692,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     }
   }
   els.compareButton?.addEventListener('click', () => void runThresholdCompare());
+  blurAfterClick(els.compareButton);
 
   // --- Export (REQ-017/018/019/021) -----------------------------------------------
 
@@ -1659,7 +1766,9 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   }
 
   els.exportButton?.addEventListener('click', () => startExport());
+  blurAfterClick(els.exportButton);
   els.exportCancel?.addEventListener('click', () => exportCtl?.abort());
+  blurAfterClick(els.exportCancel);
 
   // --- Transport (SPEC-VID-002 REQ-105 / AC-104; v1.4.0 REQ-111) ---------------
 
@@ -1746,6 +1855,19 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   els.ovPlay?.addEventListener('click', () => togglePlay());
   els.ovSpeed?.addEventListener('change', () => setSpeed(els.ovSpeed?.value));
   els.ovExit?.addEventListener('click', () => exitPreview());
+  // v1.6.1 REG-2: every transport/overlay control releases focus after pointer
+  // activation (buttons on click, selects on the committed change) so the
+  // doc-level shortcuts keep working after clicking ANY control.
+  blurAfterClick(els.transportStart);
+  blurAfterClick(els.transportBack);
+  blurAfterClick(els.transportFwd);
+  blurAfterClick(els.transportPlay);
+  blurAfterChange(els.transportSpeed);
+  blurAfterClick(els.ovBack);
+  blurAfterClick(els.ovFwd);
+  blurAfterClick(els.ovPlay);
+  blurAfterChange(els.ovSpeed);
+  blurAfterClick(els.ovExit);
   for (const ev of ['play', 'pause', 'timeupdate', 'seeked', 'loadedmetadata', 'durationchange', 'ratechange']) {
     els.video?.addEventListener(ev, updateTransportUi);
   }
@@ -1851,6 +1973,16 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       enterZoomFallback();
     }
   });
+  // v1.6.1 REG-2: do NOT blur here unconditionally — inside NATIVE fullscreen,
+  // focus must stay within the fullscreen element (blurring to <body> is
+  // blocked/unfocusable), and the button is the fullscreen tree's focus anchor.
+  // The Space path is safe instead: the doc handler preventDefaults Space so
+  // the focused button can never re-activate (no accidental exit).
+  if (els.fullscreenButton) {
+    els.fullscreenButton.addEventListener('click', () => {
+      if (!isNativeFullscreen()) els.fullscreenButton?.blur(); // zoom fallback + plain view → body
+    });
+  }
   doc.addEventListener('fullscreenchange', () => {
     updateFullscreenButton();
     triggerPreviewResize();
@@ -1881,6 +2013,41 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     return Number.isFinite(h) && h > 0 ? h : 0;
   }
 
+  /**
+   * v1.6.1 REG-3: vertical space AROUND the stage that must stay visible —
+   * everything ABOVE the stage in the document (header, intake/capability
+   * panel on the stacked mobile layout, #app-main top padding — captured by
+   * the stage's document-relative top), everything BELOW it inside the stage
+   * column (resize handle, transport bar, manual hint, timeline, flex gaps =
+   * columnHeight − stageHeight, stable while dragging because the growth
+   * cancels out), plus the footer and the bottom #app-main padding. The old
+   * clamp only knew 75vh, so dragging to max on short viewports pushed the
+   * transport bar and the timeline into/past the footer (field report: "footer
+   * overlaps the timeline when the preview is enlarged").
+   *
+   * Returns 0-safe partials when elements are missing; at the gate step
+   * (workspace hidden) the stage rect is 0 and only real chrome is reserved.
+   *
+   * @returns {number} Reserved height, CSS px (≥ 0).
+   */
+  function stageReservedHeight() {
+    const stageH = els.previewStage ? els.previewStage.offsetHeight : 0;
+    const columnH = els.stageColumn ? els.stageColumn.offsetHeight : 0;
+    const footerH = els.keyboardHints ? els.keyboardHints.offsetHeight : 0;
+    const view = doc.defaultView;
+    let stageTopDoc = 0;
+    if (els.previewStage && view && typeof els.previewStage.getBoundingClientRect === 'function') {
+      // Document-relative top: rect.top is viewport-relative and the page may
+      // be scrolled (stacked mobile layout) — scrollY corrects that.
+      stageTopDoc = els.previewStage.getBoundingClientRect().top + (view.scrollY || 0);
+    }
+    let padBottom = 0;
+    if (els.appMain && view && typeof view.getComputedStyle === 'function') {
+      padBottom = parseFloat(view.getComputedStyle(els.appMain).paddingBottom) || 0;
+    }
+    return Math.max(0, stageTopDoc) + Math.max(0, columnH - stageH) + footerH + padBottom;
+  }
+
   /** Live stage height (source of truth once the user first resizes). */
   let stageHeight = DEFAULT_STAGE_HEIGHT_PX;
 
@@ -1891,7 +2058,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
    * redraw() so the overlay re-scales to the new layout × DPR.
    */
   function applyStageHeight(px) {
-    stageHeight = clampStageHeight(px, stageViewportH());
+    stageHeight = clampStageHeight(px, stageViewportH(), stageReservedHeight());
     if (els.previewStage) {
       els.previewStage.style.setProperty('--stage-h', `${stageHeight}px`);
     }
@@ -1935,6 +2102,12 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     };
     resizeHandle.addEventListener('pointerup', endDrag);
     resizeHandle.addEventListener('pointercancel', endDrag);
+    // v1.6.1 REG-2: after a POINTER drag, release focus so the doc-level
+    // transport shortcuts keep working (keyboard activation keeps focus —
+    // the ArrowUp/ArrowDown resize path below depends on it).
+    resizeHandle.addEventListener('pointerup', () => {
+      if (resizeHandle.blur) resizeHandle.blur();
+    });
     resizeHandle.addEventListener('dblclick', () => {
       applyStageHeight(DEFAULT_STAGE_HEIGHT_PX);
     });
@@ -1950,16 +2123,25 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       // Stop the doc-level shortcuts: ArrowUp/Down would otherwise ALSO
       // frame-step the video in review/done (the handle is not a button).
       e.stopPropagation();
-      applyStageHeight(nextStageHeight(stageHeight, step, stageViewportH()));
+      applyStageHeight(nextStageHeight(stageHeight, step, stageViewportH(), stageReservedHeight()));
     });
   }
 
-  // --- Keyboard (design-direction: space / ← / → / B in review states) ----------
+  // --- Keyboard (design-direction: space / ← / → / B in review states) ------
+  //
+  // v1.6.1 REG-2: exclusion is limited to the TYPING surfaces
+  // (shortcutEnabledFor — input/select/textarea/[contenteditable]; the
+  // track-row time inputs keep it). Buttons are no longer excluded: focus
+  // remaining on a clicked control used to make Space RE-ACTIVATE that
+  // button (re-step a frame, exit fullscreen) instead of toggling playback.
+  // The Space branch preventDefaults, so a button focused despite the
+  // blur-on-click wiring (keyboard users, native-fullscreen focus anchoring)
+  // toggles the video EXACTLY ONCE — the browser's key-activation click on
+  // the focused button is cancelled.
 
   doc.addEventListener('keydown', (e) => {
     const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
-    if (target && typeof target.closest === 'function' &&
-        target.closest('input, select, button, textarea, [contenteditable]')) return;
+    if (!shortcutEnabledFor(target)) return;
     if (!(app.step === 'review' || app.step === 'done')) return;
     if (!els.video) return; // togglePlay/stepFrame guard internally too
     if (e.key === ' ') {

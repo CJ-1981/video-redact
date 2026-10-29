@@ -6,6 +6,23 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-10-29
+
+Field-regression fixes in the review workspace: timeline seeking, keyboard transport, and the enlarged-preview layout.
+
+### Fixed
+
+- Timeline click-to-seek restored and accurate. Two defects shipped in the v1.3.0 trim-gesture rework. (1) The seek mapped the pointer through the full `#timeline` strip rect (timecode labels + padding included) instead of the time axis the chips and playhead live in, so every click landed up to ~10% of the video away from the point actually clicked (`editor.js` now maps through the chips-layer rect, with label/padding clicks clamping to the ends — pure `timelineTimeAt`). (2) The "follow-up click suppressed" flag of a trim-armed pointerdown survived a `pointercancel` (touch scroll over the strip cancels pointers constantly), silently swallowing the NEXT click — clicking the timeline appeared dead until a second tap. The suppression now resets on cancel, expires if the follow-up click never arrives, and additionally refuses presses that moved more than 8 px (a drag released on the strip is never a seek).
+- Keyboard shortcuts work again after clicking any control. The doc-level handler excluded key events whose focus was inside ANY `button`, and browsers leave a clicked button focused — so after touching transport/fullscreen/handle controls, Space re-activated the focused button (re-stepping frames, exiting fullscreen) instead of toggling playback. Transport, overlay, fullscreen, handle, style-select and action controls now release focus after pointer activation (`blur` on click/change/pointerup), the exclusion is limited to typing surfaces (`shortcutEnabledFor`: input/select/textarea/contenteditable — the track-row time inputs keep it), and the Space branch preventDefaults so a focused button toggles the video exactly once.
+- The footer no longer overlaps the timeline on enlarged previews. The stage-height clamp only knew the 75vh bound, which ignores the header, footer, paddings and the rest of the stage column — dragging to max pushed the transport bar and timeline into and past the footer (measured: timeline bottom at y=1431 on a 390×844 viewport). The clamp now also caps the stage at `innerHeight − reserved` where `reserved` is measured live (header + footer + #app-main vertical padding + every non-stage stage-column child including flex gaps); below the 220 px floor the min still wins by design.
+
+### Verification
+
+- Unit: 469 → 486 tests, all passing (14 files).
+- Probe: `node tools/debug-regressions.mjs` (combined v1.6.1 field-regression probe on the real dist) — timeline seek accuracy (strip/axis/chip clicks), suppression latch, trim-then-seek, keyboard transport after clicking controls (incl. fullscreen + time-input exclusion), footer/timeline clearance at max stage height on 1280×800 and 390×844.
+- E2E: 6/6 passing in Chromium (coordinator run).
+- Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
 ## [1.6.0] — 2026-10-29
 
 A "✕ Clear" button that unloads the current video and resets the whole app to the landing view.

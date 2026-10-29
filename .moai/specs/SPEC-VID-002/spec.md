@@ -69,3 +69,8 @@ v1.1.0 iterates the review experience of SPEC-VID-001: a solid-black redaction s
 - **REQ-108** — The track list shall expose per-track independent time editing: editable start/end inputs (clock format, committed on change/blur) that trim the track via the same trim path as chip dragging, updating preview, chips, and export span immediately.
 - **REQ-109** — Manual tracks shall receive distinct categorical palette colors (same TRACK_COLORS sequence as auto tracks) instead of a shared fixed color; manual identity remains distinguishable (outline/label), not by color collision.
 - **REQ-110** — During a chip-edge trim drag the chip's rendered length shall update live (and the row span readout with it); the operation must be visually self-evident. [Bug: v1.1.0/v1.2.0 trim drag updated the span but not the rendered chip.]
+
+## Amendments — v1.4.0 (2026-10-29, field feedback round 3)
+
+- **REQ-111** — In fullscreen and enlarged (zoom) preview modes, transport controls (play/pause, frame step, speed, and an exit control) shall remain reachable via an overlay control bar rendered inside the preview stage, shown only in those modes and auto-hiding after ~3 s of interaction idle (reappears on pointer/touch activity).
+- **REQ-112** — The UI shall be mobile-friendly: at narrow viewport widths (≤ ~820 px) the layout collapses to a single column (right rail below the timeline), controls meet ~40 px touch-target sizing, timeline chip edge zones widen on coarse pointers, and no horizontal overflow occurs at 390 px width.

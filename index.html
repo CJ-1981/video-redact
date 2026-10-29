@@ -249,6 +249,62 @@
     }
     #preview-video { display: block; }
 
+    /* Fullscreen / enlarge (SPEC-VID-002 REQ-106): native :fullscreen gets a
+       chrome-free stage; the in-page fallback covers the viewport via
+       .preview-zoom (below toasts so errors stay visible, above everything
+       else). The exit control is the same always-visible stage button. */
+    #preview-fullscreen {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 5;
+      padding: 4px 10px;
+      font-size: 13px;
+      line-height: 1.2;
+      opacity: 0.85;
+    }
+    #preview-fullscreen:hover { opacity: 1; }
+    #preview-stage:fullscreen {
+      border: none;
+      border-radius: 0;
+      min-height: 0;
+    }
+    #preview-stage.preview-zoom {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      border: none;
+      border-radius: 0;
+      min-height: 0;
+    }
+
+    /* ── Transport bar (SPEC-VID-002 REQ-105) ── */
+    #transport-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #transport-bar button {
+      padding: 4px 10px;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+    #transport-bar select { padding: 4px 6px; font-size: 12.5px; }
+    #transport-time {
+      margin-left: auto;
+      color: var(--ink);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    /* ── Discoverability hint (manual regions, SPEC-VID-002) ── */
+    .manual-hint {
+      margin: 0;
+      color: var(--ink);
+      font-size: 12px;
+    }
+    .manual-hint kbd { font-size: 10px; }
+
     /* ── Timeline strip (signature element) ── */
     #timeline {
       display: flex;
@@ -344,6 +400,7 @@
     .track-row .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
     .track-row .label { flex: 1; font-size: 13px; }
     .track-row .span { color: var(--ink); font-size: 11.5px; }
+    .track-row .style-select { padding: 2px 4px; font-size: 11.5px; border-radius: 6px; }
     .track-row.enabled-off { opacity: 0.55; }
     .track-row.enabled-off .label { color: var(--safe); text-decoration: line-through; }
     .track-row.manual .swatch { background: var(--alert); }
@@ -467,8 +524,24 @@
         <div id="preview-stage">
           <video id="preview-video" playsinline></video>
           <canvas id="overlay-canvas"></canvas>
+          <button id="preview-fullscreen" type="button" title="Enlarge preview" aria-label="Enlarge preview">⛶</button>
         </div>
-        <section id="timeline" aria-label="Track timeline — click a chip to scrub and toggle its redaction">
+        <div id="transport-bar" role="group" aria-label="Playback transport">
+          <button id="transport-start" type="button" title="Jump to start" aria-label="Jump to start">⏮</button>
+          <button id="transport-back" type="button" title="Step one frame back" aria-label="Frame back">⏪</button>
+          <button id="transport-play" type="button" title="Play (space)" aria-label="Play">▶</button>
+          <button id="transport-fwd" type="button" title="Step one frame forward" aria-label="Frame forward">⏩</button>
+          <select id="transport-speed" aria-label="Playback speed">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+          <span id="transport-time" class="num">0:00.0 / 0:00.0</span>
+        </div>
+        <p id="manual-hint" class="manual-hint">Missed a face? Pause (<kbd>Space</kbd>) and drag a box on the video — it becomes a solid redaction over the whole clip.</p>
+        <section id="timeline" aria-label="Track timeline — click a chip to scrub and toggle its redaction; drag a chip edge to trim its span">
           <span id="timeline-current" class="num timecode">0:00.0</span>
           <div id="timeline-track">
             <div id="track-chips"></div>
@@ -528,7 +601,7 @@
   </main>
 
   <footer id="keyboard-hints">
-    <span class="hints"><kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>←</kbd>/<kbd>→</kbd> frame step&ensp;·&ensp;<kbd>B</kbd> draw manual box&ensp;·&ensp;click a timeline chip to scrub &amp; toggle</span>
+    <span class="hints"><kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>←</kbd>/<kbd>→</kbd> frame step&ensp;·&ensp;<kbd>B</kbd> draw manual box&ensp;·&ensp;click a timeline chip to scrub &amp; toggle&ensp;·&ensp;drag a chip edge to trim</span>
     <span id="app-version" class="num"></span>
   </footer>
 

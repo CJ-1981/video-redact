@@ -1,6 +1,7 @@
 /**
  * Unit tests for src/editor.js — PURE timeline model half (SPEC-VID-001,
- * design.md §4.7, REQ-012/013/014/015, AC-06/07/18; tasks.md T-502).
+ * design.md §4.7, REQ-012/013/014/015, AC-06/07/18; SPEC-VID-002 REQ-101/103,
+ * AC-101; tasks.md T-502).
  *
  * Only the pure functions + the module's export surface are tested here —
  * the node environment has no DOM and the adapters (mountEditor,
@@ -9,10 +10,13 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  MIN_MANUAL_SPAN_S,
+  MIN_TRACK_SPAN_S,
+  CHIP_EDGE_PX,
   renderTimeline,
   hitTestTimeline,
   toggleTrack,
+  trimTrack,
+  setTrackStyle,
   tracksAtForView,
   manualTrackFromBox,
   scaleTracksToCanvas,
@@ -97,19 +101,27 @@ describe('renderTimeline (chips view model + playhead)', () => {
     expect(renderTimeline([], 10, 5).chips).toEqual([]);
     expect(renderTimeline(undefined, 10, 5).chips).toEqual([]);
   });
+
+  it('renders a full-span manual track as a full-width chip (REQ-103)', () => {
+    const track = manualTrackFromBox(1, 2, { x: 0, y: 0, w: 10, h: 10 }, 10);
+    const vm = renderTimeline([track], 10, 5);
+    expect(vm.chips[0].startPct).toBe(0);
+    expect(vm.chips[0].endPct).toBe(100);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// hitTestTimeline (REQ-013, AC-18: "clicking a chip seeks the playhead")
+// hitTestTimeline (REQ-013, AC-18; SPEC-VID-002 REQ-103 edge zones)
 // ---------------------------------------------------------------------------
 
 describe('hitTestTimeline (chip under a point, smallest span wins)', () => {
   // Geometry used throughout: width=100 px, durationSec=10 s → the pointer x
-  // is strip CSS px and maps to t = (x / width) * durationSec = x / 10.
-  it('finds the track whose span contains the mapped time', () => {
+  // is strip CSS px and maps to t = (x / width) * durationSec = x / 10, so
+  // 1 px == 0.1 s and the default CHIP_EDGE_PX zone == 0.6 s.
+  it('finds the track whose span contains the mapped time (body zone)', () => {
     const a = makeTrack({ id: 1, start: 2, end: 4 });
     const hit = hitTestTimeline(30, 10, 100, [a], 10); // x=30% → t=3
-    expect(hit).toEqual({ track: a });
+    expect(hit).toEqual({ track: a, zone: 'body' });
   });
 
   it('returns null off every chip and on empty/missing tracks', () => {
@@ -120,10 +132,10 @@ describe('hitTestTimeline (chip under a point, smallest span wins)', () => {
     expect(hitTestTimeline(30, 10, 100, undefined, 10)).toBeNull();
   });
 
-  it('includes the span edges (t === start and t === end, like tracksAt)', () => {
+  it('includes the span edges (t === start / t === end) as edge zones', () => {
     const a = makeTrack({ start: 2, end: 4 });
-    expect(hitTestTimeline(20, 10, 100, [a], 10)?.track.id).toBe(1); // t=2
-    expect(hitTestTimeline(40, 10, 100, [a], 10)?.track.id).toBe(1); // t=4
+    expect(hitTestTimeline(20, 10, 100, [a], 10)).toEqual({ track: a, zone: 'start' }); // t=2
+    expect(hitTestTimeline(40, 10, 100, [a], 10)).toEqual({ track: a, zone: 'end' }); // t=4
   });
 
   it('maps the right edge exactly to duration (t = durationSec hittable)', () => {
@@ -143,7 +155,7 @@ describe('hitTestTimeline (chip under a point, smallest span wins)', () => {
 
   it('uses spans clamped to the duration (track beyond end hit only within it)', () => {
     const a = makeTrack({ start: 8, end: 15 }); // clamps to [8, 10]
-    expect(hitTestTimeline(95, 10, 100, [a], 10)?.track.id).toBe(1); // t=9.5
+    expect(hitTestTimeline(89, 10, 100, [a], 10)?.track.id).toBe(1); // t=8.9
     expect(hitTestTimeline(5, 10, 100, [a], 10)).toBeNull(); // t=0.5 < start
   });
 
@@ -155,8 +167,63 @@ describe('hitTestTimeline (chip under a point, smallest span wins)', () => {
 
   it('ignores y (single-lane timeline): every lane resolves identically', () => {
     const a = makeTrack({ start: 2, end: 4 });
-    expect(hitTestTimeline(30, 0, 100, [a], 10)).toEqual({ track: a }); // t=3
-    expect(hitTestTimeline(30, 43, 100, [a], 10)).toEqual({ track: a });
+    expect(hitTestTimeline(30, 0, 100, [a], 10)).toEqual({ track: a, zone: 'body' }); // t=3
+    expect(hitTestTimeline(30, 43, 100, [a], 10)).toEqual({ track: a, zone: 'body' });
+  });
+});
+
+describe('hitTestTimeline chip edge zones (SPEC-VID-002 REQ-103)', () => {
+  // width=100 px, durationSec=10 s → 1 px == 0.1 s; CHIP_EDGE_PX == 6 px
+  // → each edge zone is 0.6 s deep into a chip.
+  it('exposes the documented constants (≤ 6 px edges, 0.1 s min span)', () => {
+    expect(CHIP_EDGE_PX).toBe(6);
+    expect(MIN_TRACK_SPAN_S).toBe(0.1);
+  });
+
+  it("classifies 'start' within the edge zone and 'body' past it", () => {
+    const a = makeTrack({ start: 2, end: 4 });
+    expect(hitTestTimeline(20, 10, 100, [a], 10)?.zone).toBe('start'); // t=2.0
+    expect(hitTestTimeline(25, 10, 100, [a], 10)?.zone).toBe('start'); // t=2.5 (0.5 ≤ 0.6)
+    expect(hitTestTimeline(26.5, 10, 100, [a], 10)?.zone).toBe('body'); // t=2.65 (0.65 > 0.6)
+  });
+
+  it("classifies 'end' within the edge zone and 'body' before it", () => {
+    const a = makeTrack({ start: 2, end: 4 });
+    expect(hitTestTimeline(40, 10, 100, [a], 10)?.zone).toBe('end'); // t=4.0
+    expect(hitTestTimeline(37, 10, 100, [a], 10)?.zone).toBe('end'); // t=3.7 (0.3 ≤ 0.6)
+    expect(hitTestTimeline(33.5, 10, 100, [a], 10)?.zone).toBe('body'); // t=3.35 (0.65 > 0.6)
+  });
+
+  it("zones shrink with a smaller edgePx and vanish at 0 (whole chip = 'body')", () => {
+    const a = makeTrack({ start: 2, end: 4 });
+    expect(hitTestTimeline(29, 10, 100, [a], 10, 10)?.zone).toBe('start'); // 1.0 s zone
+    expect(hitTestTimeline(29, 10, 100, [a], 10)?.zone).toBe('body'); // default 0.6 s zone
+    expect(hitTestTimeline(20.5, 10, 100, [a], 10, 0)?.zone).toBe('body');
+    expect(hitTestTimeline(39.5, 10, 100, [a], 10, 0)?.zone).toBe('body');
+  });
+
+  it("splits overlapping zones at the chip midpoint when the span is tiny", () => {
+    const tiny = makeTrack({ start: 4.97, end: 5.03 }); // 0.06 s == 0.6 px wide
+    expect(hitTestTimeline(49.8, 10, 100, [tiny], 10)?.zone).toBe('start'); // t=4.98 < mid
+    expect(hitTestTimeline(50.2, 10, 100, [tiny], 10)?.zone).toBe('end'); // t=5.02 ≥ mid
+  });
+
+  it("zones are computed against the CLAMPED span (track beyond duration)", () => {
+    const a = makeTrack({ start: 8, end: 15 }); // clamps to [8, 10]
+    expect(hitTestTimeline(80, 10, 100, [a], 10)?.zone).toBe('start'); // t=8
+    expect(hitTestTimeline(89, 10, 100, [a], 10)?.zone).toBe('body'); // t=8.9
+    expect(hitTestTimeline(100, 10, 100, [a], 10)?.zone).toBe('end'); // t=10
+  });
+
+  it("the crossing rule still wins before zones are computed (winner's zone)", () => {
+    const long = makeTrack({ id: 1, start: 0, end: 10 });
+    const short = makeTrack({ id: 2, start: 2.5, end: 3.5 });
+    // t=3.2 is inside the short chip's end zone → the WINNER's zone, not the
+    // long chip's body zone.
+    expect(hitTestTimeline(32, 10, 100, [long, short], 10)).toEqual({
+      track: short,
+      zone: 'end',
+    });
   });
 });
 
@@ -204,6 +271,135 @@ describe('toggleTrack (immutable enabled flip)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// trimTrack (SPEC-VID-002 REQ-103, AC-101)
+// ---------------------------------------------------------------------------
+
+describe('trimTrack (immutable span trim)', () => {
+  it('trims the target span and leaves siblings untouched', () => {
+    const a = makeTrack({ id: 1, start: 0, end: 10 });
+    const b = makeTrack({ id: 2, start: 1, end: 2 });
+    const out = trimTrack([a, b], 1, 3, 6);
+    expect(out[0].start).toBe(3);
+    expect(out[0].end).toBe(6);
+    expect(out[1]).toEqual(b);
+  });
+
+  it('returns a NEW array and NEW target object — no mutation anywhere', () => {
+    const a = makeTrack({ id: 1, start: 0, end: 10 });
+    const tracks = [a];
+    const out = trimTrack(tracks, 1, 2, 8);
+    expect(out).not.toBe(tracks);
+    expect(out[0]).not.toBe(a);
+    expect(a.start).toBe(0); // original untouched
+    expect(a.end).toBe(10);
+  });
+
+  it('orders inverted input (min, max)', () => {
+    const out = trimTrack([makeTrack({ start: 0, end: 10 })], 1, 7, 3);
+    expect(out[0].start).toBe(3);
+    expect(out[0].end).toBe(7);
+  });
+
+  it('clamps both bounds into [0, durationSec]', () => {
+    const out = trimTrack([makeTrack({ start: 0, end: 10 })], 1, -5, 20, 10);
+    expect(out[0].start).toBe(0);
+    expect(out[0].end).toBe(10);
+    const neg = trimTrack([makeTrack({ start: 5, end: 9 })], 1, -3, -1);
+    expect(neg[0].start).toBe(0);
+    expect(neg[0].end).toBe(0.1); // clamped then floored to the min span
+  });
+
+  it(`floors the span at ${MIN_TRACK_SPAN_S}s (growing the end first)`, () => {
+    const out = trimTrack([makeTrack({ start: 5, end: 6 })], 1, 5, 5.05);
+    expect(out[0].start).toBe(5);
+    expect(out[0].end).toBeCloseTo(5 + MIN_TRACK_SPAN_S, 10);
+  });
+
+  it('keeps the floor at the duration end by pulling the start back', () => {
+    const out = trimTrack([makeTrack({ start: 0, end: 10 })], 1, 9.95, 9.98, 10);
+    expect(out[0].end).toBe(10);
+    expect(out[0].start).toBeCloseTo(10 - MIN_TRACK_SPAN_S, 10);
+  });
+
+  it('degrades non-finite bounds (start → 0, end → start) then floors', () => {
+    const out = trimTrack([makeTrack({ start: 0, end: 10 })], 1, NaN, NaN);
+    expect(out[0].start).toBe(0);
+    expect(out[0].end).toBeCloseTo(MIN_TRACK_SPAN_S, 10);
+  });
+
+  it('returns unchanged content (new array) for unknown ids', () => {
+    const tracks = [makeTrack({ id: 1, start: 2, end: 4 })];
+    const out = trimTrack(tracks, 99, 0, 1);
+    expect(out).not.toBe(tracks);
+    expect(out[0]).toEqual(tracks[0]);
+  });
+
+  it('integrates with tracksAt: the trimmed span IS the redacted span (AC-101)', () => {
+    const tracks = [makeTrack({ id: 1, start: 0, end: 10 })];
+    const trimmed = trimTrack(tracks, 1, 2, 3, 10);
+    expect(tracksAt(trimmed, 1)).toEqual([]); // before the span
+    expect(tracksAt(trimmed, 2.5)).toHaveLength(1); // inside the span
+    expect(tracksAt(trimmed, 5)).toEqual([]); // after the span
+    expect(tracksAt(tracks, 5)).toHaveLength(1); // original state intact
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setTrackStyle (SPEC-VID-002 REQ-101, AC-103)
+// ---------------------------------------------------------------------------
+
+describe('setTrackStyle (immutable style flip)', () => {
+  it('sets the target style and leaves siblings untouched', () => {
+    const a = makeTrack({ id: 1, style: 'pixelate' });
+    const b = makeTrack({ id: 2, style: 'pixelate' });
+    const out = setTrackStyle([a, b], 1, 'solid');
+    expect(out[0].style).toBe('solid');
+    expect(out[1].style).toBe('pixelate');
+  });
+
+  it('returns a NEW array and NEW target object — no mutation anywhere', () => {
+    const a = makeTrack({ id: 1, style: 'pixelate' });
+    const tracks = [a];
+    const out = setTrackStyle(tracks, 1, 'solid');
+    expect(out).not.toBe(tracks);
+    expect(out[0]).not.toBe(a);
+    expect(a.style).toBe('pixelate'); // original untouched
+  });
+
+  it('round-trips pixelate ↔ solid', () => {
+    let tracks = [makeTrack({ id: 1, style: 'pixelate' })];
+    tracks = setTrackStyle(tracks, 1, 'solid');
+    expect(tracks[0].style).toBe('solid');
+    tracks = setTrackStyle(tracks, 1, 'pixelate');
+    expect(tracks[0].style).toBe('pixelate');
+  });
+
+  it('rejects styles outside the contract (content unchanged, new array)', () => {
+    const tracks = [makeTrack({ id: 1, style: 'pixelate' })];
+    for (const bogus of ['blur', '', 'SOLID', null, undefined, 42]) {
+      const out = setTrackStyle(tracks, 1, /** @type {any} */ (bogus));
+      expect(out).not.toBe(tracks);
+      expect(out[0]).toEqual(tracks[0]);
+    }
+  });
+
+  it('returns unchanged content for unknown ids', () => {
+    const tracks = [makeTrack({ id: 1, style: 'pixelate' })];
+    const out = setTrackStyle(tracks, 99, 'solid');
+    expect(out).not.toBe(tracks);
+    expect(out[0]).toEqual(tracks[0]);
+  });
+
+  it('style rides along the chips view model (single source: track.style)', () => {
+    let tracks = [makeTrack({ id: 1, style: 'pixelate' })];
+    const before = renderTimeline(tracks, 10, 0).chips[0].track.style;
+    expect(before).toBe('pixelate');
+    tracks = setTrackStyle(tracks, 1, 'solid');
+    expect(renderTimeline(tracks, 10, 0).chips[0].track.style).toBe('solid');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // tracksAtForView (view seam over redact.tracksAt)
 // ---------------------------------------------------------------------------
 
@@ -224,10 +420,10 @@ describe('tracksAtForView (thin wrapper, invariant never swallowed)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// manualTrackFromBox (REQ-015, AC-07)
+// manualTrackFromBox (REQ-015 + SPEC-VID-002 REQ-103, AC-07/AC-101)
 // ---------------------------------------------------------------------------
 
-describe('manualTrackFromBox (manual region factory)', () => {
+describe('manualTrackFromBox (manual region factory — full-span default)', () => {
   const box = { x: 40, y: 30, w: 120, h: 80 };
 
   it('builds a red, enabled, manual-source track labelled "Manual #N"', () => {
@@ -240,35 +436,68 @@ describe('manualTrackFromBox (manual region factory)', () => {
     expect(track.source).toBe('manual');
   });
 
-  it('keys a COPY of the box at t (caller object never shared)', () => {
+  it('defaults to SOLID style (REQ-101: manual regions burn opaque black)', () => {
+    expect(manualTrackFromBox(1, 3, box, 10).style).toBe('solid');
+  });
+
+  it('spans the WHOLE video by default: [0, durationSec] (REQ-103)', () => {
+    const track = manualTrackFromBox(1, 3, box, 10);
+    expect(track.start).toBe(0);
+    expect(track.end).toBe(10);
+  });
+
+  it('keys a COPY of the box as the constant keyframe at 0 (never shared)', () => {
     const track = manualTrackFromBox(1, 3, box);
     expect(track.keyframes.size).toBe(1);
-    const kf = track.keyframes.get(3);
+    const kf = track.keyframes.get(0);
     expect(kf).toEqual(box);
     expect(kf).not.toBe(box);
   });
 
-  it(`materializes a ${MIN_MANUAL_SPAN_S}s minimum span [t, t + min]`, () => {
-    expect(MIN_MANUAL_SPAN_S).toBeGreaterThan(0);
-    const track = manualTrackFromBox(1, 3, box);
-    expect(track.start).toBe(3);
-    expect(track.end).toBeCloseTo(3 + MIN_MANUAL_SPAN_S, 10);
+  it('without a usable duration it degrades to [0, max(t, min-span)]', () => {
+    expect(manualTrackFromBox(1, 3, box).start).toBe(0);
+    expect(manualTrackFromBox(1, 3, box).end).toBe(3); // up to the drawn frame
+    expect(manualTrackFromBox(1, 0.05, box).end).toBe(MIN_TRACK_SPAN_S); // floor
+    expect(manualTrackFromBox(1, NaN, box).end).toBe(MIN_TRACK_SPAN_S);
+    expect(manualTrackFromBox(1, 3, box, 0).end).toBe(3); // 0 is not a duration
   });
 
-  it('clamps the span end to durationSec (and never below start)', () => {
-    expect(manualTrackFromBox(1, 9.8, box, 10).end).toBe(10);
-    // t beyond duration: span degenerates but stays valid (end ≥ start).
-    const beyond = manualTrackFromBox(1, 10.5, box, 10);
-    expect(beyond.start).toBe(10.5);
-    expect(beyond.end).toBe(10.5);
+  it('draws past the end still cover the whole video (span [0, duration])', () => {
+    const track = manualTrackFromBox(1, 10.5, box, 10);
+    expect(track.start).toBe(0);
+    expect(track.end).toBe(10);
   });
 
-  it('integrates: the created track renders as a chip and redacts like auto tracks', () => {
+  it('INTEGRATION: the sparse single keyframe redacts at EVERY t in the span', () => {
+    // Verified contract with redact.tracksAt/nearestBox: the nearest-keyframe
+    // lookup returns the constant box for any t — one keyframe suffices for a
+    // full-span manual region (documented editor.js divergence from the
+    // tracker's dense keyframes).
+    const track = manualTrackFromBox(3, 2, box, 10);
+    for (const t of [0, 0.001, 2, 5, 9.999, 10]) {
+      const hits = tracksAt([track], t);
+      expect(hits, `t=${t}`).toHaveLength(1);
+      expect(hits[0].box).toEqual(box);
+    }
+    expect(tracksAt([track], -0.5)).toEqual([]); // outside the span
+    expect(tracksAt([track], 10.5)).toEqual([]);
+  });
+
+  it('integrates: the created track renders as a full-width chip', () => {
     const track = manualTrackFromBox(3, 2, box, 10);
     const vm = renderTimeline([track], 10, 2.2);
     expect(vm.chips).toHaveLength(1);
-    expect(vm.chips[0].startPct).toBeCloseTo(20, 10);
-    expect(tracksAt([track], 2.2)).toHaveLength(1); // inside [2, 2.5] → pixelated
+    expect(vm.chips[0].startPct).toBe(0);
+    expect(vm.chips[0].endPct).toBe(100);
+  });
+
+  it('composes with trimTrack: draw full-span, then trim a sub-span', () => {
+    const track = manualTrackFromBox(1, 4, box, 10);
+    const tracks = trimTrack([track], 1, 2, 5, 10);
+    expect(tracks[0].start).toBe(2);
+    expect(tracks[0].end).toBe(5);
+    expect(tracksAt(tracks, 3)[0].box).toEqual(box); // same constant box
+    expect(tracksAt(tracks, 7)).toEqual([]);
   });
 });
 
@@ -312,11 +541,13 @@ describe('scaleTracksToCanvas (preview boxes for redact.pixelateFrame)', () => {
 // ---------------------------------------------------------------------------
 
 describe('DOM adapter guards (node environment, no faked DOM)', () => {
-  it('mountEditor(null, null) returns inert destroy/refresh that never throw', () => {
+  it('mountEditor(null, null) returns inert destroy/refresh/redraw that never throw', () => {
     const handle = mountEditor(null, null);
     expect(typeof handle.destroy).toBe('function');
     expect(typeof handle.refresh).toBe('function');
+    expect(typeof handle.redraw).toBe('function');
     expect(() => handle.refresh()).not.toThrow();
+    expect(() => handle.redraw()).not.toThrow();
     expect(() => handle.destroy()).not.toThrow();
   });
 
@@ -327,6 +558,7 @@ describe('DOM adapter guards (node environment, no faked DOM)', () => {
     );
     expect(() => {
       handle.refresh();
+      handle.redraw();
       handle.destroy();
     }).not.toThrow();
   });
@@ -338,7 +570,7 @@ describe('DOM adapter guards (node environment, no faked DOM)', () => {
 
   it('every pure export is a function (module contract surface)', () => {
     for (const fn of [
-      renderTimeline, hitTestTimeline, toggleTrack,
+      renderTimeline, hitTestTimeline, toggleTrack, trimTrack, setTrackStyle,
       tracksAtForView, manualTrackFromBox, scaleTracksToCanvas,
       beginManualBox, mountEditor,
     ]) {

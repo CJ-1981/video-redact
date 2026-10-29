@@ -6,6 +6,23 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-29
+
+SPEC-VID-002 — review UX & manual redaction enhancements from real-world field feedback.
+
+### Added
+
+- Solid redaction style: per-track `pixelate` / `solid` (opaque black) choice in the track list, defaulted to solid for manual regions and pixelate for auto-detected tracks; both styles burn through the same shared preview/export seam (`track.style` + per-track dispatch in `redact.pixelateFrame`) (REQ-101, AC-102/103).
+- Manual regions now span the entire video by default, with draggable timeline-chip edge handles (≤ 6 px hit zones) to trim the start/end and a 0.1 s minimum span — manual regions are fixed boxes, no motion tracking (REQ-103, AC-101).
+- Transport bar under the preview: jump-to-start, frame-step back/forward (±1 source frame, matching the keyboard shortcuts), play/pause with a live glyph swap, playback speed selector (0.25×–4×) and a current/total timecode readout; all keyboard shortcuts keep working (REQ-105, AC-104).
+- Fullscreen / enlarge preview control: native Fullscreen API where available, with an in-page viewport-covering fallback (`.preview-zoom`) and an always-visible exit control where it is not (iOS Safari); the preview overlay re-sizes to the enlarged display on enter/exit (REQ-106, AC-105).
+- Portrait-aware dashcam tiling: portrait frames tile vertically into stacked rows so small faces/plates reach ≥ ~2× the model-input scale (detector change; landscape tiling and single-coordinate merge unchanged) (REQ-107, AC-106).
+- Discoverability hint next to the timeline: pause and drag a box on the video to cover anything detection missed.
+
+### Fixed
+
+- Portrait video dashcam tiling was a no-op: the horizontal-only tile split produced a single tile (k=1) for portrait frames, so dashcam mode did nothing exactly where it was needed most — small faces in portrait phone footage now get real tile-scale magnification (miss analysis 2026-10-29).
+
 ## [1.0.0] — 2026-10-29
 
 Initial release — SPEC-VID-001: client-side video redaction web app (faces & license plates, pixelate burn-in, nothing uploaded).

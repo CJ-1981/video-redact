@@ -1,12 +1,15 @@
 /**
- * Unit tests for src/redact.js (SPEC-VID-001, design.md §4.5, REQ-007/014/016).
+ * Unit tests for src/redact.js (SPEC-VID-001 design.md §4.5, REQ-007/014/016;
+ * SPEC-VID-002 REQ-101/102 — per-track solid-black style).
  *
  * Canvas rendering is verified through a recording mock 2D context — no real
  * canvas exists in node. The pixelation pipeline is exercised end-to-end by
  * injecting a `scratch` factory whose context is the same kind of recorder.
  */
 import { describe, it, expect } from 'vitest';
-import { dilate, tracksAt, applyPixelation, drawOverlay } from '../../src/redact.js';
+import {
+  dilate, tracksAt, applyPixelation, applySolid, pixelateFrame, drawOverlay,
+} from '../../src/redact.js';
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -27,6 +30,7 @@ function makeCtx(canvasWidth = 1920, canvasHeight = 1080) {
     restore: () => calls.push(['restore']),
     beginPath: () => calls.push(['beginPath']),
     strokeRect: (x, y, w, h) => calls.push(['strokeRect', x, y, w, h]),
+    fillRect: (x, y, w, h) => calls.push(['fillRect', x, y, w, h]),
     fillText: (text, x, y) => calls.push(['fillText', text, x, y]),
     setLineDash: (dash) => calls.push(['setLineDash', dash]),
     drawImage: (img, ...args) => calls.push(['drawImage', img, ...args]),
@@ -306,6 +310,152 @@ describe('applyPixelation (design.md §4.5 burn-in, ADR-6)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// applySolid (REQ-101: 'solid' style — opaque black box)
+// ---------------------------------------------------------------------------
+
+describe('applySolid (REQ-101: opaque black box over the given box)', () => {
+  it('fills the EXACT box with opaque black', () => {
+    const rec = makeCtx();
+    applySolid(rec.ctx, { x: 10, y: 20, w: 100, h: 50 });
+
+    const fills = callsNamed(rec.calls, 'fillRect');
+    expect(fills).toHaveLength(1);
+    expect(fills[0].slice(1)).toEqual([10, 20, 100, 50]);
+    expect(rec.props.fillStyle).toBe('#000000');
+  });
+
+  it('clamps into the canvas bounds (left/top overflow)', () => {
+    const rec = makeCtx(1920, 1080);
+    applySolid(rec.ctx, { x: -15, y: -5, w: 100, h: 60 });
+    expect(callsNamed(rec.calls, 'fillRect')[0].slice(1)).toEqual([0, 0, 85, 55]);
+  });
+
+  it('clamps into the canvas bounds (right/bottom overflow)', () => {
+    const rec = makeCtx(1920, 1080);
+    applySolid(rec.ctx, { x: 1900, y: 1050, w: 100, h: 100 });
+    expect(callsNamed(rec.calls, 'fillRect')[0].slice(1)).toEqual([1900, 1050, 20, 30]);
+  });
+
+  it('no-ops without any fillRect for a box fully outside the canvas', () => {
+    const rec = makeCtx(100, 100);
+    applySolid(rec.ctx, { x: 200, y: 200, w: 50, h: 50 });
+    expect(callsNamed(rec.calls, 'fillRect')).toHaveLength(0);
+  });
+
+  it('rasterizes with fillRect only — never drawImage (no scratch, no sampling)', () => {
+    const rec = makeCtx();
+    applySolid(rec.ctx, { x: 0, y: 0, w: 40, h: 40 });
+    expect(callsNamed(rec.calls, 'drawImage')).toHaveLength(0);
+  });
+
+  it('wraps its drawing state in exactly one save/restore pair', () => {
+    const rec = makeCtx();
+    applySolid(rec.ctx, { x: 0, y: 0, w: 40, h: 40 });
+    const names = rec.calls.map((c) => c[0]);
+    expect(names[0]).toBe('save');
+    expect(names[names.length - 1]).toBe('restore');
+    expect(names.filter((n) => n === 'save')).toHaveLength(1);
+    expect(names.filter((n) => n === 'restore')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pixelateFrame — per-track style dispatch (REQ-101/102 shared seam)
+// ---------------------------------------------------------------------------
+
+describe('pixelateFrame — per-track style dispatch (REQ-101/102)', () => {
+  const frame = { width: 1920, height: 1080 };
+
+  it('solid track → opaque black fillRect over the DILATED box, no drawImage', () => {
+    const rec = makeCtx();
+    const track = makeTrack({
+      style: 'solid',
+      keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]),
+    });
+    pixelateFrame(rec.ctx, [track], 0, frame);
+
+    // dilate({100,50,40,40}, 0.15) = {97, 47, 46, 46} — same dilation as pixelate.
+    const fills = callsNamed(rec.calls, 'fillRect');
+    expect(fills).toHaveLength(1);
+    expect(fills[0].slice(1)).toEqual([97, 47, 46, 46]);
+    expect(rec.props.fillStyle).toBe('#000000');
+    expect(callsNamed(rec.calls, 'drawImage')).toHaveLength(0);
+  });
+
+  it('explicit pixelate track → downscale/upscale path, no fillRect', () => {
+    const rec = makeCtx();
+    const scratch = makeScratch();
+    const track = makeTrack({
+      style: 'pixelate',
+      keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]),
+    });
+    pixelateFrame(rec.ctx, [track], 0, frame, { scratch: () => scratch.canvas });
+
+    expect(callsNamed(rec.calls, 'fillRect')).toHaveLength(0);
+    const ups = callsNamed(rec.calls, 'drawImage');
+    expect(ups).toHaveLength(1);
+    expect(ups[0].slice(6)).toEqual([97, 47, 46, 46]);
+  });
+
+  it('missing style (legacy track without the field) defaults to pixelate', () => {
+    const rec = makeCtx();
+    const scratch = makeScratch();
+    const track = makeTrack({ keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]) });
+    delete track.style;
+    pixelateFrame(rec.ctx, [track], 0, frame, { scratch: () => scratch.canvas });
+
+    expect(callsNamed(rec.calls, 'fillRect')).toHaveLength(0);
+    expect(callsNamed(rec.calls, 'drawImage')).toHaveLength(1);
+  });
+
+  it('mixed tracks → both styles burn in ONE frame, dilation applied to BOTH', () => {
+    const rec = makeCtx();
+    const scratch = makeScratch();
+    const solid = makeTrack({
+      id: 1,
+      style: 'solid',
+      keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]),
+    });
+    const pix = makeTrack({
+      id: 2,
+      style: 'pixelate',
+      keyframes: new Map([[0, { x: 300, y: 200, w: 20, h: 20 }]]),
+    });
+    pixelateFrame(rec.ctx, [solid, pix], 0, frame, { scratch: () => scratch.canvas });
+
+    // Solid: dilate({100,50,40,40}) = {97, 47, 46, 46} → one black fillRect.
+    const fills = callsNamed(rec.calls, 'fillRect');
+    expect(fills).toHaveLength(1);
+    expect(fills[0].slice(1)).toEqual([97, 47, 46, 46]);
+
+    // Pixelate: dilate({300,200,20,20}) = {298.5, 198.5, 23, 23} → one upscale.
+    const ups = callsNamed(rec.calls, 'drawImage');
+    expect(ups).toHaveLength(1);
+    expect(ups[0].slice(6)).toEqual([298.5, 198.5, 23, 23]);
+  });
+
+  it('still skips disabled tracks and spans for solid style (tracksAt contract intact)', () => {
+    const rec = makeCtx();
+    const solid = makeTrack({
+      id: 1,
+      style: 'solid',
+      keyframes: new Map([[0, { x: 10, y: 10, w: 40, h: 40 }]]),
+    });
+    const disabled = makeTrack({
+      id: 2,
+      style: 'solid',
+      enabled: false,
+      keyframes: new Map([[0, { x: 500, y: 500, w: 40, h: 40 }]]),
+    });
+    pixelateFrame(rec.ctx, [solid, disabled], 0, frame);
+    expect(callsNamed(rec.calls, 'fillRect')).toHaveLength(1);
+
+    pixelateFrame(rec.ctx, [solid], 0 + 1e-3 + 100, frame); // outside [start, end]
+    expect(callsNamed(rec.calls, 'fillRect')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // drawOverlay
 // ---------------------------------------------------------------------------
 
@@ -406,5 +556,20 @@ describe('drawOverlay (review overlay, REQ-014 visual state, REQ-016 preview)', 
     expect(names[names.length - 1]).toBe('restore');
     expect(names.filter((n) => n === 'save')).toHaveLength(1);
     expect(names.filter((n) => n === 'restore')).toHaveLength(1);
+  });
+
+  it('is style-agnostic (REQ-101): a solid track still gets stroke + label, no fillRect', () => {
+    const rec = makeCtx();
+    const track = makeTrack({
+      style: 'solid',
+      keyframes: new Map([[5, box]]),
+      start: 0,
+      end: 10,
+    });
+    drawOverlay(rec.ctx, [track], 5);
+
+    expect(callsNamed(rec.calls, 'strokeRect')).toHaveLength(1);
+    expect(callsNamed(rec.calls, 'fillText')).toHaveLength(1);
+    expect(callsNamed(rec.calls, 'fillRect')).toHaveLength(0);
   });
 });

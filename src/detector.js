@@ -69,6 +69,24 @@
  * into the same display space (offset by tile origin), tagging
  * `pass: 'tile'`.
  *
+ * ─── Dashcam tiling axis (REQ-107: split along the DOMINANT axis) ───
+ *
+ * tileGrid splits landscape/square frames horizontally (k full-height
+ * columns) and PORTRAIT frames vertically (r full-width stacked rows), the
+ * exact w↔h mirror:
+ *
+ *   k = clamp(ceil(w / (target·(h/w))), 1, 4)   aspect ≥ 1
+ *   r = clamp(ceil(h / (target·(w/h))), 1, 4)   aspect < 1
+ *
+ * Pre-REQ-107 the horizontal-only formula gave a 540×960 portrait frame
+ * k = 1 — a single full-frame pass and NO mitigation for the small
+ * through-glass faces of the 2026-10-29 field miss (~40-60 px, below conf
+ * 0.6 at the 0.667 full-frame 640 scale). Vertical rows re-scale each band
+ * at 640/540 ≈ 1.19: ~1.8× the single-pass model scale (~2.3× on 9:21-class
+ * frames before the r ≤ 4 clamp). mergeTiles needs no axis knowledge — it
+ * offsets by tile origin, so origin-translated rects work identically for
+ * rows and columns; landscape geometry is bit-identical to pre-REQ-107.
+ *
  * ─── Execution-provider policy (ADR-5, @MX:WARN fallback order) ───
  *   • WebKit (engine-sniffed): EP = ['wasm'] — WebGPU EP is broken on
  *     WebKit 26 (ort#26827). WASM-only asset set.
@@ -391,15 +409,28 @@ export function parsePlateRows(rows, dims, t, opts = {}) {
 }
 
 /**
- * Compute the horizontal tile grid for dashcam mode (design §4.1): the
- * display frame is split into `k` full-height tiles (k from aspect, e.g.
- * 4K 16:9 → 3 tiles of ~1280×2160 display px), each letterboxed
- * independently.
+ * Compute the dashcam tile grid (design §4.1, REQ-107): the display frame is
+ * split along its DOMINANT axis, each tile letterboxed independently.
  *
- * k = clamp(ceil(frameW / (target · frameH / frameW)), 1, 4): the frame
- * aspect ratio (frameH/frameW ≈ 0.5625 for 16:9) is the height a full-frame
- * letterbox occupies in model space, so target·aspect is the widest strip
- * that still sees ~model-scale detail; 4K 16:9 (3840×2160) → k = 3.
+ *   • Landscape / square (aspect = w/h ≥ 1): `k` full-height horizontal
+ *     tiles — k = clamp(ceil(frameW / (target · frameH / frameW)), 1, 4)
+ *     (e.g. 4K 16:9 → 3…4 tiles of ~960-1280×2160 display px).
+ *   • Portrait (aspect < 1): the exact mirror on the vertical axis — `r`
+ *     full-width stacked ROWS — r = clamp(ceil(frameH / (target · frameW /
+ *     frameH)), 1, 4), tiles {x: 0, y, w, h: rowH} with the last row
+ *     absorbing the rounding remainder.
+ *
+ * Rationale (REQ-107 miss analysis, 2026-10-29 field report): the divisor
+ * target·(h/w) — resp. target·(w/h) — is the height (resp. width) the
+ * full-frame letterbox occupies in model space, i.e. the widest strip /
+ * tallest band that still sees ~model-scale detail. The horizontal-only
+ * formula gave a 540×960 portrait frame k = ceil(540/(640·1.778)) = 1 — a
+ * single full-frame pass, NO mitigation for small through-glass faces
+ * (~40-60 px below conf 0.6 at the 0.667 full-frame scale). Vertical rows
+ * scale each band at 640/540 ≈ 1.19 instead of 0.667: a 50 px face lands at
+ * ~59 model px ≈ 1.8× the single-pass scale (~2.3× for 9:21-class frames
+ * before the r ≤ 4 clamp) — REQ-107's "≥ ~2×" class of recovery. Landscape
+ * geometry is bit-identical to the pre-REQ-107 behavior.
  *
  * @param {{width: number, height: number}} frameSize Display frame size.
  * @param {number} [target=640] Per-tile model input edge.
@@ -408,14 +439,27 @@ export function parsePlateRows(rows, dims, t, opts = {}) {
  */
 export function tileGrid(frameSize, target = 640) {
   const { width, height } = frameSize;
-  const k = Math.min(4, Math.max(1, Math.ceil(width / (target * (height / width)))));
-  const baseW = Math.ceil(width / k);
   /** @type {Array<{x: number, y: number, w: number, h: number, transform: {ratio: number, padX: number, padY: number}}>} */
   const tiles = [];
-  for (let i = 0; i < k; i++) {
-    const x = i * baseW;
-    const w = Math.min(width - x, baseW); // last tile absorbs the rounding remainder
-    tiles.push({ x, y: 0, w, h: height, transform: letterboxGeometry({ width: w, height }, target) });
+  if (width >= height) {
+    // Landscape / square (aspect ≥ 1): existing horizontal tiling.
+    const k = Math.min(4, Math.max(1, Math.ceil(width / (target * (height / width)))));
+    const baseW = Math.ceil(width / k);
+    for (let i = 0; i < k; i++) {
+      const x = i * baseW;
+      const w = Math.min(width - x, baseW); // last tile absorbs the rounding remainder
+      tiles.push({ x, y: 0, w, h: height, transform: letterboxGeometry({ width: w, height }, target) });
+    }
+  } else {
+    // Portrait (REQ-107): mirror of the k formula on the vertical axis —
+    // stacked full-width rows, last row absorbs the rounding remainder.
+    const r = Math.min(4, Math.max(1, Math.ceil(height / (target * (width / height)))));
+    const baseH = Math.ceil(height / r);
+    for (let i = 0; i < r; i++) {
+      const y = i * baseH;
+      const h = Math.min(height - y, baseH); // last row absorbs the rounding remainder
+      tiles.push({ x: 0, y, w: width, h, transform: letterboxGeometry({ width, height: h }, target) });
+    }
   }
   return tiles;
 }

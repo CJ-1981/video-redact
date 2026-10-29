@@ -20,12 +20,19 @@
  * DOM); it runs automatically in the browser and is a no-op import in node.
  * It never mutates module behavior — modules are integrated as-is.
  *
+ * SPEC-VID-002 wiring (all DOM-side, untested in node like the rest of
+ * mountApp): REQ-103 trim hooks (editor chip-edge drag → trimTrack),
+ * REQ-101 style hooks (track-row select → setTrackStyle), REQ-105 transport
+ * bar (jump/frame-step/play-pause/speed/timecode driven by video media
+ * events) and REQ-106 fullscreen preview (requestFullscreen with a
+ * `.preview-zoom` in-page fallback + editor.redraw() resize kicks).
+ *
  * NOTE: the string 'video-redact dev shell' (set on <body data-app-shell>)
  * is asserted by tests/unit/scaffold.test.js against the built artifact.
  */
 import { secureContextInfo, guidance, probeCapabilities } from './capability.js';
 import { MODELS } from './models.js';
-import { manualTrackFromBox, mountEditor, toggleTrack } from './editor.js';
+import { manualTrackFromBox, mountEditor, setTrackStyle, toggleTrack, trimTrack } from './editor.js';
 import { openInput } from './ingest.js';
 import { runAnalyze } from './analyze.js';
 import { ExportError, discardExportTemp, runExport } from './exporter.js';
@@ -386,8 +393,18 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     capTable: $('cap-report-body'),
     capGuidance: $('cap-guidance'),
     workspace: $('workspace'),
+    previewStage: $('preview-stage'),
     video: /** @type {HTMLVideoElement | null} */ ($('preview-video')),
     overlayCanvas: /** @type {HTMLCanvasElement | null} */ ($('overlay-canvas')),
+    fullscreenButton: /** @type {HTMLButtonElement | null} */ ($('preview-fullscreen')),
+    transportStart: /** @type {HTMLButtonElement | null} */ ($('transport-start')),
+    transportBack: /** @type {HTMLButtonElement | null} */ ($('transport-back')),
+    transportPlay: /** @type {HTMLButtonElement | null} */ ($('transport-play')),
+    transportFwd: /** @type {HTMLButtonElement | null} */ ($('transport-fwd')),
+    transportSpeed: /** @type {HTMLSelectElement | null} */ ($('transport-speed')),
+    transportTime: $('transport-time'),
+    timelineCurrent: $('timeline-current'),
+    timelineDuration: $('timeline-duration'),
     timeline: $('timeline'),
     chips: $('track-chips'),
     playhead: $('playhead'),
@@ -714,6 +731,10 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     app.caps = null;
     app.tracks = [];
     app.manualNextId = 1;
+    // Transport resets with the fresh file (load() resets playbackRate; the
+    // selector must follow or it would show a rate the video no longer has).
+    if (els.transportSpeed) els.transportSpeed.value = '1';
+    if (els.video) els.video.playbackRate = 1;
     resetAnalyzeUi();
     resetExportUi();
     refreshTrackUi();
@@ -925,6 +946,18 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
           app.tracks = [...app.tracks, track];
           refreshTrackUi();
         },
+        onTrimTrack: (trackId, start, end) => {
+          // REQ-103: chip-edge drag → model trim, clamped to the video
+          // duration with the 0.1 s minimum span enforced by the model.
+          app.tracks = trimTrack(app.tracks, trackId, start, end, app.meta?.duration);
+          refreshTrackUi();
+        },
+        onSetStyle: (trackId, style) => {
+          // REQ-101: per-track redaction style; the shared burn-in seam
+          // (redact.pixelateFrame) dispatches on it for preview AND export.
+          app.tracks = setTrackStyle(app.tracks, trackId, style);
+          refreshTrackUi();
+        },
       },
     );
     refreshTrackUi();
@@ -1022,6 +1055,129 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
 
   els.exportButton?.addEventListener('click', () => startExport());
   els.exportCancel?.addEventListener('click', () => exportCtl?.abort());
+
+  // --- Transport bar (SPEC-VID-002 REQ-105 / AC-104) -----------------------------
+
+  /**
+   * One transport UI refresh from the live video element: play/pause glyph
+   * swap + current/total timecode (formatClock). Driven by the media events
+   * below so it works in EVERY workspace state (editor mount is review-only).
+   */
+  function updateTransportUi() {
+    const v = els.video;
+    if (!v) return;
+    if (els.transportPlay) {
+      const paused = v.paused;
+      els.transportPlay.textContent = paused ? '▶' : '⏸';
+      els.transportPlay.title = paused ? 'Play (space)' : 'Pause (space)';
+      els.transportPlay.setAttribute('aria-label', paused ? 'Play' : 'Pause');
+    }
+    const cur = Number.isFinite(v.currentTime) ? v.currentTime : 0;
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+    if (els.transportTime) els.transportTime.textContent = `${formatClock(cur)} / ${formatClock(dur)}`;
+    if (els.timelineCurrent) els.timelineCurrent.textContent = formatClock(cur);
+    if (els.timelineDuration) els.timelineDuration.textContent = formatClock(dur);
+  }
+
+  /** Frame-step ±1 source frame (same semantics as the ← / → shortcuts). */
+  function stepFrame(direction) {
+    const v = els.video;
+    if (!v) return;
+    const fps = Number(app.meta?.fps);
+    const dt = direction / (fps > 0 ? fps : 30);
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
+    v.pause();
+    v.currentTime = Math.min(Math.max(0, v.currentTime + dt), dur);
+  }
+
+  els.transportStart?.addEventListener('click', () => {
+    const v = els.video;
+    if (v) v.currentTime = 0;
+  });
+  els.transportBack?.addEventListener('click', () => stepFrame(-1));
+  els.transportFwd?.addEventListener('click', () => stepFrame(1));
+  els.transportPlay?.addEventListener('click', () => {
+    const v = els.video;
+    if (!v) return;
+    if (v.paused) {
+      const p = v.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } else {
+      v.pause();
+    }
+  });
+  els.transportSpeed?.addEventListener('change', () => {
+    const v = els.video;
+    if (!v) return;
+    const rate = Number(els.transportSpeed?.value);
+    v.playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+  });
+  for (const ev of ['play', 'pause', 'timeupdate', 'seeked', 'loadedmetadata', 'durationchange']) {
+    els.video?.addEventListener(ev, updateTransportUi);
+  }
+  updateTransportUi();
+
+  // --- Fullscreen / enlarge preview (SPEC-VID-002 REQ-106 / AC-105) --------------
+
+  const isNativeFullscreen = () => doc.fullscreenElement === els.previewStage;
+  const isZoomFallback = () =>
+    !!els.previewStage && els.previewStage.classList.contains('preview-zoom');
+
+  function updateFullscreenButton() {
+    if (!els.fullscreenButton) return;
+    const active = isNativeFullscreen() || isZoomFallback();
+    els.fullscreenButton.textContent = active ? '✕' : '⛶';
+    els.fullscreenButton.title = active ? 'Exit enlarged preview (Esc)' : 'Enlarge preview';
+    els.fullscreenButton.setAttribute('aria-label', active ? 'Exit enlarged preview' : 'Enlarge preview');
+  }
+
+  /** Kick the editor's resize path: overlay canvas → new display size × DPR. */
+  function triggerPreviewResize() {
+    if (editor && typeof editor.redraw === 'function') editor.redraw();
+  }
+
+  function enterZoomFallback() {
+    // iOS Safari & co: no Fullscreen API for elements — cover the viewport
+    // in-page instead (REQ-106). The exit button stays visible on the stage.
+    els.previewStage?.classList.add('preview-zoom');
+    updateFullscreenButton();
+    triggerPreviewResize();
+  }
+
+  function exitEnlarge() {
+    if (isNativeFullscreen()) {
+      const p = doc.exitFullscreen?.();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } else {
+      els.previewStage?.classList.remove('preview-zoom');
+      updateFullscreenButton();
+      triggerPreviewResize();
+    }
+  }
+
+  els.fullscreenButton?.addEventListener('click', () => {
+    if (isNativeFullscreen() || isZoomFallback()) {
+      exitEnlarge();
+      return;
+    }
+    const stage = els.previewStage;
+    if (stage && typeof /** @type {any} */ (stage).requestFullscreen === 'function') {
+      const p = /** @type {any} */ (stage).requestFullscreen();
+      if (p && typeof p.catch === 'function') p.catch(() => enterZoomFallback());
+    } else {
+      enterZoomFallback();
+    }
+  });
+  doc.addEventListener('fullscreenchange', () => {
+    updateFullscreenButton();
+    triggerPreviewResize();
+  });
+  window.addEventListener('resize', triggerPreviewResize);
+  // Escape exits the in-page fallback (native fullscreen gets it for free).
+  doc.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isZoomFallback()) exitEnlarge();
+  });
+  updateFullscreenButton();
 
   // --- Keyboard (design-direction: space / ← / → / B in review states) ----------
 

@@ -1,7 +1,9 @@
 /**
- * redact.js — REQ-016 (design.md §3, §4.5). @MX:ANCHOR (apply path is the
- * privacy invariant: preview and export share this exact code — pixel-truthful
- * preview, ADR-6 pixelate-only).
+ * redact.js — REQ-016 (design.md §3, §4.5); REQ-101/102 per-track styles
+ * (SPEC-VID-002). @MX:ANCHOR (apply path is the privacy invariant: preview
+ * and export share this exact code — pixel-truthful preview; ADR-6 pixelate
+ * extended by REQ-101 with the per-track 'solid' style, dispatched inside
+ * pixelateFrame).
  *
  * Pure geometry + canvas 2D. No DOM access at import time (vitest imports
  * this file in the node environment; the shared scratch canvas is created
@@ -127,8 +129,8 @@ function resolveScratch(requested, dw, dh) {
 }
 
 /**
- * Pixelate one region IN PLACE on a 2D context (the only redaction style,
- * ADR-6). Pipeline (design §4.5):
+ * Pixelate one region IN PLACE on a 2D context (the 'pixelate' redaction
+ * style, ADR-6; 'solid' has its own applySolid — REQ-101). Pipeline (design §4.5):
  *
  *   1. ctx.save()
  *   2. scratch ctx: imageSmoothingEnabled = true (smooth the downscale)
@@ -185,6 +187,37 @@ export function applyPixelation(ctx, box, opts) {
 const ALERT_RED = '#E5484D'; // manual regions (fallback if color missing)
 const SAFE_GREEN = '#3ECF8E'; // "keep visible" state
 const AMBER = '#F5A623'; // fallback for color-less auto tracks
+
+/** The 'solid' style fill color (REQ-101): fully opaque black. */
+const SOLID_BLACK = '#000000';
+
+/**
+ * Paint one region opaque black IN PLACE on a 2D context (REQ-101 'solid'
+ * style). The fillRect is intersected with the canvas bounds, so a box that
+ * overhangs the frame (dilation before clamping, raw caller geometry) never
+ * throws and never leaks outside the canvas. Rasterizes with fillRect only —
+ * no scratch canvas, no pixel sampling.
+ *
+ * Preview and export share this exact function through `pixelateFrame`
+ * (pixel-truthful preview, REQ-016 / REQ-102).
+ *
+ * @param {CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D} ctx
+ * @param {import('./types.js').Box} box Region to black out (display px).
+ * @returns {void}
+ */
+export function applySolid(ctx, box) {
+  const cw = ctx.canvas.width;
+  const ch = ctx.canvas.height;
+  const x = Math.max(0, Math.min(box.x, cw));
+  const y = Math.max(0, Math.min(box.y, ch));
+  const w = Math.min(box.x + box.w, cw) - x;
+  const h = Math.min(box.y + box.h, ch) - y;
+  if (w <= 0 || h <= 0) return; // entirely outside the canvas (or degenerate)
+  ctx.save();
+  ctx.fillStyle = SOLID_BLACK;
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+}
 
 /**
  * Draw one track label near a box — above it, or flipped just inside the top
@@ -261,13 +294,22 @@ export function drawOverlay(ctx, tracks, t, viewScale = 1) {
 // ---------------------------------------------------------------------------
 
 /**
- * Burn ONE frame's redactions onto a frame-sized 2D context: `tracksAt(t)`
- * hits, each box dilated 15% and clamped to the frame, then applyPixelation.
- * This is the SINGLE seam preview and export must both go through so the
- * pixels a user reviews are the pixels the exported file carries (AC-04
- * pixel-truth symmetry): the exporter's burn-in callback and the editor's
- * preview both call this exact function with the same review tracks (boxes
- * expressed in the ctx's pixel space) per frame.
+ * Burn ONE frame's redactions onto a frame-sized 2D context — THE shared
+ * seam (REQ-016 / AC-04 pixel-truth symmetry, REQ-102 style parity):
+ * `tracksAt(t)` hits, each box dilated 15% and clamped to the frame, then
+ * rendered per the track's `style` (REQ-101):
+ *
+ *   - `track.style === 'solid'` → `applySolid` (opaque black box);
+ *   - anything else (incl. a missing field) → `applyPixelation`.
+ *
+ * Dilation applies to BOTH styles identically — the style choice changes only
+ * how the dilated region is rasterized, never its geometry. This is the
+ * SINGLE seam preview and export must both go through so the pixels a user
+ * reviews are the pixels the exported file carries (AC-04, AC-102): the
+ * exporter's burn-in callback and the editor's preview both call this exact
+ * function with the same review tracks (boxes expressed in the ctx's pixel
+ * space) per frame. `drawOverlay` stays style-agnostic (stroke + label
+ * regardless of style).
  *
  * @param {CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D} ctx
  *     Context of the frame-sized canvas.
@@ -282,7 +324,12 @@ export function drawOverlay(ctx, tracks, t, viewScale = 1) {
  *     track covering `t` has no keyframes — privacy failure, never swallowed.
  */
 export function pixelateFrame(ctx, tracks, t, frameSize, opts = {}) {
-  for (const { box } of tracksAt(tracks, t)) {
-    applyPixelation(ctx, dilate(box, 0.15, frameSize), { scratch: opts?.scratch });
+  for (const { track, box } of tracksAt(tracks, t)) {
+    const region = dilate(box, 0.15, frameSize);
+    if (track && track.style === 'solid') {
+      applySolid(ctx, region);
+    } else {
+      applyPixelation(ctx, region, { scratch: opts?.scratch });
+    }
   }
 }

@@ -511,6 +511,67 @@ describe('tileGrid (§4.1 dashcam tiling)', () => {
   });
 });
 
+describe('tileGrid — portrait rows (REQ-107)', () => {
+  it('splits 540×960 into 3 stacked full-width rows per the r formula', () => {
+    // r = clamp(ceil(h / (target·(w/h))), 1, 4) = ceil(960/(640·0.5625)) = ceil(2.67) = 3
+    const tiles = tileGrid({ width: 540, height: 960 });
+    expect(tiles).toHaveLength(3);
+    expect(tiles.map((t) => t.y)).toEqual([0, 320, 640]);
+    expect(tiles.map((t) => t.h)).toEqual([320, 320, 320]);
+    expect(tiles.every((t) => t.x === 0 && t.w === 540)).toBe(true);
+    expect(tiles.reduce((s, t) => s + t.h, 0)).toBe(960);
+    // Per-row letterbox: 540×320 is width-limited — ratio 640/540, pad on Y.
+    expect(tiles[0].transform.ratio).toBeCloseTo(640 / 540, 12);
+    expect(tiles[0].transform.padX).toBe(0);
+    expect(tiles[0].transform.padY).toBeCloseTo((640 - 320 * (640 / 540)) / 2, 9);
+    // Equal rows share the identical transform (each computed from its own rect).
+    for (const t of tiles.slice(1)) expect(t.transform).toEqual(tiles[0].transform);
+  });
+
+  it('keeps landscape 3840×2160 on the horizontal branch (full-height columns)', () => {
+    // REQ-107 changes portrait ONLY — landscape rects stay bit-identical.
+    const tiles = tileGrid({ width: 3840, height: 2160 });
+    expect(tiles.every((t) => t.y === 0 && t.h === 2160)).toBe(true);
+    expect(tiles.reduce((s, t) => s + t.w, 0)).toBe(3840);
+  });
+
+  it('routes a 1:1 square through the landscape branch (aspect ≥ 1)', () => {
+    const tiles = tileGrid({ width: 1000, height: 1000 });
+    expect(tiles).toHaveLength(2);
+    expect(tiles.every((t) => t.y === 0 && t.h === 1000)).toBe(true); // columns, not rows
+    expect(tiles.map((t) => t.x)).toEqual([0, 500]);
+  });
+
+  it('clamps r at 4 for extreme tall 9:21 frames', () => {
+    // ceil(2520/(640·(1080/2520))) = ceil(9.19) → 4 (clamp), 2520/4 = 630 exact
+    const tiles = tileGrid({ width: 1080, height: 2520 });
+    expect(tiles).toHaveLength(4);
+    expect(tiles.map((t) => t.y)).toEqual([0, 630, 1260, 1890]);
+    expect(tiles.every((t) => t.x === 0 && t.w === 1080 && t.h === 630)).toBe(true);
+    expect(tiles.reduce((s, t) => s + t.h, 0)).toBe(2520);
+  });
+
+  it('last row absorbs the rounding remainder (odd portrait heights)', () => {
+    // r = ceil(1000/(640·0.54)) = ceil(2.89) = 3; baseH = ceil(1000/3) = 334
+    const tiles = tileGrid({ width: 540, height: 1000 });
+    expect(tiles).toHaveLength(3);
+    expect(tiles.map((t) => t.y)).toEqual([0, 334, 668]);
+    expect(tiles.map((t) => t.h)).toEqual([334, 334, 332]);
+    expect(tiles.reduce((s, t) => s + t.h, 0)).toBe(1000);
+  });
+
+  it('mergeTiles round-trips a row tile by its y origin (no axis special case)', () => {
+    const tiles = tileGrid({ width: 540, height: 960 });
+    const merged = mergeTiles(
+      [{ box: { x: 10, y: 20, w: 30, h: 40 }, conf: 0.9, cls: 'face', tileIndex: 1 }],
+      tiles,
+    );
+    // Tile 1 starts at y=320: tile-local (10,20) → frame (10,340).
+    expect(merged[0].box).toEqual({ x: 10, y: 340, w: 30, h: 40 });
+    expect(merged[0].pass).toBe('tile');
+  });
+});
+
 describe('mergeTiles (tile-local → full-frame, one coordinate space)', () => {
   const tiles = tileGrid({ width: 3840, height: 2160 });
 

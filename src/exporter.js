@@ -3,7 +3,9 @@
  *
  * Burn-in export via mediabunny `Conversion.init({ input, output,
  * video: { process } })`: the process callback draws each sample, applies
- * redact.applyPixelation for `redact.tracksAt(t)`, and returns the canvas —
+ * redact.pixelateFrame for `redact.tracksAt(t)` — which renders each track's
+ * chosen style ('pixelate' mosaic or 'solid' opaque black, REQ-101/102) —
+ * and returns the canvas —
  * which forces video transcode (redaction is BURNED IN, ADR-7). Audio is
  * ALWAYS packet-copied: no `audio` config is ever passed and the default
  * copy policy (`copy: {}` — mediabunny copies "whenever possible") packet-
@@ -115,9 +117,11 @@ function createCanvas(w, h) {
 }
 
 /**
- * THE pixelation composition shared by export and preview (AC-04 pixel-truth
+ * THE redaction composition shared by export and preview (AC-04 pixel-truth
  * symmetry): `tracksAt(t)` hits, each box dilated 15% and clamped to the
- * frame, then `applyPixelation` with the caller's reused scratch canvas.
+ * frame, then rendered per the track's style (`pixelate` → applyPixelation
+ * with the caller's reused scratch canvas; `solid` → opaque black fillRect,
+ * REQ-101/102 — dispatch lives inside redact.pixelateFrame).
  *
  * Implemented in redact.js (single source of truth — the editor's review
  * canvas calls the same function, so preview pixels equal exported pixels)

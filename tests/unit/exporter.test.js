@@ -114,6 +114,7 @@ function makeCtx(canvas) {
     save: () => calls.push(['save']),
     restore: () => calls.push(['restore']),
     drawImage: (img, ...args) => calls.push(['drawImage', img, ...args]),
+    fillRect: (x, y, w, h) => calls.push(['fillRect', x, y, w, h]),
   };
   for (const key of ['imageSmoothingEnabled', 'fillStyle', 'strokeStyle']) {
     Object.defineProperty(ctx, key, {
@@ -332,6 +333,38 @@ describe('runExport — burn-in process callback (AC-04)', () => {
     // The upscale drew FROM the scratch canvas.
     const ups = frameCanvas.rec.calls.filter((c) => c[0] === 'drawImage');
     expect(ups[0][1]).toBe(scratch);
+  });
+
+  it('burns a solid-style track as an opaque black fillRect through the SAME seam (REQ-102)', async () => {
+    const track = makeTrack({
+      style: 'solid',
+      keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]),
+    });
+    let conv;
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      conv = new mb.Conversion(opts);
+      scriptExecute(conv, { onDone: () => conv.opts.video.process(fakeSample(0)) });
+      return conv;
+    });
+    await runExport({ input: fakeInput(), tracks: [track], settings: bufferSettings });
+
+    const frameCanvas = canvases[0];
+    // Same dilated box {97, 47, 46, 46} the pixelate path would cover —
+    // REQ-102: style choice is dispatched INSIDE the shared pixelateFrame seam.
+    const fills = frameCanvas.rec.calls.filter((c) => c[0] === 'fillRect');
+    expect(fills).toHaveLength(1);
+    expect(fills[0].slice(1)).toEqual([97, 47, 46, 46]);
+    const fillSets = frameCanvas.rec.calls.filter(
+      (c) => c[0] === 'set' && c[1] === 'fillStyle',
+    );
+    expect(fillSets).toContainEqual(['set', 'fillStyle', '#000000']);
+
+    // Solid path rasterizes with fillRect only — no pixelation draws on the
+    // frame canvas and nothing drawn into the (still created) scratch.
+    expect(frameCanvas.rec.calls.filter((c) => c[0] === 'drawImage')).toHaveLength(0);
+    const scratch = canvases[1];
+    expect(scratch).toBeDefined();
+    expect(scratch.rec.calls.filter((c) => c[0] === 'drawImage')).toHaveLength(0);
   });
 
   it('keeps disabled tracks visible (REQ-014): no pixelation for disabled hits', async () => {

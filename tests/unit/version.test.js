@@ -1,9 +1,9 @@
 /**
- * version.test.js — v1.0.0 formal versioning + footer version badge.
+ * version.test.js — formal versioning + footer version badge.
  *
  * Covers the pure formatter (src/main.js formatVersionBadge) and the static
  * wiring that makes the shipped artifact show it:
- *  - package.json carries the formal 1.0.0 version (single source of truth
+ *  - package.json carries the release version (single source of truth
  *    for tools/inline.mjs's build-time injection);
  *  - index.html hosts the #app-version badge span in the footer;
  *  - tools/inline.mjs defines the globalThis.* stamp keys esbuild replaces.
@@ -49,10 +49,10 @@ describe('formatVersionBadge (footer version badge)', () => {
   });
 });
 
-describe('v1.0.0 version stamping wiring', () => {
-  it('package.json is at the formal 1.0.0 release version', () => {
+describe('v1.1.0 version stamping wiring', () => {
+  it('package.json is at the 1.1.0 release version', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-    expect(pkg.version).toBe('1.0.0');
+    expect(pkg.version).toBe('1.1.0');
   });
 
   it('index.html hosts the #app-version badge in the footer', () => {

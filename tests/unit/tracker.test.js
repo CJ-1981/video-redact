@@ -440,3 +440,39 @@ describe('beginManualTrack — manual region skeleton (REQ-015 seam)', () => {
     expect(a.id).not.toBe(b.id);
   });
 });
+
+describe('track style defaults (REQ-101: manual=solid, auto=pixelate)', () => {
+  it('manual track skeleton defaults to the solid style', () => {
+    const tracker = new Tracker();
+    const tr = tracker.beginManualTrack(0, { x: 0, y: 0, w: 10, h: 10 });
+    expect(tr.style).toBe('solid');
+  });
+
+  it('each manual skeleton carries its own solid default (no shared reference)', () => {
+    const tracker = new Tracker();
+    const a = tracker.beginManualTrack(0, { x: 0, y: 0, w: 10, h: 10 });
+    const b = tracker.beginManualTrack(1, { x: 5, y: 5, w: 10, h: 10 });
+    expect(a.style).toBe('solid');
+    expect(b.style).toBe('solid');
+  });
+
+  it('finalized auto tracks default to the pixelate style', () => {
+    const tracker = new Tracker();
+    tracker.update([det(0, { x: 0, y: 0, w: 40, h: 40 })], 0);
+    tracker.update([det(frame(1), { x: 1, y: 0, w: 40, h: 40 })], frame(1));
+
+    const tracks = tracker.finalize(0);
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0].style).toBe('pixelate');
+  });
+
+  it('finalize stability holds with the style field present (idempotent output)', () => {
+    const tracker = new Tracker();
+    tracker.update([det(0, { x: 0, y: 0, w: 40, h: 40 })], 0);
+    tracker.update([det(frame(1), { x: 1, y: 0, w: 40, h: 40 })], frame(1));
+    const a = tracker.finalize(0.05);
+    const b = tracker.finalize(0.05);
+    expect(b).toEqual(a);
+    expect(a[0].style).toBe('pixelate');
+  });
+});

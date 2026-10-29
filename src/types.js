@@ -53,6 +53,11 @@ export {};
  * @property {number} end                   Redacted span end, seconds.
  * @property {boolean} enabled              true = redact; false = keep visible (user toggle).
  * @property {'auto'|'manual'} source       Origin of the track.
+ * @property {'pixelate'|'solid'} [style]   Redaction style (REQ-101): 'solid'
+ *     burns an opaque black box, 'pixelate' mosaic-blurs. Default 'pixelate'
+ *     for auto-detected tracks, 'solid' for manual tracks (tracker.js sets
+ *     both); a missing field renders as 'pixelate' (redact.pixelateFrame
+ *     dispatch). User-changeable per track until export.
  */
 
 /**

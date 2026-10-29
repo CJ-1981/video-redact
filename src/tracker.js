@@ -423,6 +423,7 @@ export class Tracker {
         end: times[times.length - 1] + padSeconds,
         enabled: true,
         source: 'auto',
+        style: 'pixelate', // REQ-101: auto-detected tracks default to pixelate
       });
     }
     return out;
@@ -450,6 +451,7 @@ export class Tracker {
       end: t,
       enabled: true,
       source: 'manual',
+      style: 'solid', // REQ-101: manual regions default to the solid style
     };
   }
 }

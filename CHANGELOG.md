@@ -88,3 +88,8 @@ Initial release — SPEC-VID-001: client-side video redaction web app (faces & l
 
 ### Fixed
 - Preview resize handle worked in the opposite direction: dragging DOWN now makes the video TALLER (the handle is the stage's bottom edge and follows the pointer). Keyboard parity unchanged (ArrowUp = taller). Direction pinned by unit tests.
+
+## [1.4.1] — 2026-10-29
+
+### Fixed
+- Track-row time fields overflowed the row on mobile (rendered 336px inside a 312px content box): the `.times` group is now pinned to exactly the row content width with zero-basis flexible inputs — no overflow, no clipped text at 390px (element-level probe `tools/debug-times-overflow.mjs`).

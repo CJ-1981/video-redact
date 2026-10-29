@@ -160,9 +160,14 @@ describe('REQ-112: @media (max-width: 820px) mobile block', () => {
     expect(block).toMatch(/input\.span-input\s*{[^}]*min-height:\s*40px/);
   });
 
-  it('makes the track-row .times inputs flexible width (rows wrap)', () => {
+  it('keeps the track-row .times inputs fitting the row on mobile (v1.4.1: no 64px basis in the media block)', () => {
+    // v1.4.1: flexible width moved to the BASE rule (flex: 1 1 0 + min-width 0);
+    // the media block must NOT reintroduce a fixed 64px flex basis.
     const block = mediaBlock();
-    expect(block).toMatch(/\.track-row \.times input\.span-input\s*{[^}]*flex:\s*1 1 64px/);
+    expect(block).not.toMatch(/\.track-row \.times input\.span-input\s*{[^}]*flex:\s*1 1 64px/);
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+    expect(html).toMatch(/\.track-row \.times\s*{[^}]*flex:\s*0 0 100%;[^}]*min-width:\s*0/);
+    expect(html).toMatch(/input\.span-input\s*{[^}]*flex:\s*1 1 0;[^}]*min-width:\s*0/);
   });
 
   it('hides the footer keyboard hints and wraps header/stepper/transport', () => {

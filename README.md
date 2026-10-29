@@ -4,17 +4,17 @@ Local, in-browser video redaction: faces and license plates are detected automat
 
 **Live app**: <https://cj-1981.github.io/video-redact/> (served over HTTPS, so it runs directly in the browser — every push to `main` rebuilds and redeploys it via GitHub Actions; the footer badge shows the version + build date).
 
-| Landing | Capability report |
+| Landing | Capability report + Analyze panel |
 | --- | --- |
 | ![Landing — drop zone and stepper](docs/screenshots/01-landing.png) | ![Capability report before analyze](docs/screenshots/02-capability.png) |
 
 | Review | Export |
 | --- | --- |
-| ![Review — pixel-truthful preview, timeline chips, track list](docs/screenshots/03-review.png) | ![Export — download started, all steps done](docs/screenshots/04-export.png) |
+| ![Review — pixel-truthful preview, transport bar, timeline chips, track list](docs/screenshots/03-review.png) | ![Export — download started, all steps done](docs/screenshots/04-export.png) |
 
-1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.3.0 · built 2026-10-29`).
-2. **Capability** — after opening a file, the app reports container/codec/resolution/fps/audio plus decode and encode probes *before* Analyze is offered. Undecodable files are blocked here, with guidance.
-3. **Review** — detected tracks render as colored chips over their redacted span; the preview is pixel-truthful (it draws the exact pixelation the export burns in). Toggle any track, scrub, or draw manual regions (`B`).
+1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.6.0 · built 2026-10-29`).
+2. **Capability** — after opening a file, the app reports container/codec/resolution/fps/audio plus decode and encode probes *before* Analyze is offered. Undecodable files are blocked here, with guidance. The Analyze panel carries the detection-sensitivity sliders and a single-frame "Compare thresholds" preview.
+3. **Review** — detected tracks render as colored chips over their redacted span; the preview is pixel-truthful (it draws the exact redaction the export burns in). Toggle any track, switch its style (pixelate/solid), trim its span, scrub with the transport bar, or draw manual regions (`B`).
 4. **Export** — re-encoded H.264/MP4 (VP9/WebM fallback) with redactions burned in; original audio is packet-copied bit-for-bit.
 
 ## Quick start
@@ -35,9 +35,10 @@ Then open <http://localhost:8000/dist/index.html>. Or skip the local setup entir
 
 - **Ingest** — demuxes `.mov` / MP4 / WebM locally via mediabunny 1.63.0, including iPhone HEVC `.mov` (hardware decode required) and ProRes via the `@mediabunny/prores` extension. Metadata and rotation are reported before any processing.
 - **Capability gate** — per-track decode probes (`track.canDecode()`) and export-encode probes (WebCodecs `isConfigSupported`, H.264 level ladder + VP9) are shown as a report; undecodable input is blocked with actionable guidance and no partial processing.
-- **Detection** — YuNet face detection (2023mar, 640×640 letterboxed) and YOLOv9-t-640 end-to-end license-plate detection, running via onnxruntime-web 1.31.1 with a WebGPU → WASM execution-provider ladder. "Dashcam mode" adds a second tiled pass for small/distant plates. Thresholds are tunable — compare levels on a single frame before analyzing.
+- **Detection** — YuNet face detection (2023mar, 640×640 letterboxed) and YOLOv9-t-640 end-to-end license-plate detection, running via onnxruntime-web 1.31.1 with a WebGPU → WASM execution-provider ladder. "Dashcam mode" adds a second tiled pass for small/distant faces and plates — tiles split along the dominant axis, so portrait frames tile vertically into stacked rows. Face/plate confidence thresholds are configurable via sensitivity sliders, and a single-frame comparison shows five fixed threshold levels side by side before you commit to a full analysis.
 - **Tracking** — detections are linked into persistent labeled tracks ("Face #1", "Plate #4") with IoU-gated association and a constant-velocity Kalman filter; gaps are interpolated, and every span is padded ±5 frame periods and dilated 15% (7.5% per side) so no unredacted frame of a detected object survives (privacy-critical AC-05).
-- **Review** — timeline chips, per-track redact/keep-visible toggles, manual drawn regions, and a pixel-truthful preview (preview and export share the same pixelation code path).
+- **Review** — timeline chips with draggable edge handles, per-track redact/keep-visible toggles, and a per-track redaction style (pixelate or solid black). Manual regions drawn on the video (`B`) span the whole clip by default and are trimmed via chip edges or per-track start/end inputs. The preview is pixel-truthful (preview and export share the same render code path) with a transport bar (frame stepping, 0.25×–4× speed), fullscreen/enlarge mode with auto-hiding overlay controls, and a draggable preview-height handle.
+- **Mobile** — at viewport widths ≤ 820 px the app collapses to a single column with ≥ 40 px touch targets; timeline chip-edge grab zones widen on touch pointers.
 - **Export** — every frame is decoded, redactions burned into the pixels, and the video re-encoded (H.264/MP4 primary → software H.264 → VP9/WebM fallback ladder); audio packets are copied without re-encoding (AAC → MP4, Opus/Vorbis → WebM). Output streams to disk-backed storage (OPFS / File System Access) with progress and cancellation.
 - **Clear** — the header "✕ Clear" button aborts any in-flight pass, unloads the video (blob URL, decoder, export temps) and resets every panel to the landing view; the model cache and your preview-stage height survive.
 
@@ -83,7 +84,7 @@ npm run dev           # static server on 127.0.0.1:8000 (no-store; serves src/ E
 npm test              # vitest unit suite (node environment)
 npm run test:coverage # v8 coverage; >= 85% line gate on the 8 logic modules
 npm run test:e2e      # Playwright, Chromium, serial workers (needs: npx playwright install chromium)
-npm run build         # tools/inline.mjs -> single-file dist/index.html (~122 KiB)
+npm run build         # tools/inline.mjs -> single-file dist/index.html (~174 KiB)
 npm run lint          # eslint (flat config)
 npm run typecheck     # tsc --noEmit (checkJs over JSDoc types)
 npm run gate          # lint && typecheck && test && build
@@ -91,12 +92,12 @@ npm run gate          # lint && typecheck && test && build
 
 - **Layout** — `index.html` (dev shell: importmap pins, CSP, UI), `src/` (one module per pipeline stage; JSDoc-typed via `src/types.js`), `tools/` (dev server, inliner, fixture/screenshot/debug scripts), `tests/unit/`, `tests/e2e/`, `tests/fixtures/`, `docs/screenshots/`.
 - **Single-file build** — `tools/inline.mjs` bundles `src/main.js` with esbuild (CDN bare specifiers stay external and resolve through the dist importmap), inlines the bundle into `index.html`, stamps `__APP_VERSION__`/`__BUILD_DATE__`, and fails the build if any `src/` reference leaks.
-- **Testing** — TDD per module: pure logic (tracker, redact geometry, timeline model, detector decode, exporter ladder) is unit-tested in node with seams/mocks; the browser stack (decode, inference, export burn-in) is covered by six Playwright end-to-end tests across five spec files, including an auto-detect journey with a real YuNet detection and an offline-models run.
-- **Specs** — requirements and architecture live under `.moai/specs/SPEC-VID-001/` (spec, design, ADRs, acceptance criteria).
+- **Testing** — TDD per module: pure logic (tracker, redact geometry, timeline model, detector decode, exporter ladder) is unit-tested in node with seams/mocks; the browser stack (decode, inference, export burn-in) is covered by Playwright end-to-end tests (5 spec files, incl. an auto-detect journey with a real YuNet detection and an offline-models run).
+- **Specs** — requirements and architecture live under `.moai/specs/SPEC-VID-001/` (base app) and `.moai/specs/SPEC-VID-002/` (review UX & manual redaction amendments, v1.1.0–v1.5.0).
 
 ## Versioning
 
-Current version: **1.3.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.3.0 · built 2026-10-29`) and in the console at boot. Dev mode (unbuilt) shows `dev build (unbuilt)`.
+Current version: **1.6.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.6.0 · built 2026-10-29`) and in the console at boot. Dev mode (unbuilt) shows `dev build (unbuilt)`.
 
 ## Known limitations (v1)
 

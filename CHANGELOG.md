@@ -23,6 +23,11 @@ Configurable detection sensitivity and a single-frame threshold comparison previ
 - Configurable detection thresholds (REQ-113): the Analyze panel gains a "Detection sensitivity" group with face (0.10–0.90, default 0.60) and plate (0.05–0.90, default 0.25) sliders with live numeric readouts. The configured values flow into every `detectFace` / `detectPlate` call of the analyze pass — full-frame AND dashcam tile passes — and every re-analysis; the pre-1.5.0 baked gates (0.6 / 0.25) remain the defaults everywhere a setting is omitted (`DEFAULT_CONF_FACE` / `DEFAULT_CONF_PLATE`, per-call `opts.confThreshold` in detector.js).
 - Single-frame threshold comparison (REQ-114): a "Compare thresholds" section in the Analyze panel decodes ONE frame at a user-chosen time (default `round(duration·0.1)`), runs each model EXACTLY once (new raw accessors `detectFaceRaw` / `detectPlateRaw` return the undecoded outputs so every level reuses the single inference), and renders five side-by-side panels at the fixed levels ≥0.15 / ≥0.30 / ≥0.45 / ≥0.60 / ≥0.75 — each panel showing the frame with its boxes (faces teal, plates violet) and a per-panel count caption. Clicking a panel applies that level to BOTH sensitivity sliders. The button shows a busy state while running and failures surface via toast; `sampleFrameAt()` (analyze.js) shares the analyze loop's decode seam and sample-closing discipline.
 
+## [1.4.1] — 2026-10-29
+
+### Fixed
+- Track-row time fields overflowed the row on mobile (rendered 336px inside a 312px content box): the `.times` group is now pinned to exactly the row content width with zero-basis flexible inputs — no overflow, no clipped text at 390px (element-level probe `tools/debug-times-overflow.mjs`).
+
 ## [1.4.0] — 2026-10-29
 
 Fullscreen-usable controls and a mobile-friendly single-column layout (SPEC-VID-002 amendments REQ-111/112).
@@ -31,6 +36,11 @@ Fullscreen-usable controls and a mobile-friendly single-column layout (SPEC-VID-
 
 - In-fullscreen overlay controls (REQ-111): an overlay control bar inside the preview stage — play/pause, frame step back/forward, playback speed, and an exit button — shown only in fullscreen / enlarged (zoom) modes so transport stays reachable while the stage fills the screen. Both bars call the same shared transport actions (`togglePlay` / `stepFrame` / `setSpeed` / `exitPreview`), so glyphs, speed selectors and behavior stay in lockstep with the existing bottom transport bar (whose `#transport-bar` / `#export-button` ids and behavior are unchanged). The bar auto-hides after ~3 s of interaction idle and reappears on any pointer/touch activity on the stage, the standard video-player pattern; entering fullscreen or zoom re-shows it with a fresh idle timer.
 - Mobile-friendly layout (REQ-112): at viewport widths ≤ 820 px the app collapses to a single column — the right rail (tracks, export, attribution) stacks below the timeline — with ≥ 40 px touch targets on buttons/selects/inputs, flexible track-row time inputs, a smaller 48 vh default preview stage (the resize handle still overrides it), header/stepper compression, hidden footer keyboard hints, and no horizontal overflow at 390 px. Timeline chip-edge grab zones widen from 6 px to 14 px on coarse (touch) pointers so trims work with a fingertip.
+
+## [1.3.1] — 2026-10-29
+
+### Fixed
+- Preview resize handle worked in the opposite direction: dragging DOWN now makes the video TALLER (the handle is the stage's bottom edge and follows the pointer). Keyboard parity unchanged (ArrowUp = taller). Direction pinned by unit tests.
 
 ## [1.3.0] — 2026-10-29
 
@@ -100,13 +110,3 @@ Initial release — SPEC-VID-001: client-side video redaction web app (faces & l
 - Plate model URL: the canonical GitHub release asset sends no CORS headers on any redirect hop, making it unfetchable from a browser — switched to a Hugging Face mirror serving the same bytes (size-pinned) with CORS `*`.
 - Export delivery race: the Blob download could be canceled by premature deletion of the OPFS staging temp — temp cleanup now happens strictly after delivery or cancellation.
 - Preview dilation parity: the editor preview did not dilate redaction boxes exactly like the export burn-in — both paths now share the same `redact.pixelateFrame` seam, keeping the preview pixel-truthful.
-
-## [1.3.1] — 2026-10-29
-
-### Fixed
-- Preview resize handle worked in the opposite direction: dragging DOWN now makes the video TALLER (the handle is the stage's bottom edge and follows the pointer). Keyboard parity unchanged (ArrowUp = taller). Direction pinned by unit tests.
-
-## [1.4.1] — 2026-10-29
-
-### Fixed
-- Track-row time fields overflowed the row on mobile (rendered 336px inside a 312px content box): the `.times` group is now pinned to exactly the row content width with zero-basis flexible inputs — no overflow, no clipped text at 390px (element-level probe `tools/debug-times-overflow.mjs`).

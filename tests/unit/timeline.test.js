@@ -19,10 +19,13 @@ import {
   setTrackStyle,
   tracksAtForView,
   manualTrackFromBox,
+  parseClockInput,
+  formatSpan,
   scaleTracksToCanvas,
   beginManualBox,
   mountEditor,
 } from '../../src/editor.js';
+import { TRACK_COLORS } from '../../src/tracker.js';
 import { tracksAt, dilate } from '../../src/redact.js';
 
 /** Track factory matching the design.md §2 Track typedef. */
@@ -426,12 +429,15 @@ describe('tracksAtForView (thin wrapper, invariant never swallowed)', () => {
 describe('manualTrackFromBox (manual region factory — full-span default)', () => {
   const box = { x: 40, y: 30, w: 120, h: 80 };
 
-  it('builds a red, enabled, manual-source track labelled "Manual #N"', () => {
+  it('builds an enabled, manual-source track labelled "Manual #N" in a palette color (REQ-109)', () => {
     const track = manualTrackFromBox(7, 3, box);
     expect(track.id).toBe(7);
     expect(track.cls).toBe('manual');
     expect(track.label).toBe('Manual #7');
-    expect(track.color).toBe('#E5484D'); // design-direction alert red
+    // REQ-109: the same categorical palette slot rule as auto tracks —
+    // TRACK_COLORS[(id − 1) % 8] — no longer a shared fixed alert red.
+    expect(track.color).toBe(TRACK_COLORS[(7 - 1) % TRACK_COLORS.length]);
+    expect(track.color).not.toBe('#E5484D');
     expect(track.enabled).toBe(true);
     expect(track.source).toBe('manual');
   });
@@ -571,10 +577,233 @@ describe('DOM adapter guards (node environment, no faked DOM)', () => {
   it('every pure export is a function (module contract surface)', () => {
     for (const fn of [
       renderTimeline, hitTestTimeline, toggleTrack, trimTrack, setTrackStyle,
-      tracksAtForView, manualTrackFromBox, scaleTracksToCanvas,
-      beginManualBox, mountEditor,
+      tracksAtForView, manualTrackFromBox, parseClockInput, formatSpan,
+      scaleTracksToCanvas, beginManualBox, mountEditor,
     ]) {
       expect(typeof fn).toBe('function');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hitTestTimeline OUTWARD edge zones (v1.3.0 REQ-110 grab reliability)
+// ---------------------------------------------------------------------------
+
+describe('hitTestTimeline outward edge zones (REQ-110)', () => {
+  // Geometry: width=100 px, durationSec=10 s → 1 px == 0.1 s; the 6 px zone
+  // reaches 0.6 s beyond each (clamped) span edge.
+  const a = makeTrack({ id: 1, start: 2, end: 4 });
+
+  it("matches within the zone OUTSIDE the span ('start' before, 'end' after)", () => {
+    expect(hitTestTimeline(15, 10, 100, [a], 10)).toEqual({ track: a, zone: 'start' }); // t=1.5, 0.5s before
+    expect(hitTestTimeline(43, 10, 100, [a], 10)).toEqual({ track: a, zone: 'end' }); // t=4.3, 0.3s past
+  });
+
+  it('returns null once the point is more than one edge zone away', () => {
+    expect(hitTestTimeline(9, 10, 100, [a], 10)).toBeNull(); // t=0.9 → 1.1s before start
+    expect(hitTestTimeline(47, 10, 100, [a], 10)).toBeNull(); // t=4.7 → 0.7s past end
+  });
+
+  it('keeps a full-span chip grabbable past the strip boundary (the REQ-110 case)', () => {
+    // A manual track / whole-video chip ends exactly at the strip boundary —
+    // a pointerdown there (or a few px beyond, on the strip padding) must
+    // still resolve to the chip's 'end' zone.
+    const full = makeTrack({ id: 1, start: 0, end: 10 });
+    expect(hitTestTimeline(100, 10, 100, [full], 10)).toEqual({ track: full, zone: 'end' }); // t=10
+    expect(hitTestTimeline(103, 10, 100, [full], 10)).toEqual({ track: full, zone: 'end' }); // t=10.3
+    expect(hitTestTimeline(-3, 10, 100, [full], 10)).toEqual({ track: full, zone: 'start' }); // t=-0.3
+  });
+
+  it('nearest edge wins when two outward zones overlap; gaps stay null', () => {
+    const left = makeTrack({ id: 1, start: 0, end: 4 });
+    const right = makeTrack({ id: 2, start: 6, end: 10 });
+    expect(hitTestTimeline(44, 10, 100, [left, right], 10)).toEqual({ track: left, zone: 'end' });
+    expect(hitTestTimeline(56, 10, 100, [left, right], 10)).toEqual({ track: right, zone: 'start' });
+    expect(hitTestTimeline(50, 10, 100, [left, right], 10)).toBeNull(); // 1s from both edges
+  });
+
+  it('zones vanish at edgePx=0 (no outward matching either)', () => {
+    expect(hitTestTimeline(43, 10, 100, [a], 10, 0)).toBeNull();
+  });
+
+  it('the inward classification is unchanged (zone tests keep passing)', () => {
+    expect(hitTestTimeline(37, 10, 100, [a], 10)?.zone).toBe('end'); // t=3.7 inside
+    expect(hitTestTimeline(26.5, 10, 100, [a], 10)?.zone).toBe('body'); // t=2.65 inside
+  });
+});
+
+// ---------------------------------------------------------------------------
+// trimTrack → renderTimeline render pipeline (v1.3.0 REQ-110 model guard)
+// ---------------------------------------------------------------------------
+
+describe('trimTrack → renderTimeline pipeline (REQ-110 regression guard)', () => {
+  it('reflects a trimmed span in the chips view model percentages', () => {
+    const tracks = [makeTrack({ id: 1, start: 0, end: 10 })];
+    const trimmed = trimTrack(tracks, 1, 1, 7, 10);
+    const vm = renderTimeline(trimmed, 10, 0);
+    expect(vm.chips[0].startPct).toBeCloseTo(10, 10);
+    expect(vm.chips[0].endPct).toBeCloseTo(70, 10);
+    expect(vm.chips[0].endPct - vm.chips[0].startPct).toBeCloseTo(60, 10);
+  });
+
+  it('the chip width follows the dragged edge on a pointermove sequence', () => {
+    // Emulates the drag: each pointermove emits trimTrack, and the view model
+    // must shrink monotonically — this is the model half of "chip length
+    // updates LIVE during the drag" (the DOM half is the E2E debug-trim probe).
+    let tracks = [makeTrack({ id: 1, start: 0, end: 10 })];
+    const widths = [];
+    for (const end of [9.4, 8.8, 8.2]) {
+      tracks = trimTrack(tracks, 1, tracks[0].start, end, 10);
+      const vm = renderTimeline(tracks, 10, 0);
+      widths.push(vm.chips[0].endPct - vm.chips[0].startPct);
+    }
+    expect(widths[0]).toBeGreaterThan(widths[1]);
+    expect(widths[1]).toBeGreaterThan(widths[2]);
+    expect(widths[2]).toBeCloseTo(82, 10);
+  });
+
+  it('a trimmed manual track renders at the same span it will export', () => {
+    const manual = manualTrackFromBox(1, 2, { x: 0, y: 0, w: 10, h: 10 }, 10);
+    const trimmed = trimTrack([manual], 1, 2, 5, 10);
+    const vm = renderTimeline(trimmed, 10, 0);
+    expect(vm.chips[0].startPct).toBeCloseTo(20, 10);
+    expect(vm.chips[0].endPct).toBeCloseTo(50, 10);
+    // The redaction span (export truth) is exactly the chip span (UI truth).
+    expect(tracksAt(trimmed, 3)).toHaveLength(1);
+    expect(tracksAt(trimmed, 1)).toEqual([]);
+    expect(tracksAt(trimmed, 6)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseClockInput / formatSpan (v1.3.0 REQ-108)
+// ---------------------------------------------------------------------------
+
+describe('parseClockInput (REQ-108 clock text → seconds)', () => {
+  it.each([
+    ['0:04.2', undefined, 4.2],
+    ['0:07.8', undefined, 7.8],
+    ['1:23', undefined, 83],
+    ['2:00', undefined, 120],
+    ['2:00.5', undefined, 120.5],
+    ['4.2', undefined, 4.2],
+    ['83', undefined, 83],
+    ['0:4.2', undefined, 4.2], // single-digit seconds part
+    [' 0:07.8 ', undefined, 7.8], // surrounding whitespace
+    ['10.0', 10, 10], // exactly at the duration is valid
+    ['0:09.9', 10, 9.9],
+  ])('parses %s → %n seconds', (str, durationSec, expected) => {
+    expect(parseClockInput(str, durationSec)).toBeCloseTo(expected, 10);
+  });
+
+  it.each([
+    ['abc'],
+    [''],
+    ['   '],
+    ['1:60'], // seconds part must stay below 60 (that is "2:00")
+    ['-1'],
+    ['1:2:3'],
+    ['0x10'],
+    ['1e3'],
+  ])('rejects %s (null)', (str) => {
+    expect(parseClockInput(str, undefined)).toBeNull();
+  });
+
+  it('rejects values beyond the duration when one is given', () => {
+    expect(parseClockInput('0:12', 10)).toBeNull();
+    expect(parseClockInput('12', 10)).toBeNull();
+    expect(parseClockInput('10.1', 10)).toBeNull();
+    // Without a duration the raw value passes (the caller/model clamps).
+    expect(parseClockInput('0:12', undefined)).toBe(12);
+    expect(parseClockInput('0:12', 0)).toBe(12); // 0 is "no duration known"
+    expect(parseClockInput('0:12', NaN)).toBe(12);
+  });
+
+  it('rejects non-string input and negative durations', () => {
+    expect(parseClockInput(undefined, 10)).toBeNull();
+    expect(parseClockInput(null, 10)).toBeNull();
+    expect(parseClockInput(42, 10)).toBeNull();
+    expect(parseClockInput(':-1', 10)).toBeNull();
+  });
+});
+
+describe('formatSpan (REQ-108 span readout)', () => {
+  it('formats "0:04.2 – 0:07.8" (en dash with spaces)', () => {
+    expect(formatSpan(4.2, 7.8)).toBe('0:04.2 – 0:07.8');
+  });
+
+  it('uses the formatClock convention: zero pad under 10s, rollover at :60', () => {
+    expect(formatSpan(0, 83)).toBe('0:00.0 – 1:23.0');
+    expect(formatSpan(59.97, 60.03)).toBe('1:00.0 – 1:00.0'); // never ":60.0"
+    expect(formatSpan(0, 0)).toBe('0:00.0 – 0:00.0');
+  });
+
+  it('degrades non-finite bounds to 0:00.0 (never NaN text)', () => {
+    expect(formatSpan(NaN, 5)).toBe('0:00.0 – 0:05.0');
+    expect(formatSpan(1, Infinity)).toBe('0:01.0 – 0:00.0');
+  });
+
+  it('matches main.js formatClock digit-for-digit (shared convention)', () => {
+    // Guards the "reuse formatClock conventions" contract without an
+    // editor→main import cycle: both must render the same seconds value
+    // identically.
+    for (const s of [0, 4.16, 9.96, 59.95, 60, 83.34, 754.9]) {
+      const m = Math.floor(s / 60);
+      const r = Math.round((s - m * 60) * 10) / 10;
+      const expected = r >= 60 ? `${m + 1}:00.0` : `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`;
+      expect(formatSpan(s, s)).toBe(`${expected} – ${expected}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Manual palette colors (v1.3.0 REQ-109)
+// ---------------------------------------------------------------------------
+
+describe('manualTrackFromBox palette colors (REQ-109)', () => {
+  const box = { x: 40, y: 30, w: 120, h: 80 };
+
+  it('assigns TRACK_COLORS[(id − 1) % 8] — the exact auto-track rule', () => {
+    for (const id of [1, 2, 3, 5, 8, 9, 15]) {
+      const track = manualTrackFromBox(id, 1, box, 10);
+      expect(track.color).toBe(TRACK_COLORS[(id - 1) % TRACK_COLORS.length]);
+      expect(track.color).not.toBe('#E5484D'); // the old shared alert red
+    }
+  });
+
+  it('two manual tracks get DISTINCT colors (no color collision)', () => {
+    const first = manualTrackFromBox(1, 1, box, 10);
+    const second = manualTrackFromBox(2, 1, box, 10);
+    const third = manualTrackFromBox(3, 1, box, 10);
+    expect(second.color).not.toBe(first.color);
+    expect(third.color).not.toBe(first.color);
+    expect(third.color).not.toBe(second.color);
+  });
+
+  it('manual/auto never collide within a session (same global id space)', () => {
+    // main.js owns ONE id counter across analyze runs, so a manual track's
+    // palette slot is derived from the same counter as auto ids — slot i is
+    // used by exactly one track (id i+1) regardless of source.
+    const auto = makeTrack({ id: 2, color: TRACK_COLORS[(2 - 1) % TRACK_COLORS.length] });
+    const manual = manualTrackFromBox(2, 1, box, 10);
+    expect(manual.color).toBe(auto.color); // same id → same slot (consistent)
+    const otherManual = manualTrackFromBox(3, 1, box, 10);
+    expect(otherManual.color).not.toBe(manual.color); // different id → different slot
+  });
+
+  it('keeps manual identity beyond color: label, source, solid style, full span', () => {
+    const track = manualTrackFromBox(4, 1, box, 10);
+    expect(track.label).toBe('Manual #4');
+    expect(track.source).toBe('manual');
+    expect(track.cls).toBe('manual');
+    expect(track.style).toBe('solid');
+    expect(track.start).toBe(0);
+    expect(track.end).toBe(10);
+  });
+
+  it('a manual track renders as a chip in its palette color', () => {
+    const track = manualTrackFromBox(1, 1, box, 10);
+    const vm = renderTimeline([track], 10, 0);
+    expect(vm.chips[0].color).toBe(TRACK_COLORS[0]);
   });
 });

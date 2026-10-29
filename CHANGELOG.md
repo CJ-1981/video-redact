@@ -6,6 +6,19 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-29
+
+Track-time editing, distinct manual colors, and the trim-gesture fix (SPEC-VID-002 amendments REQ-108/109/110).
+
+### Added
+
+- Per-track start/end time inputs in the track list (REQ-108): each row exposes editable clock-format (`m:ss.s`) bounds committed on change/blur/Enter (Escape reverts); invalid input reverts to the current span. Editing routes through the same trim path as chip dragging (`onTrimTrack` → `trimTrack`), so the preview, timeline chips, row readout and export span update together. Rows reconcile in place on refresh, and the value of a focused input is never overwritten mid-edit.
+- Distinct manual-region colors (REQ-109): manual tracks now take the same categorical 8-slot palette as auto tracks (`TRACK_COLORS[(id − 1) % 8]` — the exact tracker.js slot rule, so manual/auto never collide within a session) instead of a shared fixed alert red. Manual identity stays visible via the "Manual #N" label and a dashed chip outline.
+
+### Fixed
+
+- Chip-edge trim drags now start reliably, so the chip's rendered length updates live during the drag with the row span readout following it (REQ-110). Root cause (verified with a live pointer-event probe): the edge-grab hit test only matched INSIDE the chip span, and the trim gesture was wired to the chips layer — so on the most common chips (every manual region and any auto track spanning the whole video) the end edge sits exactly on the strip boundary, the pointerdown there hit-tests to the timeline strip instead of the chips layer, the drag never started, and the follow-up click seeked instead of trimming. Edge hit zones now extend ±6 px around each chip edge (grabbable from outside too) and the gesture is bound to the whole timeline strip; each pointermove re-renders the chip live (probe-measured: chip width changes ≥ 20 px mid-drag).
+
 ## [1.2.0] — 2026-10-29
 
 Preview ergonomics follow-up to SPEC-VID-002: the preview stage is resizable.

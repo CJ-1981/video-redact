@@ -1,19 +1,25 @@
 /**
- * editor.js — REQ-012/013/014/015 + SPEC-VID-002 REQ-101/103 (design.md §3,
- * §4.7). @MX:ANCHOR (preview burns through the SAME redact.pixelateFrame the
- * export burn-in uses — pixel-truthful preview, REQ-016 / AC-04).
+ * editor.js — REQ-012/013/014/015 + SPEC-VID-002 REQ-101/103 + v1.3.0
+ * REQ-108/109/110 (design.md §3, §4.7). @MX:ANCHOR (preview burns through the
+ * SAME redact.pixelateFrame the export burn-in uses — pixel-truthful preview,
+ * REQ-016 / AC-04).
  *
  * Review-editor module, split in two halves:
  *
  *   1. PURE timeline model functions (fully unit-tested in
  *      tests/unit/timeline.test.js — no DOM, run in the node environment):
  *        renderTimeline()      → chips view model + playhead percentage
- *        hitTestTimeline()     → { track, zone } | null (chip edge zones, REQ-103)
+ *        hitTestTimeline()     → { track, zone } | null (chip edge zones,
+ *                                REQ-103 + v1.3.0 REQ-110 outward zones)
  *        toggleTrack()         → immutable enabled-flip (REQ-014)
  *        trimTrack()           → immutable span trim (SPEC-VID-002 REQ-103)
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
  *        tracksAtForView()     → thin wrapper over redact.tracksAt
- *        manualTrackFromBox()  → manual Track factory (REQ-015 + REQ-103)
+ *        manualTrackFromBox()  → manual Track factory (REQ-015 + REQ-103 +
+ *                                REQ-109 palette colors)
+ *        parseClockInput()     → "m:ss.s" / "ss.s" text → seconds|null
+ *                                (REQ-108)
+ *        formatSpan()          → "0:04.2 – 0:07.8" readout (REQ-108)
  *
  *   2. Thin DOM adapters (guarded, NOT unit-tested — node has no DOM):
  *        mountEditor()    → wire playback/overlay sync + timeline events
@@ -31,15 +37,29 @@
  *     click            → onSeek(time under pointer)      — chip or bare rail
  *     dblclick on chip → hitTestTimeline → onToggle(id, !enabled)
  *                        (the two preceding clicks also seek — harmless)
- *     drag a chip EDGE (≤ 6 px zone) → onTrimTrack(id, start, end)
- *                        (chip-edge hit zones from hitTestTimeline; the click
- *                        that follows the drag is suppressed)
+ *     drag a chip EDGE (± 6 px zone) → onTrimTrack(id, start, end)
+ *                        (chip-edge hit zones from hitTestTimeline; zones
+ *                        extend OUTWARD past the edge too — REQ-110: the
+ *                        visible edge line of a full-span chip sits on the
+ *                        strip boundary, where a pointerdown would otherwise
+ *                        land on #timeline and never start the drag). The
+ *                        gesture is wired to the whole #timeline strip and
+ *                        maps the pointer through the chips-layer rect. Each
+ *                        pointermove re-emits the span → onTrimTrack →
+ *                        refresh → the chip length and the row span readout
+ *                        update LIVE. The click that follows the drag is
+ *                        suppressed.
  *
  *   Track list (#track-list rows, rendered by the editor):
  *     checkbox change  → onToggle(trackId, checked)
  *     style select     → onSetStyle(trackId, 'pixelate'|'solid')  (REQ-101)
- *     row click        → onSeek(track.start clamped)     — checkbox/select
- *                                                          excluded
+ *     start/end input  → parseClockInput → onTrimTrack(id, start, end)
+ *                        (REQ-108: committed on change/blur/Enter; invalid
+ *                        input reverts to the model value; rows reconcile
+ *                        in place and a focused input's value is never
+ *                        overwritten by a refresh)
+ *     row click        → onSeek(track.start clamped)     — checkbox/select/
+ *                                                          inputs excluded
  *
  *   Preview stage (manual region, REQ-015 — keyboard "B" is wired by main.js,
  *   which then calls beginManualBox or routes into onManualBox on commit):
@@ -61,6 +81,7 @@
  */
 import './types.js';
 import { tracksAt, pixelateFrame, drawOverlay } from './redact.js';
+import { TRACK_COLORS } from './tracker.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -80,7 +101,8 @@ export const MIN_TRACK_SPAN_S = 0.1;
  */
 export const CHIP_EDGE_PX = 6;
 
-/** Manual regions render alert red everywhere (design-direction.md). */
+/** Manual-drag rubber band (REQ-109: manual tracks themselves use the
+ * categorical palette — alert red stays on the in-progress rubber band). */
 const ALERT_RED = '#E5484D';
 /** "Keep visible" chips (design-direction.md safe green). */
 const SAFE_GREEN = '#3ECF8E';
@@ -153,15 +175,26 @@ export function renderTimeline(tracks, durationSec, currentTimeSec) {
  * edge zones (draggable trim handles), `'body'` otherwise. `y` is accepted
  * for call-site symmetry but unused — the v1 timeline is single-lane.
  *
- * Track selection rule: the SMALLEST span wins ("topmost" for precise
- * selection — a short chip crossing a long one is picked inside the
- * crossing). Exact ties resolve to the earlier track in array order. Span
- * edges are inclusive (mirrors redact.tracksAt).
+ * OUTWARD EDGE ZONES (REQ-110): the zones also extend `edgePx` OUTSIDE the
+ * (clamped) span, so the visible edge line itself is grabbable from both
+ * sides. This is what makes the trim gesture reliable for full-span chips —
+ * every manual region defaults to [0, duration], so its end edge sits ON the
+ * strip boundary where a pointerdown would otherwise hit-test to the strip
+ * (box interiors exclude the right/bottom boundary coordinate) and never
+ * start a drag. When no zone matches, null (click → seek).
+ *
+ * Track selection rule: among tracks whose span CONTAINS the point, the
+ * SMALLEST span wins ("topmost" for precise selection — a short chip
+ * crossing a long one is picked inside the crossing); exact ties resolve to
+ * the earlier track in array order. If no span contains the point, the
+ * OUTWARD candidate with the smallest edge distance wins (ties → earlier
+ * track). Span edges are inclusive (mirrors redact.tracksAt).
  *
  * Zone rule: an edge zone spans `edgePx / width * durationSec` seconds
- * inward from each (clamped) span edge. When a chip is narrower than both
- * zones combined, the midpoint splits them (left half 'start', right half
- * 'end') so both handles stay reachable on tiny chips.
+ * inward — and outward — from each (clamped) span edge. When a chip is
+ * narrower than both inward zones combined, the midpoint splits them (left
+ * half 'start', right half 'end') so both handles stay reachable on tiny
+ * chips.
  *
  * @param {number} x Pointer x within the strip, CSS px.
  * @param {number} y Pointer y within the strip (unused, single lane).
@@ -176,9 +209,10 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
   void y;
   if (!(width > 0) || !(durationSec > 0)) return null;
   const t = (x / width) * durationSec;
+  const all = Array.isArray(tracks) ? tracks : [];
   let best = null;
   let bestSpan = Infinity;
-  for (const track of Array.isArray(tracks) ? tracks : []) {
+  for (const track of all) {
     const start = Math.max(0, track.start); // clamp to the rendered window
     const end = Math.min(durationSec, track.end);
     if (t < start || t > end) continue;
@@ -188,18 +222,38 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
       best = track;
     }
   }
-  if (!best) return null;
-  const start = Math.max(0, best.start);
-  const end = Math.min(durationSec, best.end);
-  const edgeSec = edgePx > 0 ? (edgePx / width) * durationSec : 0;
-  const inStart = t - start <= edgeSec;
-  const inEnd = end - t <= edgeSec;
-  /** @type {'start'|'end'|'body'} */
-  let zone = 'body';
-  if (inStart && inEnd) zone = t < (start + end) / 2 ? 'start' : 'end';
-  else if (inStart) zone = 'start';
-  else if (inEnd) zone = 'end';
-  return { track: best, zone };
+  if (best) {
+    const start = Math.max(0, best.start);
+    const end = Math.min(durationSec, best.end);
+    const edgeSec = edgePx > 0 ? (edgePx / width) * durationSec : 0;
+    const inStart = t - start <= edgeSec;
+    const inEnd = end - t <= edgeSec;
+    /** @type {'start'|'end'|'body'} */
+    let zone = 'body';
+    if (inStart && inEnd) zone = t < (start + end) / 2 ? 'start' : 'end';
+    else if (inStart) zone = 'start';
+    else if (inEnd) zone = 'end';
+    return { track: best, zone };
+  }
+  // Outward pass (REQ-110): within `edgePx` OUTSIDE a (clamped) span edge —
+  // nearest edge wins, ties resolve to the earlier track in array order.
+  if (!(edgePx > 0)) return null;
+  const edgeSecOut = (edgePx / width) * durationSec;
+  /** @type {{track: import('./types.js').Track, zone: 'start'|'end'} | null} */
+  let outward = null;
+  let bestDist = Infinity;
+  for (const track of all) {
+    const start = Math.max(0, track.start);
+    const end = Math.min(durationSec, track.end);
+    if (t < start && start - t <= edgeSecOut && start - t < bestDist) {
+      bestDist = start - t;
+      outward = { track, zone: 'start' };
+    } else if (t > end && t - end <= edgeSecOut && t - end < bestDist) {
+      bestDist = t - end;
+      outward = { track, zone: 'end' };
+    }
+  }
+  return outward;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +359,69 @@ export function setTrackStyle(tracks, trackId, style) {
 }
 
 // ---------------------------------------------------------------------------
+// PURE: parseClockInput / formatSpan — clock text ⇄ seconds (REQ-108)
+// ---------------------------------------------------------------------------
+
+/**
+ * Format seconds with the formatClock convention (src/main.js): `m:ss.d`,
+ * rounded to 0.1 s, never rolling over into ":60.0". Internal shared
+ * formatter for the row span readout, the span inputs and formatSpan — kept
+ * in sync with main.formatClock by unit tests on both sides.
+ * @param {number} sec
+ * @returns {string}
+ */
+function fmtClock(sec) {
+  const s0 = Number.isFinite(sec) && sec > 0 ? sec : 0;
+  const m = Math.floor(s0 / 60);
+  const r = Math.round((s0 - m * 60) * 10) / 10;
+  if (r >= 60) return `${m + 1}:00.0`;
+  return `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`;
+}
+
+/**
+ * Parse a track-row time input into seconds (REQ-108). Accepted shapes:
+ * `m:ss.s` ("0:04.2", "1:23", "2:00.5"), plain seconds ("4.2", "83"),
+ * surrounding whitespace tolerated. The `m:ss` seconds part must stay below
+ * 60 ("1:60" is rejected — that is "2:00").
+ *
+ * A parsed value beyond `durationSec` (when finite and positive) is INVALID —
+ * the caller reverts the input, matching trimTrack's clamp semantics while
+ * giving explicit feedback instead of a silently clamped commit. Negative or
+ * non-numeric input → null.
+ *
+ * @param {string} str Raw input value.
+ * @param {number} [durationSec] Video duration; values beyond it are invalid.
+ * @returns {number | null} Seconds, or null when the input is invalid.
+ */
+export function parseClockInput(str, durationSec) {
+  if (typeof str !== 'string') return null;
+  const match = /^\s*(?:(\d+):(\d{1,2}(?:\.\d+)?)|(\d+(?:\.\d+)?))\s*$/.exec(str);
+  if (!match) return null;
+  let sec;
+  if (match[1] !== undefined) {
+    const s = Number(match[2]);
+    if (s >= 60) return null;
+    sec = Number(match[1]) * 60 + s;
+  } else {
+    sec = Number(match[3]);
+  }
+  if (!Number.isFinite(sec) || sec < 0) return null;
+  if (Number.isFinite(durationSec) && durationSec > 0 && sec > durationSec) return null;
+  return sec;
+}
+
+/**
+ * A track's span as a compact readout in the formatClock convention
+ * (REQ-108): "0:04.2 – 0:07.8" (en dash with spaces).
+ * @param {number} start Span start, seconds.
+ * @param {number} end Span end, seconds.
+ * @returns {string}
+ */
+export function formatSpan(start, end) {
+  return `${fmtClock(start)} – ${fmtClock(end)}`;
+}
+
+// ---------------------------------------------------------------------------
 // PURE: tracksAtForView — view-side lookup (REQ-012/016 seam)
 // ---------------------------------------------------------------------------
 
@@ -336,8 +453,15 @@ export function tracksAtForView(tracks, t) {
  * Divergence from tracker.beginManualTrack (intentional): that skeleton
  * assigns a palette slot and a zero-length span via the Tracker instance's
  * counters; this factory is standalone (main.js owns the id counter across
- * analyze runs), forces the design-direction ALERT RED for manual regions,
- * labels from the same counter, and spans [0, durationSec] (REQ-103).
+ * analyze runs), labels from the same counter, and spans [0, durationSec]
+ * (REQ-103).
+ *
+ * COLOR (REQ-109): manual tracks take the SAME categorical palette slot as
+ * auto tracks — TRACK_COLORS[(trackIdCounter − 1) % TRACK_COLORS.length],
+ * the exact tracker.js rule — so manual and auto tracks never collide within
+ * a session and two manual tracks never share a color. Manual identity stays
+ * visible through the "Manual #N" label (+ the dashed chip outline the
+ * renderer adds for source === 'manual'), NOT through a color collision.
  *
  * SPARSE KEYFRAMES — verified against src/redact.js: `tracksAt` gates only on
  * `enabled` and `t ∈ [start, end]`, and `nearestBox` picks the keyframe
@@ -374,7 +498,9 @@ export function manualTrackFromBox(trackIdCounter, t, box, durationSec) {
     id: trackIdCounter,
     cls: 'manual',
     label: `Manual #${trackIdCounter}`,
-    color: ALERT_RED,
+    // REQ-109: same categorical slot rule as the tracker's auto tracks —
+    // manual regions are no longer a shared fixed alert red.
+    color: TRACK_COLORS[(trackIdCounter - 1) % TRACK_COLORS.length],
     keyframes: new Map([[0, { ...box }]]),
     start: 0,
     end,
@@ -567,7 +693,9 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  *
  * @param {object} els Stable DOM handles:
  *     `{ video, overlayCanvas, timeline, chipsContainer, playhead, trackList }`.
- *     The chips container is also the trim-handle gesture surface (REQ-103).
+ *     The timeline strip is the trim-handle gesture surface (REQ-103, and
+ *     REQ-110: bound to #timeline so boundary-edge grabs on full-span chips
+ *     are seen); pointer geometry still maps through the chips layer.
  * @param {object} hooks Callbacks into main.js:
  *     `{ onToggle(trackId, enabled), onSeek(t), onManualBox(box, t),
  *        onTrimTrack(trackId, start, end), onSetStyle(trackId, style),
@@ -754,14 +882,6 @@ export function mountEditor(els, hooks) {
 
   // --- Timeline + track list DOM (chips, rows, playhead) -------------------
 
-  /** m:ss.s timecode for list rows. */
-  function fmtTime(s) {
-    const sec = Number.isFinite(s) ? Math.max(0, s) : 0;
-    const m = Math.floor(sec / 60);
-    const r = sec - m * 60;
-    return `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`;
-  }
-
   function render() {
     if (closed || !doc) return;
     const state = getState();
@@ -790,60 +910,166 @@ export function mountEditor(els, hooks) {
         if (chip.enabled && styleOf(chip.track) === 'solid') {
           el.style.boxShadow = 'inset 0 0 0 2px rgba(0, 0, 0, 0.6)';
         }
+        // REQ-109: manual identity stays visible beyond color — a dashed
+        // outline on the chip (the box overlay already carries the palette
+        // color via drawOverlay).
+        if (chip.track.source === 'manual') {
+          el.style.outline = '1px dashed rgba(232, 236, 241, 0.6)';
+          el.style.outlineOffset = '-1px';
+        }
         chipsContainer.appendChild(el);
       }
     }
 
     if (playhead) playhead.style.left = `${vm.playheadPct}%`;
 
-    if (trackList) {
-      trackList.textContent = '';
-      for (const track of state.tracks) {
-        const row = doc.createElement('li');
-        row.className = 'track-row' + (track.enabled ? '' : ' enabled-off');
-        row.dataset.trackId = String(track.id);
+    if (trackList) renderTrackList(state.tracks, d);
+  }
 
-        const swatch = doc.createElement('span');
-        swatch.className = 'swatch';
-        swatch.style.background = track.enabled ? track.color : SAFE_GREEN;
+  /**
+   * Track-list render (REQ-108): keyed row reconciliation — existing rows
+   * are updated IN PLACE (a text input must never lose focus or its in-flight
+   * value to a refresh; only rows for tracks that appeared/disappeared are
+   * created/removed). The focused start/end input's value is never
+   * overwritten while it has focus (classic controlled-input pitfall); after
+   * a commit (blur/Enter) the input is no longer focused and the next render
+   * syncs it to the canonical formatted value.
+   * @param {import('./types.js').Track[]} tracks
+   * @param {number} d Video duration (0 until metadata exists).
+   */
+  function renderTrackList(tracks, d) {
+    const active = doc && doc.activeElement;
+    const existing = new Map();
+    for (const row of Array.from(trackList.querySelectorAll('li.track-row[data-track-id]'))) {
+      existing.set(String(row.dataset.trackId), row);
+    }
+    const keep = new Set();
+    for (const track of Array.isArray(tracks) ? tracks : []) {
+      const idStr = String(track.id);
+      keep.add(idStr);
+      const row = existing.get(idStr) ?? buildTrackRow(track.id);
+      syncTrackRow(row, track, d, active);
+      trackList.appendChild(row); // moves new + existing rows into array order
+    }
+    for (const [idStr, row] of existing) {
+      if (!keep.has(idStr)) row.remove();
+    }
+  }
 
-        const label = doc.createElement('span');
-        label.className = 'label';
-        label.textContent = track.enabled
-          ? track.label
-          : `${track.label} (visible)`;
+  /**
+   * Build one empty track row (structure only; syncTrackRow fills it in).
+   * Row contract kept Playwright/E2E-compatible: li.track-row with
+   * .swatch / .label / .span / .style-select / input[type=checkbox], plus
+   * the REQ-108 .times group with the start/end span inputs.
+   * @param {number} trackId
+   * @returns {HTMLLIElement}
+   */
+  function buildTrackRow(trackId) {
+    const row = doc.createElement('li');
+    row.className = 'track-row';
+    row.dataset.trackId = String(trackId);
 
-        const span = doc.createElement('span');
-        span.className = 'span num';
-        span.textContent = `${fmtTime(track.start)}–${fmtTime(
-          Number.isFinite(d) && d > 0 ? Math.min(track.end, d) : track.end,
-        )}`;
+    const swatch = doc.createElement('span');
+    swatch.className = 'swatch';
 
-        // Redaction style per track (REQ-101): Pixelate | Solid; the choice
-        // feeds the shared burn-in seam via onSetStyle → setTrackStyle.
-        const styleSelect = doc.createElement('select');
-        styleSelect.className = 'style-select';
-        styleSelect.dataset.trackId = String(track.id);
-        styleSelect.title = 'Redaction style';
-        styleSelect.setAttribute('aria-label', `${track.label} redaction style`);
-        const currentStyle = styleOf(track);
-        for (const [value, text] of [['pixelate', 'Pixelate'], ['solid', 'Solid']]) {
-          const opt = doc.createElement('option');
-          opt.value = value;
-          opt.textContent = text;
-          if (value === currentStyle) opt.selected = true;
-          styleSelect.appendChild(opt);
-        }
+    const label = doc.createElement('span');
+    label.className = 'label';
 
-        const checkbox = doc.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.checked = !!track.enabled;
-        checkbox.dataset.trackId = String(track.id);
-        checkbox.title = 'Redact this track';
+    const span = doc.createElement('span');
+    span.className = 'span num';
 
-        row.append(swatch, label, span, styleSelect, checkbox);
-        trackList.appendChild(row);
+    const times = doc.createElement('span');
+    times.className = 'times';
+    for (const role of ['start', 'end']) {
+      const input = doc.createElement('input');
+      input.type = 'text';
+      input.className = 'span-input num';
+      input.dataset.trackId = String(trackId);
+      input.dataset.role = role;
+      input.spellcheck = false;
+      input.autocomplete = 'off';
+      input.title = role === 'start' ? 'Redaction start (m:ss.s)' : 'Redaction end (m:ss.s)';
+      times.appendChild(input);
+      if (role === 'start') {
+        const sep = doc.createElement('span');
+        sep.className = 'sep';
+        sep.textContent = '–';
+        times.appendChild(sep);
       }
+    }
+
+    const styleSelect = doc.createElement('select');
+    styleSelect.className = 'style-select';
+    styleSelect.dataset.trackId = String(trackId);
+    styleSelect.title = 'Redaction style';
+    for (const [value, text] of [['pixelate', 'Pixelate'], ['solid', 'Solid']]) {
+      const opt = doc.createElement('option');
+      opt.value = value;
+      opt.textContent = text;
+      styleSelect.appendChild(opt);
+    }
+
+    const checkbox = doc.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.trackId = String(trackId);
+    checkbox.title = 'Redact this track';
+
+    row.append(swatch, label, span, times, styleSelect, checkbox);
+    return row;
+  }
+
+  /**
+   * Sync one track row's live values in place (see renderTrackList for the
+   * reconciliation rationale). `active` is the document's focused element —
+   * a focused span input keeps its in-flight value (guard) and is synced
+   * from the model on the render following its commit/blur.
+   * @param {HTMLLIElement} row
+   * @param {import('./types.js').Track} track
+   * @param {number} d Video duration (0 until metadata exists).
+   * @param {Element | null} active Currently focused element, if any.
+   */
+  function syncTrackRow(row, track, d, active) {
+    row.className = 'track-row' + (track.enabled ? '' : ' enabled-off');
+
+    const swatch = /** @type {HTMLElement | null} */ (row.querySelector('.swatch'));
+    if (swatch) swatch.style.background = track.enabled ? track.color : SAFE_GREEN;
+
+    const label = row.querySelector('.label');
+    if (label) {
+      label.textContent = track.enabled ? track.label : `${track.label} (visible)`;
+    }
+
+    const span = row.querySelector('.span');
+    if (span) {
+      span.textContent = formatSpan(
+        track.start,
+        Number.isFinite(d) && d > 0 ? Math.min(track.end, d) : track.end,
+      );
+    }
+
+    for (const inputEl of row.querySelectorAll('input.span-input')) {
+      const input = /** @type {HTMLInputElement} */ (inputEl);
+      const role = input.dataset.role === 'end' ? 'end' : 'start';
+      const value = fmtClock(role === 'start' ? track.start : track.end);
+      if (active !== input) input.value = value; // focused guard (REQ-108)
+      const aria = `${track.label} ${role} time`;
+      if (input.getAttribute('aria-label') !== aria) input.setAttribute('aria-label', aria);
+    }
+
+    const selectEl = row.querySelector('.style-select');
+    if (selectEl) {
+      const styleSelect = /** @type {HTMLSelectElement} */ (selectEl);
+      const currentStyle = styleOf(track);
+      // Only touch the select when out of sync — resetting .value would also
+      // be harmless, but keep the DOM churn minimal.
+      if (styleSelect.value !== currentStyle) styleSelect.value = currentStyle;
+      const aria = `${track.label} redaction style`;
+      if (styleSelect.getAttribute('aria-label') !== aria) styleSelect.setAttribute('aria-label', aria);
+    }
+
+    const checkboxEl = row.querySelector('input[type="checkbox"]');
+    if (checkboxEl) {
+      /** @type {HTMLInputElement} */ (checkboxEl).checked = !!track.enabled;
     }
   }
 
@@ -895,11 +1121,17 @@ export function mountEditor(els, hooks) {
   }
 
   /**
-   * Trim drag lifecycle: pointerdown inside a chip's edge zone starts it
+   * Trim drag lifecycle: pointerdown inside a chip's ± edge zone starts it
    * ('body' falls through to the ordinary click-to-seek), pointermove maps
    * the pointer to a time and re-emits the span through onTrimTrack (the
    * moving edge is pre-clamped so the min-span floor holds at the drag
-   * layer), pointerup ends it and suppresses the follow-up click.
+   * layer), pointerup ends it and suppresses the follow-up click. The
+   * handlers are wired to the whole #timeline STRIP (REQ-110): a pointerdown
+   * at a full-span chip's end-edge boundary pixel hit-tests to the strip —
+   * box interiors exclude the right boundary coordinate, so binding to the
+   * chips layer alone would never even see the event. Pointer x is still
+   * mapped through the CHIPS-layer rect (the space the chips are laid out
+   * in); hitTestTimeline's outward zones handle points slightly outside it.
    */
   function applyTrimDrag(clientX) {
     if (!trimDrag || !chipsContainer || !chipsContainer.getBoundingClientRect) return;
@@ -925,9 +1157,9 @@ export function mountEditor(els, hooks) {
     trimDrag = { id: hit.track.id, zone: hit.zone, moved: false };
     suppressClick = true;
     try {
-      chipsContainer.setPointerCapture(e.pointerId);
+      timeline.setPointerCapture(e.pointerId);
     } catch {
-      /* detached container — capture is best-effort */
+      /* detached strip — capture is best-effort */
     }
     e.preventDefault();
   }
@@ -947,7 +1179,7 @@ export function mountEditor(els, hooks) {
     if (trimDrag.moved) applyTrimDrag(e.clientX);
     trimDrag = null;
     try {
-      chipsContainer.releasePointerCapture(e.pointerId);
+      timeline.releasePointerCapture(e.pointerId);
     } catch {
       /* never captured or already released */
     }
@@ -995,7 +1227,13 @@ export function mountEditor(els, hooks) {
     }
   }
 
-  // --- Track list events: checkbox = toggle, select = style, row = seek ----
+  // --- Track list events: checkbox = toggle, select = style, span inputs =
+  //     trim (REQ-108), row = seek -------------------------------------------
+
+  /** This target is one of the row's start/end span inputs (REQ-108). */
+  function isSpanInput(target) {
+    return !!(target && typeof target.closest === 'function' && target.closest('input.span-input'));
+  }
 
   function onListChange(e) {
     const target = e.target;
@@ -1008,16 +1246,60 @@ export function mountEditor(els, hooks) {
       }
       return;
     }
+    if (isSpanInput(target)) {
+      // Span edit (REQ-108): committed on change (blur / Enter). Invalid
+      // input REVERTS to the model value; valid input goes through the SAME
+      // trim path as the chip-edge drag (onTrimTrack → trimTrack), so the
+      // chips, readout, preview and export span all update together.
+      const id = Number(target.dataset && target.dataset.trackId);
+      const role = target.dataset && target.dataset.role === 'end' ? 'end' : 'start';
+      const track = (getState().tracks || []).find((tr) => tr.id === id);
+      if (!track) return;
+      const parsed = parseClockInput(target.value, duration());
+      if (parsed == null) {
+        target.value = fmtClock(role === 'start' ? track.start : track.end);
+        return;
+      }
+      // Canonicalize even when the browser fired change without a blur.
+      target.value = fmtClock(parsed);
+      callTrim(id, role === 'start' ? parsed : track.start, role === 'end' ? parsed : track.end);
+      return;
+    }
     if (target.type !== 'checkbox') return;
     const id = Number(target.dataset && target.dataset.trackId);
     if (Number.isFinite(id)) callToggle(id, !!target.checked);
   }
 
+  /**
+   * Span-input keyboard (REQ-108): Enter commits (blur fires change) and
+   * Escape reverts to the model value before committing. The doc-level
+   * shortcuts ignore events from inputs, but blurring on Enter keeps the
+   * edit session explicit.
+   */
+  function onListKeyDown(e) {
+    const target = e.target;
+    if (!isSpanInput(target)) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      target.blur(); // commit: change fires on blur when dirty
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      const id = Number(target.dataset && target.dataset.trackId);
+      const role = target.dataset && target.dataset.role === 'end' ? 'end' : 'start';
+      const track = (getState().tracks || []).find((tr) => tr.id === id);
+      if (track) target.value = fmtClock(role === 'start' ? track.start : track.end);
+      target.blur();
+    }
+  }
+
   function onListClick(e) {
-    if (e.target && (e.target.type === 'checkbox' || e.target.tagName === 'SELECT')) return;
+    const target = e.target;
+    if (target && (target.type === 'checkbox' || target.tagName === 'SELECT' || isSpanInput(target))) {
+      return;
+    }
     const row =
-      e.target && typeof e.target.closest === 'function'
-        ? e.target.closest('[data-track-id]')
+      target && typeof target.closest === 'function'
+        ? target.closest('[data-track-id]')
         : null;
     if (!row) return;
     const id = Number(row.dataset && row.dataset.trackId);
@@ -1064,16 +1346,18 @@ export function mountEditor(els, hooks) {
   if (timeline) {
     timeline.addEventListener('click', onTimelineClick);
     timeline.addEventListener('dblclick', onTimelineDblClick);
-  }
-  if (chipsContainer) {
-    chipsContainer.addEventListener('pointerdown', onChipsPointerDown);
-    chipsContainer.addEventListener('pointermove', onChipsPointerMove);
-    chipsContainer.addEventListener('pointerup', onChipsPointerUp);
-    chipsContainer.addEventListener('pointercancel', onChipsPointerCancel);
-    chipsContainer.addEventListener('pointerleave', onChipsPointerLeave);
+    // Trim gesture on the whole STRIP (REQ-110): #timeline contains the chips
+    // layer, so every chips event still arrives — plus the boundary pixel of
+    // a full-span chip's end edge, which hit-tests to the strip itself.
+    timeline.addEventListener('pointerdown', onChipsPointerDown);
+    timeline.addEventListener('pointermove', onChipsPointerMove);
+    timeline.addEventListener('pointerup', onChipsPointerUp);
+    timeline.addEventListener('pointercancel', onChipsPointerCancel);
+    timeline.addEventListener('pointerleave', onChipsPointerLeave);
   }
   if (trackList) {
     trackList.addEventListener('change', onListChange);
+    trackList.addEventListener('keydown', onListKeyDown);
     trackList.addEventListener('click', onListClick);
   }
   render(); // initial chips + track list (inert in node: doc is undefined)
@@ -1102,16 +1386,15 @@ export function mountEditor(els, hooks) {
     if (timeline) {
       timeline.removeEventListener('click', onTimelineClick);
       timeline.removeEventListener('dblclick', onTimelineDblClick);
-    }
-    if (chipsContainer) {
-      chipsContainer.removeEventListener('pointerdown', onChipsPointerDown);
-      chipsContainer.removeEventListener('pointermove', onChipsPointerMove);
-      chipsContainer.removeEventListener('pointerup', onChipsPointerUp);
-      chipsContainer.removeEventListener('pointercancel', onChipsPointerCancel);
-      chipsContainer.removeEventListener('pointerleave', onChipsPointerLeave);
+      timeline.removeEventListener('pointerdown', onChipsPointerDown);
+      timeline.removeEventListener('pointermove', onChipsPointerMove);
+      timeline.removeEventListener('pointerup', onChipsPointerUp);
+      timeline.removeEventListener('pointercancel', onChipsPointerCancel);
+      timeline.removeEventListener('pointerleave', onChipsPointerLeave);
     }
     if (trackList) {
       trackList.removeEventListener('change', onListChange);
+      trackList.removeEventListener('keydown', onListKeyDown);
       trackList.removeEventListener('click', onListClick);
     }
     if (disposeManual) disposeManual();

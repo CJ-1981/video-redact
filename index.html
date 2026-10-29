@@ -431,14 +431,35 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       cursor: pointer;
+      flex-wrap: wrap; /* REQ-108: the .times group takes its own line */
     }
     .track-row .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
-    .track-row .label { flex: 1; font-size: 13px; }
-    .track-row .span { color: var(--ink); font-size: 11.5px; }
+    .track-row .label { flex: 1; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .track-row .span { color: var(--ink); font-size: 11.5px; white-space: nowrap; }
     .track-row .style-select { padding: 2px 4px; font-size: 11.5px; border-radius: 6px; }
+    /* REQ-108: per-track start/end time inputs (clock format, m:ss.s). */
+    .track-row .times {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-basis: 100%;
+      cursor: default;
+    }
+    .track-row .times .sep { color: var(--ink); flex: none; }
+    input.span-input {
+      width: 64px;
+      padding: 2px 6px;
+      font-size: 11.5px;
+      color: var(--ink-hi);
+      background: var(--bg-inset);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      min-width: 0;
+    }
+    input.span-input:hover { border-color: var(--ink); }
+    input.span-input:focus { border-color: var(--accent); outline: none; }
     .track-row.enabled-off { opacity: 0.55; }
     .track-row.enabled-off .label { color: var(--safe); text-decoration: line-through; }
-    .track-row.manual .swatch { background: var(--alert); }
     #track-list-empty { margin: 4px 0 0; color: var(--ink); font-size: 12.5px; }
 
     .warn-note {

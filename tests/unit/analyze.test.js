@@ -54,7 +54,7 @@ vi.mock('../../src/detector.js', async (importOriginal) => {
   };
 });
 
-const { runAnalyze } = await import('../../src/analyze.js');
+const { runAnalyze, sampleFrameAt } = await import('../../src/analyze.js');
 const { VideoSampleSink } = await import('mediabunny');
 const { tileGrid } = await import('../../src/detector.js');
 
@@ -227,6 +227,137 @@ describe('stride schedule — faces every frame, plates every 2nd (REQ-009)', ()
     expect(detState.createOpts.epPolicy).toEqual(['wasm']);
     const face = result.tracks.find((tr) => tr.cls === 'face');
     expect(face.end).toBeCloseTo(0.1 + 0.05, 12);
+  });
+});
+
+describe('configurable thresholds (REQ-113) — settings.confFace/confPlate reach EVERY detect call', () => {
+  it('passes the thresholds to full-frame AND dashcam tile detect calls', async () => {
+    installSink([0, 0.1]);
+
+    await runAnalyze(baseOpts({ settings: { dashcamMode: true, confFace: 0.42, confPlate: 0.17 } }));
+
+    // 2 frames × (1 full + 4 tiles) = 10 face calls; every call carries the
+    // same confThreshold, on full-frame (1280 px) AND tile (320 px) rasters.
+    expect(detState.detectFace).toHaveBeenCalledTimes(10);
+    for (const [frame, opts] of detState.detectFace.mock.calls) {
+      expect(opts).toEqual({ confThreshold: 0.42 });
+      expect([W, 320]).toContain(frame.width);
+    }
+    for (const [frame, opts] of detState.detectPlate.mock.calls) {
+      expect(opts).toEqual({ confThreshold: 0.17 });
+      expect([W, 320]).toContain(frame.width);
+    }
+  });
+
+  it('omitted settings pass confThreshold: undefined (detector defaults 0.6 / 0.25 apply)', async () => {
+    installSink([0]);
+
+    await runAnalyze(baseOpts({}));
+
+    expect(detState.detectFace.mock.calls[0][1]).toEqual({ confThreshold: undefined });
+    expect(detState.detectPlate.mock.calls[0][1]).toEqual({ confThreshold: undefined });
+  });
+});
+
+describe('sampleFrameAt (REQ-114 — one-sample decode, analyze-loop seams)', () => {
+  /** Sink mock yielding exactly one sample for the requested window. */
+  function installOneSample(sample) {
+    const calls = { sinks: [], windows: [] };
+    VideoSampleSink.mockImplementation(function (videoTrack) {
+      calls.sinks.push(videoTrack);
+      return {
+        samples: (start, end) => {
+          calls.windows.push([start, end]);
+          return (async function* () {
+            yield sample;
+          })();
+        },
+      };
+    });
+    return calls;
+  }
+
+  const trackOf = (w = W, h = H) => ({ displayWidth: w, displayHeight: h });
+  const inputOf = (track) => ({ getPrimaryVideoTrack: vi.fn(async () => track) });
+  const canvasSeam = () => {
+    const ctx = {
+      getImageData: vi.fn((x, y, cw, ch) => ({
+        data: new Uint8ClampedArray(cw * ch * 4),
+        width: cw,
+        height: ch,
+      })),
+    };
+    const factory = vi.fn(() => ({ canvas: { width: W, height: H }, ctx }));
+    factory.ctx = ctx;
+    return factory;
+  };
+
+  it('decodes the FIRST sample of [t, t+0.1] at display size via the analyze draw seam', async () => {
+    const sample = { timestamp: 1.04, draw: vi.fn(), close: vi.fn() };
+    const calls = installOneSample(sample);
+    const factory = canvasSeam();
+
+    const result = await sampleFrameAt(inputOf(trackOf()), 1.0, 0, { canvasFactory: factory });
+
+    // Sink built from the primary track; window [t, t + 0.1].
+    expect(calls.sinks).toEqual([trackOf()]);
+    expect(calls.windows).toEqual([[1.0, 1.1]]);
+    // Same draw seam as the analyze loop: (ctx, 0, 0, width, height).
+    expect(sample.draw).toHaveBeenCalledTimes(1);
+    expect(sample.draw.mock.calls[0][0]).toBe(factory.ctx);
+    expect(sample.draw.mock.calls[0].slice(1)).toEqual([0, 0, W, H]);
+    // Sample closed exactly once — the decode is never retained.
+    expect(sample.close).toHaveBeenCalledTimes(1);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(result.width).toBe(W);
+    expect(result.height).toBe(H);
+    expect(result.imageDataLike.width).toBe(W);
+    // The SAMPLE's presentation timestamp is authoritative (ADR-3), not the request.
+    expect(result.t).toBe(1.04);
+  });
+
+  it('maxSize caps the longest edge, aspect-locked (1280×720 → 320×180)', async () => {
+    const sample = { timestamp: 0.2, draw: vi.fn(), close: vi.fn() };
+    installOneSample(sample);
+
+    const result = await sampleFrameAt(inputOf(trackOf()), 0.2, 320, { canvasFactory: canvasSeam() });
+
+    expect([result.width, result.height]).toEqual([320, 180]);
+    expect(sample.draw.mock.calls[0].slice(1)).toEqual([0, 0, 320, 180]);
+    expect(result.imageDataLike.height).toBe(180);
+  });
+
+  it('throws when no sample decodes within the window (t past the end)', async () => {
+    VideoSampleSink.mockImplementation(function (videoTrack) {
+      return { samples: () => (async function* () {})() };
+    });
+    await expect(
+      sampleFrameAt(inputOf(trackOf()), 99, 0, { canvasFactory: canvasSeam() }),
+    ).rejects.toThrow(/no video sample/);
+  });
+
+  it('throws when the input has no primary video track', async () => {
+    await expect(
+      sampleFrameAt({ getPrimaryVideoTrack: vi.fn(async () => null) }, 0, 0, {
+        canvasFactory: canvasSeam(),
+      }),
+    ).rejects.toThrow('sampleFrameAt: input has no primary video track.');
+  });
+
+  it('closes the sample even when the draw fails', async () => {
+    const sample = {
+      timestamp: 0,
+      draw: vi.fn(() => {
+        throw new Error('draw exploded');
+      }),
+      close: vi.fn(),
+    };
+    installOneSample(sample);
+
+    await expect(
+      sampleFrameAt(inputOf(trackOf()), 0, 0, { canvasFactory: canvasSeam() }),
+    ).rejects.toThrow('draw exploded');
+    expect(sample.close).toHaveBeenCalledTimes(1);
   });
 });
 

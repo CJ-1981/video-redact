@@ -447,6 +447,71 @@
     }
     label.toggle input { accent-color: var(--accent); }
 
+    /* ── Detection sensitivity + threshold compare (v1.5.0 REQ-113/114) ── */
+    #sensitivity h3, #threshold-compare h3 {
+      margin: 12px 0 6px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink);
+    }
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+      color: var(--ink-hi);
+      font-size: 13px;
+      min-height: 32px;
+    }
+    .slider-row .slider-name { flex: none; min-width: 5.5ch; color: var(--ink); }
+    .slider-row input[type='range'] { flex: 1; accent-color: var(--accent); min-width: 0; }
+    .slider-row output {
+      flex: none;
+      min-width: 4ch;
+      text-align: right;
+      font-family: var(--font-num);
+      font-size: 12.5px;
+      color: var(--ink-hi);
+    }
+    .slider-row input[type='number'] {
+      flex: 1;
+      min-width: 0;
+      max-width: 9ch;
+      background: var(--bg-inset);
+      color: var(--ink-hi);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 4px 6px;
+      font-size: 12.5px;
+    }
+    #compare-button { width: 100%; margin-top: 6px; }
+    #threshold-panels {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .threshold-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--bg-inset);
+      cursor: pointer;
+    }
+    .threshold-panel:hover { border-color: var(--accent); }
+    .threshold-panel canvas { display: block; border-radius: 4px; }
+    .threshold-panel .caption {
+      font-family: var(--font-num);
+      font-size: 10.5px;
+      color: var(--ink);
+      white-space: nowrap;
+    }
+
     #track-list {
       list-style: none;
       margin: 0;
@@ -706,6 +771,39 @@
             <input type="checkbox" id="dashcam-toggle" />
             Dashcam mode <span style="color: var(--ink)">(tiled pass for small plates)</span>
           </label>
+
+          <!-- REQ-113 (v1.5.0): configurable detection confidence thresholds.
+               The slider values flow into settings.confFace / settings.confPlate
+               on every analyze / re-analyze (defaults = the pre-1.5.0 baked
+               gates: face 0.60, plate 0.25). -->
+          <div id="sensitivity" role="group" aria-label="Detection sensitivity">
+            <h3>Detection sensitivity</h3>
+            <label class="slider-row" for="conf-face">
+              <span class="slider-name">Face</span>
+              <input type="range" id="conf-face" min="0.10" max="0.90" step="0.05" value="0.60" />
+              <output id="conf-face-out" for="conf-face">0.60</output>
+            </label>
+            <label class="slider-row" for="conf-plate">
+              <span class="slider-name">Plate</span>
+              <input type="range" id="conf-plate" min="0.05" max="0.90" step="0.05" value="0.25" />
+              <output id="conf-plate-out" for="conf-plate">0.25</output>
+            </label>
+          </div>
+
+          <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
+               decode + one inference per model, five fixed-level panels.
+               Clicking a panel applies that level to BOTH sliders above. -->
+          <div id="threshold-compare" role="group" aria-label="Single-frame threshold comparison">
+            <h3>Compare thresholds</h3>
+            <label class="slider-row" for="compare-time">
+              <span class="slider-name">Frame&nbsp;time&nbsp;(s)</span>
+              <input type="number" id="compare-time" class="num" min="0" max="0" step="0.1" value="0" />
+            </label>
+            <button id="compare-button" type="button">Compare thresholds</button>
+            <p id="compare-status" class="stat-line" role="status"></p>
+            <div id="threshold-panels"></div>
+          </div>
+
           <button id="analyze-cancel" type="button" hidden>Cancel analysis</button>
         </section>
 

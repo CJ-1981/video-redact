@@ -108,6 +108,16 @@ const ORT_VERSION = '1.31.1';
 export const ORT_WASM_PATHS = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 
 /**
+ * Default confidence thresholds (REQ-113): face 0.6, plate 0.25 — the values
+ * baked into every call before v1.5.0, preserved as defaults so existing call
+ * sites behave identically. Per-call override: `detectFace(frame,
+ * { confThreshold })` / `detectPlate(frame, { confThreshold })`; the analyze
+ * pass forwards `settings.confFace` / `settings.confPlate` (analyze.js).
+ */
+export const DEFAULT_CONF_FACE = 0.6;
+export const DEFAULT_CONF_PLATE = 0.25;
+
+/**
  * Greedy non-maximum suppression.
  *
  * @param {Array<{box: import('./types.js').Box, conf: number, [k: string]: unknown}>} dets
@@ -505,12 +515,25 @@ export function mergeTiles(tileDets, tiles) {
  *     `onModelProgress('yunet'|'plate-yolov9t', 0..1)` during ensureModel;
  *     `epPolicy` overrides the EP ladder (e.g. `['wasm']` to force CPU).
  * @returns {Promise<{
- *   detectFace: (frame: ImageDataLike) => Promise<import('./types.js').Detection[]>,
- *   detectPlate: (frame: ImageDataLike) => Promise<import('./types.js').Detection[]>,
+ *   detectFace: (frame: ImageDataLike, opts?: {confThreshold?: number}) => Promise<import('./types.js').Detection[]>,
+ *   detectPlate: (frame: ImageDataLike, opts?: {confThreshold?: number}) => Promise<import('./types.js').Detection[]>,
+ *   detectFaceRaw: (frame: ImageDataLike, geom?: {ratio: number, padX: number, padY: number}) =>
+ *     Promise<{outputs: Record<string, {data: Float32Array, dims: number[]}>, geom: {ratio: number, padX: number, padY: number}}>,
+ *   detectPlateRaw: (frame: ImageDataLike, geom?: {ratio: number, padX: number, padY: number}) =>
+ *     Promise<{rows: Float32Array, dims: number[], geom: {ratio: number, padX: number, padY: number}}>,
  *   close: () => void,
  *   effectiveEp: string | null
  * }>} Detections carry display-space boxes and `pass: 'full' | 'tile'`;
- *     `t` is stamped by the analyze loop, not here. `effectiveEp` is the
+ *     `t` is stamped by the analyze loop, not here. `opts.confThreshold`
+ *     (REQ-113) overrides the per-call decode gate — default
+ *     DEFAULT_CONF_FACE / DEFAULT_CONF_PLATE, so existing call sites are
+ *     unchanged. The RAW accessors (REQ-114) run ONE inference and return
+ *     the undecoded model outputs (`detectFaceRaw` → YuNet head tensors +
+ *     the letterbox transform; `detectPlateRaw` → flat end-to-end rows +
+ *     their `[n, 6]` dims), so callers can decode the SAME inference at
+ *     many thresholds (single-frame threshold comparison). `geom` is
+ *     inferred from the frame when omitted; a passed `geom` is echoed back
+ *     unchanged as the transform to decode with. `effectiveEp` is the
  *     execution provider the sessions ACTUALLY created with (AC-17 UI
  *     notice): the first successful ladder rung — `'webgpu'` when WebGPU
  *     worked, `'wasm'` after a fallback (or a WebKit wasm-only policy);
@@ -578,15 +601,16 @@ export async function createDetectors(opts = {}) {
   const scratch = new Float32Array(3 * TARGET * TARGET);
 
   /**
-   * Letterbox an RGBA-like frame, run one ORT session, return DISPLAY-space
-   * Detections. Decode path: face → decodeYunetOutputs (JS NMS), plate →
-   * parsePlateRows (graph-embedded NMS).
+   * Letterbox an RGBA-like frame and run ONE ORT session — the shared
+   * inference half of every accessor below (decode is separate so the raw
+   * accessors can skip it and callers can decode at any threshold, REQ-114).
    *
    * @param {ImageDataLike} frame
    * @param {'face'|'plate'} kind
-   * @returns {Promise<import('./types.js').Detection[]>}
+   * @returns {Promise<{results: Record<string, {data: Float32Array, dims: number[]}>,
+   *                     geom: {ratio: number, padX: number, padY: number}}>}
    */
-  const runDetector = async (frame, kind) => {
+  const runInference = async (frame, kind) => {
     const frameSize = frameSizeOf(frame);
     const geom = letterboxGeometry(frameSize, TARGET);
     const input = frameToTensor(frame, geom, TARGET, scratch);
@@ -596,23 +620,72 @@ export async function createDetectors(opts = {}) {
       [session.inputNames?.[0] ?? 'input']: new ort.Tensor('float32', input, [1, 3, TARGET, TARGET]),
     };
     const results = await session.run(feed);
-    if (kind === 'face') {
-      const decoded = decodeYunetOutputs(results, undefined, geom, { confThreshold: 0.6, nmsIoU: 0.3 });
-      return decoded.map((d) => ({ t: 0, box: d.box, cls: 'face', conf: d.conf, pass: 'full' }));
-    }
-    // End-to-end plate head: single [rows, 6] output (dims may be [1, N, 6]).
+    return { results, geom };
+  };
+
+  /**
+   * Decode YuNet head outputs into display-space face Detections.
+   * @param {Record<string, {data: Float32Array, dims: number[]}>} results
+   * @param {{ratio: number, padX: number, padY: number}} geom
+   * @param {{confThreshold?: number}} [opts]
+   * @returns {import('./types.js').Detection[]}
+   */
+  const decodeFace = (results, geom, opts = {}) =>
+    decodeYunetOutputs(results, undefined, geom, {
+      confThreshold: opts.confThreshold ?? DEFAULT_CONF_FACE,
+      nmsIoU: 0.3,
+    }).map((d) => ({ t: 0, box: d.box, cls: 'face', conf: d.conf, pass: 'full' }));
+
+  /**
+   * Decode plate end-to-end rows (single [rows, 6] output; dims may be
+   * [1, N, 6]) into display-space plate Detections.
+   * @param {Record<string, {data: Float32Array, dims: number[]}>} results
+   * @param {{ratio: number, padX: number, padY: number}} geom
+   * @param {{confThreshold?: number}} [opts]
+   * @returns {import('./types.js').Detection[]}
+   */
+  const decodePlate = (results, geom, opts = {}) => {
     const plate = Object.values(results).find(
       (out) => Array.isArray(out.dims) && out.dims.length >= 2 && out.dims[out.dims.length - 1] === 6,
     );
     if (!plate) return [];
     const [rowsN, colsN] = plate.dims.slice(-2);
-    const parsed = parsePlateRows(plate.data, [rowsN, colsN], geom, { confThreshold: 0.25 });
-    return parsed.map((d) => ({ t: 0, box: d.box, cls: 'plate', conf: d.conf, classId: d.classId, pass: 'full' }));
+    return parsePlateRows(plate.data, [rowsN, colsN], geom, {
+      confThreshold: opts.confThreshold ?? DEFAULT_CONF_PLATE,
+    }).map((d) => ({ t: 0, box: d.box, cls: 'plate', conf: d.conf, classId: d.classId, pass: 'full' }));
+  };
+
+  /**
+   * Letterbox + one inference + decode (detectFace / detectPlate path).
+   * @param {ImageDataLike} frame
+   * @param {'face'|'plate'} kind
+   * @param {{confThreshold?: number}} [opts]
+   * @returns {Promise<import('./types.js').Detection[]>}
+   */
+  const runDetector = async (frame, kind, opts = {}) => {
+    const { results, geom } = await runInference(frame, kind);
+    return kind === 'face' ? decodeFace(results, geom, opts) : decodePlate(results, geom, opts);
   };
 
   return {
-    detectFace: (frame) => runDetector(frame, 'face'),
-    detectPlate: (frame) => runDetector(frame, 'plate'),
+    detectFace: (frame, opts) => runDetector(frame, 'face', opts),
+    detectPlate: (frame, opts) => runDetector(frame, 'plate', opts),
+    // REQ-114 raw accessors: ONE inference, NO decoding — the single-frame
+    // threshold comparison decodes the same outputs at every level.
+    detectFaceRaw: async (frame, geom) => {
+      const { results, geom: computed } = await runInference(frame, 'face');
+      return { outputs: results, geom: geom ?? computed };
+    },
+    detectPlateRaw: async (frame, geom) => {
+      const { results, geom: computed } = await runInference(frame, 'plate');
+      const effective = geom ?? computed;
+      const plate = Object.values(results).find(
+        (out) => Array.isArray(out.dims) && out.dims.length >= 2 && out.dims[out.dims.length - 1] === 6,
+      );
+      if (!plate) return { rows: new Float32Array(0), dims: [0, 6], geom: effective };
+      const [rowsN, colsN] = plate.dims.slice(-2);
+      return { rows: plate.data, dims: [rowsN, colsN], geom: effective };
+    },
     close: () => {
       for (const s of [faceSession, plateSession]) s.release?.();
     },

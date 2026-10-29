@@ -109,5 +109,9 @@ export {};
  * @property {CapabilityReport|null} caps           From capability.probeCapabilities().
  * @property {Track[]} tracks                       Current review state.
  * @property {{dashcamMode: boolean, padSeconds: number,
- *             quality: 'high'|'balanced'}} settings
+ *             quality: 'high'|'balanced',
+ *             confFace?: number, confPlate?: number}} settings
+ *     `confFace`/`confPlate` (v1.5.0 REQ-113): detection confidence
+ *     thresholds from the Analyze-panel sensitivity sliders (face default
+ *     0.6, plate 0.25); undefined → detector defaults.
  */

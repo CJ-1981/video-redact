@@ -700,3 +700,74 @@ describe('createDetectors (mocked ORT — EP ladder, env pin, AC-17 fallback)', 
     expect(ortState.released.sort()).toEqual(['face', 'plate']);
   });
 });
+
+describe('createDetectors — per-call confThreshold overrides (REQ-113)', () => {
+  const frame = () => ({ data: new Uint8ClampedArray(1280 * 720 * 4), width: 1280, height: 720 });
+  // Face fixture confs: 0.95 (stride 16) and 0.9 (stride 8); plate rows: 0.9 / 0.2 / 0.3.
+
+  it('detectFace honors opts.confThreshold; the default stays 0.6', async () => {
+    const detectors = await createDetectors();
+    expect(await detectors.detectFace(frame())).toHaveLength(2); // pre-1.5.0 behavior
+    expect(await detectors.detectFace(frame(), {})).toHaveLength(2); // empty opts → default
+    expect(await detectors.detectFace(frame(), { confThreshold: 0.92 })).toHaveLength(1);
+    expect(await detectors.detectFace(frame(), { confThreshold: 0.99 })).toHaveLength(0);
+    detectors.close();
+  });
+
+  it('detectPlate honors opts.confThreshold; the default stays 0.25', async () => {
+    const detectors = await createDetectors();
+    expect(await detectors.detectPlate(frame())).toHaveLength(2); // pre-1.5.0 behavior
+    expect(await detectors.detectPlate(frame(), { confThreshold: 0.5 })).toHaveLength(1);
+    expect(await detectors.detectPlate(frame(), { confThreshold: 0.15 })).toHaveLength(3); // 0.2 row back
+    expect(await detectors.detectPlate(frame(), { confThreshold: 0.95 })).toHaveLength(0);
+    detectors.close();
+  });
+});
+
+describe('createDetectors — raw accessors (REQ-114: one inference, no decode)', () => {
+  const frame = () => ({ data: new Uint8ClampedArray(1280 * 720 * 4), width: 1280, height: 720 });
+
+  it('detectFaceRaw returns the undecoded head tensors + the letterbox geom', async () => {
+    const detectors = await createDetectors();
+    const { outputs, geom } = await detectors.detectFaceRaw(frame());
+    expect(outputs.cls_8).toBeDefined();
+    expect(outputs.obj_16).toBeDefined();
+    expect(outputs.bbox_32).toBeDefined();
+    expect(geom).toEqual(letterboxGeometry({ width: 1280, height: 720 }, 640));
+    // Decoding the raw outputs matches the per-call override path exactly.
+    const dets = decodeYunetOutputs(outputs, undefined, geom, { confThreshold: 0.92 });
+    expect(dets).toHaveLength(1);
+    expect(dets[0].conf).toBeCloseTo(0.95, 6);
+    detectors.close();
+  });
+
+  it('detectFaceRaw echoes a caller-provided geom unchanged', async () => {
+    const detectors = await createDetectors();
+    const custom = { ratio: 0.5, padX: 3, padY: 7 };
+    const { geom } = await detectors.detectFaceRaw(frame(), custom);
+    expect(geom).toBe(custom);
+    detectors.close();
+  });
+
+  it('detectPlateRaw returns {rows, dims, geom}; decode matches the override path', async () => {
+    const detectors = await createDetectors();
+    const { rows, dims, geom } = await detectors.detectPlateRaw(frame());
+    expect(dims).toEqual([3, 6]); // [n, 6] rows sliced off the [1, 3, 6] tensor
+    expect(rows).toHaveLength(18);
+    expect(geom).toEqual(letterboxGeometry({ width: 1280, height: 720 }, 640));
+    const dets = parsePlateRows(rows, dims, geom, { confThreshold: 0.15 });
+    expect(dets).toHaveLength(3);
+    detectors.close();
+  });
+
+  it('five compare levels reuse ONE inference: decode the same raw outputs per level', async () => {
+    const detectors = await createDetectors();
+    const { outputs, geom } = await detectors.detectFaceRaw(frame());
+    const perLevel = [0.15, 0.3, 0.45, 0.6, 0.75].map(
+      (level) => decodeYunetOutputs(outputs, undefined, geom, { confThreshold: level }).length,
+    );
+    expect(perLevel).toEqual([2, 2, 2, 2, 2]); // fixture confs 0.95 + 0.9 clear every level
+    expect(ortState.lastFeed).toBeDefined(); // sanity: the session actually ran
+    detectors.close();
+  });
+});

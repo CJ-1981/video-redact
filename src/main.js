@@ -21,6 +21,13 @@
  *   transportGlyph(paused)             play/pause glyph (v1.4.0 REQ-111)
  *   normalizePlaybackRate(rate)        rate clamp to finite > 0 (v1.4.0)
  *   OVERLAY_HIDE_MS                    overlay auto-hide delay (v1.4.0 REQ-111)
+ *   THRESHOLD_LEVELS / THRESHOLD_FACE_RANGE / THRESHOLD_PLATE_RANGE /
+ *   THRESHOLD_PANEL_FRACTION           compare constants (v1.5.0 REQ-113/114)
+ *   buildThresholdPanels(levels, faceDets, plateDets)
+ *                                      per-level detection counts (REQ-114)
+ *   formatThresholdCaption(panel)      "≥0.60 · 2 faces · 1 plate" (REQ-114)
+ *   applyThresholdLevel(level, settings)
+ *                                      panel click → both slider values (REQ-114)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -54,7 +61,8 @@ import { secureContextInfo, guidance, probeCapabilities } from './capability.js'
 import { MODELS } from './models.js';
 import { manualTrackFromBox, mountEditor, setTrackStyle, toggleTrack, trimTrack } from './editor.js';
 import { openInput } from './ingest.js';
-import { runAnalyze } from './analyze.js';
+import { runAnalyze, sampleFrameAt } from './analyze.js';
+import { createDetectors, decodeYunetOutputs, parsePlateRows } from './detector.js';
 import { ExportError, discardExportTemp, runExport } from './exporter.js';
 import './types.js';
 
@@ -349,6 +357,86 @@ export function normalizePlaybackRate(rate) {
 }
 
 // ---------------------------------------------------------------------------
+// Threshold compare view model (pure; v1.5.0 REQ-113/114)
+// ---------------------------------------------------------------------------
+
+/**
+ * The five FIXED levels the single-frame threshold comparison renders one
+ * panel per (REQ-114). @type {number[]}
+ */
+export const THRESHOLD_LEVELS = [0.15, 0.3, 0.45, 0.6, 0.75];
+
+/** Face sensitivity slider bounds (REQ-113): 0.10–0.90 step 0.05, default 0.60. */
+export const THRESHOLD_FACE_RANGE = { min: 0.1, max: 0.9, step: 0.05, default: 0.6 };
+
+/** Plate sensitivity slider bounds (REQ-113): 0.05–0.90 step 0.05, default 0.25. */
+export const THRESHOLD_PLATE_RANGE = { min: 0.05, max: 0.9, step: 0.05, default: 0.25 };
+
+/** Compare-panel canvas width as a fraction of the analyze panel width. */
+export const THRESHOLD_PANEL_FRACTION = 0.3;
+
+/**
+ * Per-level detection counts for the compare panels (REQ-114). PURE: one
+ * decode at threshold 0 upstream, then each panel counts detections with
+ * `conf >= level` — order-equivalent to decoding at each level, because NMS
+ * suppresses a box only via a HIGHER-conf box (any box kept at `level` is
+ * also kept at 0), and the plate head's NMS is graph-embedded upstream.
+ *
+ * @param {number[] | null | undefined} levels The fixed panel levels.
+ * @param {Array<{conf: number, [k: string]: unknown}> | null | undefined} faceDets
+ *     Full decoded face list (post-NMS, lowest threshold).
+ * @param {Array<{conf: number, [k: string]: unknown}> | null | undefined} plateDets
+ *     Full decoded plate list.
+ * @returns {Array<{level: number, faces: number, plates: number}>}
+ */
+export function buildThresholdPanels(levels, faceDets, plateDets) {
+  const faces = Array.isArray(faceDets) ? faceDets : [];
+  const plates = Array.isArray(plateDets) ? plateDets : [];
+  return (Array.isArray(levels) ? levels : []).map((level) => ({
+    level,
+    faces: faces.filter((d) => Number(d?.conf) >= level).length,
+    plates: plates.filter((d) => Number(d?.conf) >= level).length,
+  }));
+}
+
+/**
+ * Panel view model → caption text: "≥0.15 · 2 faces · 1 plate" (REQ-114).
+ * PURE; correct singular/plural; invalid level renders as "≥—".
+ *
+ * @param {{level: number, faces: number, plates: number} | null | undefined} panel
+ * @returns {string}
+ */
+export function formatThresholdCaption(panel) {
+  const level = Number(panel?.level);
+  const faces = Number(panel?.faces) || 0;
+  const plates = Number(panel?.plates) || 0;
+  const lvl = Number.isFinite(level) ? level.toFixed(2) : '—';
+  return `≥${lvl} · ${faces} face${faces === 1 ? '' : 's'} · ${plates} plate${plates === 1 ? '' : 's'}`;
+}
+
+/**
+ * Panel-click → BOTH sensitivity sliders (REQ-114: activating a panel
+ * applies that level to face AND plate). PURE: clamps to each slider's
+ * range (the face slider starts at 0.10, the plate slider at 0.05) and
+ * preserves every other settings field; an invalid level leaves the
+ * settings untouched.
+ *
+ * @param {number} level The clicked panel's threshold level.
+ * @param {Record<string, unknown>} [settings] Current settings to merge into.
+ * @returns {Record<string, unknown>} New settings with confFace + confPlate set.
+ */
+export function applyThresholdLevel(level, settings = {}) {
+  const v = Number(level);
+  if (!Number.isFinite(v)) return { ...settings };
+  const clamp = (x, r) => Math.min(r.max, Math.max(r.min, x));
+  return {
+    ...settings,
+    confFace: clamp(v, THRESHOLD_FACE_RANGE),
+    confPlate: clamp(v, THRESHOLD_PLATE_RANGE),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // REQ-021 error mapping tables (pure)
 // ---------------------------------------------------------------------------
 
@@ -548,6 +636,15 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     analyzeFps: $('analyze-fps'),
     analyzeEta: $('analyze-eta'),
     dashcamToggle: /** @type {HTMLInputElement | null} */ ($('dashcam-toggle')),
+    analyzePanel: $('analyze-panel'),
+    confFace: /** @type {HTMLInputElement | null} */ ($('conf-face')),
+    confFaceOut: /** @type {HTMLOutputElement | null} */ ($('conf-face-out')),
+    confPlate: /** @type {HTMLInputElement | null} */ ($('conf-plate')),
+    confPlateOut: /** @type {HTMLOutputElement | null} */ ($('conf-plate-out')),
+    compareTime: /** @type {HTMLInputElement | null} */ ($('compare-time')),
+    compareButton: /** @type {HTMLButtonElement | null} */ ($('compare-button')),
+    compareStatus: $('compare-status'),
+    thresholdPanels: $('threshold-panels'),
     quality: /** @type {HTMLSelectElement | null} */ ($('export-quality')),
     exportBar: $('export-progress-bar'),
     exportButton: /** @type {HTMLButtonElement | null} */ ($('export-button')),
@@ -878,6 +975,16 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       app.meta = meta;
       app.caps = caps;
 
+      // REQ-114: default the compare frame time to round(duration·0.1),
+      // bounded by the (new) duration; stale panels from a previous file go.
+      if (els.compareTime) {
+        const dur = Number.isFinite(meta.duration) && meta.duration > 0 ? meta.duration : 0;
+        els.compareTime.max = String(dur);
+        els.compareTime.value = String(Math.round(dur * 0.1 * 10) / 10);
+      }
+      if (els.thresholdPanels) els.thresholdPanels.replaceChildren();
+      if (els.compareStatus) els.compareStatus.textContent = '';
+
       // Blob preview source (media-src blob: is CSP-allowed; bytes stay local).
       if (els.video) {
         app.objectUrl = URL.createObjectURL(file);
@@ -965,7 +1072,13 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     applyStepper();
     updateButtons();
 
+    // REQ-113: the sensitivity sliders drive the analyze pass (and every
+    // re-analyze); absent/invalid sliders → omitted → detector defaults.
     const settings = { dashcamMode: els.dashcamToggle?.checked === true };
+    const confFace = Number(els.confFace?.value);
+    const confPlate = Number(els.confPlate?.value);
+    if (Number.isFinite(confFace)) settings.confFace = confFace;
+    if (Number.isFinite(confPlate)) settings.confPlate = confPlate;
     // epPolicy seam (ADR-5): force ['wasm'] when the capability report says
     // so (WebKit); otherwise OMIT so detector.js keeps its full webgpu→wasm
     // ladder (AC-17) instead of a single-entry override.
@@ -1110,6 +1223,155 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
 
   els.analyzeButton?.addEventListener('click', () => startAnalyze());
   els.analyzeCancel?.addEventListener('click', () => analyzeCtl?.abort());
+
+  // --- Detection sensitivity + single-frame threshold compare (REQ-113/114) ----
+
+  /** Live numeric readouts for the two sensitivity sliders. */
+  function syncThresholdReadouts() {
+    const fmt = (slider, out, range) => {
+      if (!slider || !out) return;
+      const v = Number(slider.value);
+      out.textContent = Number.isFinite(v) ? v.toFixed(2) : range.default.toFixed(2);
+    };
+    fmt(els.confFace, els.confFaceOut, THRESHOLD_FACE_RANGE);
+    fmt(els.confPlate, els.confPlateOut, THRESHOLD_PLATE_RANGE);
+  }
+  els.confFace?.addEventListener('input', syncThresholdReadouts);
+  els.confPlate?.addEventListener('input', syncThresholdReadouts);
+  syncThresholdReadouts();
+
+  /**
+   * Apply a clicked panel's level to BOTH sliders (REQ-114), readouts
+   * following. The pure mapping (applyThresholdLevel) clamps per range.
+   */
+  function applyLevelToSliders(level) {
+    const next = applyThresholdLevel(level);
+    if (els.confFace) els.confFace.value = String(next.confFace);
+    if (els.confPlate) els.confPlate.value = String(next.confPlate);
+    syncThresholdReadouts();
+  }
+
+  /**
+   * Render the 5 compare panels from ONE decode per model: counts via the
+   * pure buildThresholdPanels view model, boxes drawn in display coords
+   * scaled to each panel canvas (faces teal, plates violet — the app's
+   * track-1/track-2 palette).
+   */
+  function renderThresholdPanels({ outputs, geom, rows, dims, sample }) {
+    if (!els.thresholdPanels) return;
+    const faces = decodeYunetOutputs(outputs, undefined, geom, { confThreshold: 0 });
+    const plates = parsePlateRows(rows, dims, geom, { confThreshold: 0 });
+    const panels = buildThresholdPanels(THRESHOLD_LEVELS, faces, plates);
+
+    const dispW = Number(sample.width) || 1;
+    const dispH = Number(sample.height) || 1;
+    const panelW = Math.max(
+      60,
+      Math.round((els.analyzePanel?.clientWidth ?? 320) * THRESHOLD_PANEL_FRACTION),
+    );
+    const panelH = Math.max(1, Math.round((panelW * dispH) / dispW));
+
+    // Scratch raster at the sampled size; each panel drawImage-scales it.
+    const scratchCanvas = doc.createElement('canvas');
+    scratchCanvas.width = dispW;
+    scratchCanvas.height = dispH;
+    const sctx = scratchCanvas.getContext('2d');
+    sctx?.putImageData(/** @type {ImageData} */ (sample.imageDataLike), 0, 0);
+
+    const frag = doc.createDocumentFragment();
+    for (const vm of panels) {
+      const canvas = doc.createElement('canvas');
+      canvas.width = panelW;
+      canvas.height = panelH;
+      const cctx = canvas.getContext('2d');
+      if (cctx) {
+        cctx.drawImage(scratchCanvas, 0, 0, panelW, panelH);
+        const sx = panelW / dispW;
+        const sy = panelH / dispH;
+        cctx.lineWidth = 2;
+        cctx.strokeStyle = '#2DD4BF'; // teal — faces (track palette slot 1)
+        for (const d of faces) {
+          if (d.conf < vm.level) continue;
+          cctx.strokeRect(d.box.x * sx, d.box.y * sy, d.box.w * sx, d.box.h * sy);
+        }
+        cctx.strokeStyle = '#A78BFA'; // violet — plates (track palette slot 2)
+        for (const d of plates) {
+          if (d.conf < vm.level) continue;
+          cctx.strokeRect(d.box.x * sx, d.box.y * sy, d.box.w * sx, d.box.h * sy);
+        }
+      }
+      const item = doc.createElement('button');
+      item.type = 'button';
+      item.className = 'threshold-panel';
+      item.title = `Use ≥${vm.level.toFixed(2)} for both sensitivity sliders`;
+      const cap = doc.createElement('span');
+      cap.className = 'caption';
+      cap.textContent = formatThresholdCaption(vm);
+      item.append(canvas, cap);
+      item.addEventListener('click', () => applyLevelToSliders(vm.level));
+      frag.appendChild(item);
+    }
+    els.thresholdPanels.replaceChildren(frag);
+  }
+
+  let comparing = false;
+
+  /**
+   * Single-frame threshold comparison (REQ-114): decode ONE sample at the
+   * chosen time (sampleFrameAt), run each model EXACTLY once (raw
+   * accessors), render the fixed-level panels. Progress/busy state on the
+   * button; failures surface via toast (REQ-021 pattern).
+   */
+  async function runThresholdCompare() {
+    if (comparing || !app.input || !app.meta) return;
+    const gen = app.gen; // drop stale results if the file changes mid-compare
+    const dur = Number(app.meta.duration);
+    const raw = Number(els.compareTime?.value);
+    const requested = Number.isFinite(raw) ? raw : 0;
+    const max = Number.isFinite(dur) && dur > 0 ? dur : Math.max(0, requested);
+    const t = Math.min(Math.max(0, requested), max);
+
+    comparing = true;
+    const btn = els.compareButton;
+    const label = btn?.textContent ?? 'Compare thresholds';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Comparing…';
+    }
+    if (els.compareStatus) els.compareStatus.textContent = 'Decoding one frame…';
+    try {
+      const sample = await sampleFrameAt(app.input, t);
+      if (gen !== app.gen) return;
+      if (els.compareStatus) els.compareStatus.textContent = 'Running the models once…';
+      const detectors = await createDetectors(
+        app.caps?.epPolicy === 'wasm' ? { epPolicy: ['wasm'] } : {},
+      );
+      try {
+        const { outputs, geom } = await detectors.detectFaceRaw(sample.imageDataLike);
+        const { rows, dims } = await detectors.detectPlateRaw(sample.imageDataLike);
+        if (gen !== app.gen) return;
+        renderThresholdPanels({ outputs, geom, rows, dims, sample });
+        if (els.compareStatus) {
+          els.compareStatus.textContent =
+            `Frame at ${formatClock(sample.t)} — click a level to apply it to both sliders.`;
+        }
+      } finally {
+        detectors.close();
+      }
+    } catch (err) {
+      if (gen !== app.gen) return;
+      const message = `Threshold comparison failed: ${err instanceof Error ? err.message : String(err)}`;
+      if (els.compareStatus) els.compareStatus.textContent = 'Comparison failed — see the notice.';
+      toast(message, { kind: 'error', timeoutMs: 8000 });
+    } finally {
+      comparing = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
+    }
+  }
+  els.compareButton?.addEventListener('click', () => void runThresholdCompare());
 
   // --- Export (REQ-017/018/019/021) -----------------------------------------------
 

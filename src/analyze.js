@@ -22,6 +22,11 @@
  * Test seams (all optional, defaulted to the real browser APIs): a canvas
  * factory, a per-frame event-loop yield, and a monotonic clock — inject them
  * to run the loop headlessly (tests/unit/analyze.test.js).
+ *
+ * v1.5.0 (SPEC-VID-002 REQ-113/114): `settings.confFace` / `settings.confPlate`
+ * gate EVERY detect call (full-frame and tile passes), and `sampleFrameAt()`
+ * decodes ONE sample at a requested time through the same seams — the
+ * single-frame threshold comparison's decode step.
  */
 import { VideoSampleSink } from 'mediabunny';
 import { createDetectors, mergeTiles, tileGrid } from './detector.js';
@@ -75,10 +80,13 @@ function defaultYieldNow() {
  * @param {object} [opts.input] Mediabunny `Input` from ingest.openInput().
  * @param {import('./types.js').MediaMeta} [opts.meta] Display size / fps / duration.
  * @param {{dashcamMode?: boolean, plateStride?: number, padSeconds?: number,
- *          epPolicy?: string[]}} [opts.settings] Analysis settings.
- *     `plateStride` (default 2) is the full-pass plate cadence; `padSeconds`
- *     overrides the finalize padding (default 5/fps, REQ-007); `epPolicy`
- *     overrides the ORT execution-provider ladder (ADR-5).
+ *          confFace?: number, confPlate?: number, epPolicy?: string[]}} [opts.settings]
+ *     Analysis settings. `plateStride` (default 2) is the full-pass plate
+ *     cadence; `padSeconds` overrides the finalize padding (default 5/fps,
+ *     REQ-007); `confFace` / `confPlate` (REQ-113, defaults 0.6 / 0.25 —
+ *     the detector's DEFAULT_CONF_FACE / DEFAULT_CONF_PLATE) gate the face /
+ *     plate decode on EVERY detect call, full-frame AND dashcam tile passes;
+ *     `epPolicy` overrides the ORT execution-provider ladder (ADR-5).
  * @param {(progress: {phase: 'models', model: string, fraction: number} |
  *                {phase: 'analyze', frameCount: number,
  *                 totalFrames: number|null, analyzeFps: number|null,
@@ -152,6 +160,11 @@ export async function runAnalyze({
     // Dashcam tile grid is pure display-space geometry — compute once (REQ-008).
     const tiles = settings?.dashcamMode ? tileGrid({ width, height }) : null;
 
+    // Per-class decode gates (REQ-113): undefined → the detector's baked
+    // defaults (0.6 face / 0.25 plate), so omitted settings change nothing.
+    const faceOpts = { confThreshold: settings?.confFace };
+    const plateOpts = { confThreshold: settings?.confPlate };
+
     const tracker = new Tracker();
     const frameTimes = []; // rolling clock stamps for the fps estimate
     let frameCount = 0;
@@ -167,9 +180,9 @@ export async function runAnalyze({
         const frame = ctx.getImageData(0, 0, width, height);
 
         // Full pass: faces every frame, plates every plateStride-th frame.
-        const dets = [...(await detectors.detectFace(frame))];
+        const dets = [...(await detectors.detectFace(frame, faceOpts))];
         if (frameCount % plateStride === 0) {
-          dets.push(...(await detectors.detectPlate(frame)));
+          dets.push(...(await detectors.detectPlate(frame, plateOpts)));
         }
 
         // Dashcam pass: tiled face+plate every analyzed frame, tile-local
@@ -181,8 +194,8 @@ export async function runAnalyze({
             const tile = tiles[i];
             const raster = ctx.getImageData(tile.x, tile.y, tile.w, tile.h);
             const tag = (d) => ({ ...d, tileIndex: i, pass: 'tile' });
-            tileDets.push(...(await detectors.detectFace(raster)).map(tag));
-            tileDets.push(...(await detectors.detectPlate(raster)).map(tag));
+            tileDets.push(...(await detectors.detectFace(raster, faceOpts)).map(tag));
+            tileDets.push(...(await detectors.detectPlate(raster, plateOpts)).map(tag));
           }
           dets.push(...mergeTiles(tileDets, tiles));
         }
@@ -234,4 +247,77 @@ export async function runAnalyze({
   } finally {
     detectors.close();
   }
+}
+
+/**
+ * Decode exactly ONE video sample at time `t` into an ImageData-like raster
+ * at display size (REQ-114, single-frame threshold comparison): the first
+ * sample of `VideoSampleSink.samples(t, t + 0.1)` (presentation order),
+ * drawn through the SAME seam as the analyze loop (`sample.draw(ctx, 0, 0,
+ * w, h)` — container rotation is applied by the decoder, so the raster sits
+ * in the one display coordinate space of ADR-9 and the detector's
+ * letterbox inversion applies unchanged). The sample is closed on EVERY
+ * exit path, like the analyze loop.
+ *
+ * Display size comes from the input's primary video track
+ * (`track.displayWidth/displayHeight` — rotation-applied, matching
+ * ingest.js MediaMeta). `maxSize` optionally caps the LONGEST edge (preview
+ * panels); the returned width/height are the actual raster dims — detector
+ * boxes computed on this raster are in THIS raster's display space, so
+ * scale boxes by (panelWidth / result.width) to draw.
+ *
+ * Mockable exactly like the analyze loop: the `mediabunny` module mock
+ * controls the sink, `seams.canvasFactory` the canvas (default
+ * OffscreenCanvas / document canvas, read-optimized 2D context).
+ *
+ * @param {object} input Mediabunny `Input` from ingest.openInput().
+ * @param {number} t Presentation time to sample at, seconds (the sink
+ *     window is `[t, t + 0.1]` — the first sample at or after `t`).
+ * @param {number} [maxSize] Optional longest-edge cap, px (0/undefined =
+ *     full display size).
+ * @param {{canvasFactory?: (width: number, height: number) =>
+ *          {canvas: object, ctx: object}}} [seams] Test seam — canvas
+ *     factory (same shape as runAnalyze's).
+ * @returns {Promise<{imageDataLike: import('./detector.js').ImageDataLike,
+ *                     width: number, height: number, t: number}>}
+ *     `imageDataLike` is the RGBA raster (real ImageData in the browser);
+ *     `width`/`height` the raster dims (may be maxSize-scaled); `t` the
+ *     SAMPLE's actual presentation timestamp (ADR-3), not the request time.
+ * @throws {Error} No primary video track, or no sample decoded within the
+ *     `[t, t + 0.1]` window (e.g. `t` past the end of the video).
+ */
+export async function sampleFrameAt(input, t, maxSize = 0, seams = {}) {
+  const makeCanvas = seams?.canvasFactory ?? defaultCanvasFactory;
+  const videoTrack = await input?.getPrimaryVideoTrack?.();
+  if (!videoTrack) throw new Error('sampleFrameAt: input has no primary video track.');
+  const srcWidth = Number(videoTrack.displayWidth);
+  const srcHeight = Number(videoTrack.displayHeight);
+  if (!Number.isFinite(srcWidth) || !Number.isFinite(srcHeight) || srcWidth <= 0 || srcHeight <= 0) {
+    throw new Error('sampleFrameAt: primary video track has no display size.');
+  }
+  // Optional longest-edge cap (preview panels): aspect-locked integer dims.
+  let width = srcWidth;
+  let height = srcHeight;
+  if (Number.isFinite(maxSize) && maxSize > 0 && Math.max(srcWidth, srcHeight) > maxSize) {
+    const s = maxSize / Math.max(srcWidth, srcHeight);
+    width = Math.max(1, Math.round(srcWidth * s));
+    height = Math.max(1, Math.round(srcHeight * s));
+  }
+
+  const sink = new VideoSampleSink(videoTrack);
+  for await (const sample of sink.samples(t, t + 0.1)) {
+    try {
+      const { ctx } = makeCanvas(width, height);
+      // Same draw seam as the analyze loop — rotation applied by the decoder.
+      sample.draw(ctx, 0, 0, width, height);
+      const imageDataLike = ctx.getImageData(0, 0, width, height);
+      return { imageDataLike, width, height, t: sample.timestamp };
+    } finally {
+      // Memory discipline: a decoded frame is never retained (see runAnalyze).
+      sample.close();
+    }
+  }
+  throw new Error(
+    `sampleFrameAt: no video sample at t=${t}s (searched [${t}, ${Number(t) + 0.1}]s — past the end?).`,
+  );
 }

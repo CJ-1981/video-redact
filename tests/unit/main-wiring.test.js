@@ -282,6 +282,73 @@ describe('main-wiring: metaSummaryRows view model (AC-02)', () => {
   });
 });
 
+describe('main-wiring: threshold compare view model (v1.5.0 REQ-113/114)', () => {
+  const FACES = [
+    { conf: 0.9 },
+    { conf: 0.55 },
+    { conf: 0.2 },
+  ];
+  const PLATES = [{ conf: 0.7 }, { conf: 0.3 }];
+
+  it('THRESHOLD_LEVELS are exactly the five fixed compare levels', () => {
+    expect(main.THRESHOLD_LEVELS).toEqual([0.15, 0.3, 0.45, 0.6, 0.75]);
+  });
+
+  it('slider ranges match REQ-113 (face 0.10–0.90, plate 0.05–0.90, step 0.05, baked defaults)', () => {
+    expect(main.THRESHOLD_FACE_RANGE).toEqual({ min: 0.1, max: 0.9, step: 0.05, default: 0.6 });
+    expect(main.THRESHOLD_PLATE_RANGE).toEqual({ min: 0.05, max: 0.9, step: 0.05, default: 0.25 });
+  });
+
+  it('buildThresholdPanels counts faces/plates at or above each level', () => {
+    const panels = main.buildThresholdPanels(main.THRESHOLD_LEVELS, FACES, PLATES);
+    expect(panels.map((p) => p.level)).toEqual([0.15, 0.3, 0.45, 0.6, 0.75]);
+    expect(panels.map((p) => p.faces)).toEqual([3, 2, 2, 1, 1]);
+    expect(panels.map((p) => p.plates)).toEqual([2, 2, 1, 1, 0]); // 0.7 < 0.75
+  });
+
+  it('level boundaries are inclusive (conf == level counts)', () => {
+    const panels = main.buildThresholdPanels([0.55, 0.9], [{ conf: 0.55 }], [{ conf: 0.9 }]);
+    expect(panels.map((p) => p.faces)).toEqual([1, 0]);
+    expect(panels.map((p) => p.plates)).toEqual([1, 1]);
+  });
+
+  it('guards missing levels/detections (inert panels, never a crash)', () => {
+    expect(main.buildThresholdPanels(null, FACES, PLATES)).toEqual([]);
+    expect(main.buildThresholdPanels([0.5], undefined, null)).toEqual([
+      { level: 0.5, faces: 0, plates: 0 },
+    ]);
+    expect(main.buildThresholdPanels([0.5], [{ conf: NaN }], [{}])).toEqual([
+      { level: 0.5, faces: 0, plates: 0 },
+    ]);
+  });
+
+  it('formatThresholdCaption renders "≥level · N faces · M plates" with plurals', () => {
+    expect(main.formatThresholdCaption({ level: 0.15, faces: 2, plates: 1 })).toBe(
+      '≥0.15 · 2 faces · 1 plate',
+    );
+    expect(main.formatThresholdCaption({ level: 0.6, faces: 1, plates: 0 })).toBe(
+      '≥0.60 · 1 face · 0 plates',
+    );
+    expect(main.formatThresholdCaption({ level: 0.3, faces: 0, plates: 3 })).toBe(
+      '≥0.30 · 0 faces · 3 plates',
+    );
+  });
+
+  it('applyThresholdLevel maps a panel level onto BOTH sliders, clamped per range', () => {
+    expect(main.applyThresholdLevel(0.45)).toEqual({ confFace: 0.45, confPlate: 0.45 });
+    // A level below the face slider's min clamps to 0.10 but keeps 0.05 on plate.
+    expect(main.applyThresholdLevel(0.05)).toEqual({ confFace: 0.1, confPlate: 0.05 });
+    expect(main.applyThresholdLevel(1.2).confFace).toBe(0.9);
+  });
+
+  it('applyThresholdLevel preserves other settings and ignores invalid levels', () => {
+    const next = main.applyThresholdLevel(0.6, { dashcamMode: true, confFace: 0.2 });
+    expect(next).toEqual({ dashcamMode: true, confFace: 0.6, confPlate: 0.6 });
+    expect(main.applyThresholdLevel('bogus', { a: 1 })).toEqual({ a: 1 });
+    expect(main.applyThresholdLevel(undefined)).toEqual({});
+  });
+});
+
 describe('main-wiring: module import safety', () => {
   it('imports in node without touching the DOM (no auto-mount side effects)', async () => {
     // Re-import resolves the same namespace; assert the pure surface exists.
@@ -298,6 +365,9 @@ describe('main-wiring: module import safety', () => {
       'metaSummaryRows',
       'inferenceRow',
       'epLabel',
+      'buildThresholdPanels',
+      'formatThresholdCaption',
+      'applyThresholdLevel',
       'mountApp',
     ]) {
       expect(typeof mod[name], `main.${name}`).toBe('function');

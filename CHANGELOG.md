@@ -6,6 +6,15 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-29
+
+Configurable detection sensitivity and a single-frame threshold comparison preview (SPEC-VID-002 amendments REQ-113/114).
+
+### Added
+
+- Configurable detection thresholds (REQ-113): the Analyze panel gains a "Detection sensitivity" group with face (0.10–0.90, default 0.60) and plate (0.05–0.90, default 0.25) sliders with live numeric readouts. The configured values flow into every `detectFace` / `detectPlate` call of the analyze pass — full-frame AND dashcam tile passes — and every re-analysis; the pre-1.5.0 baked gates (0.6 / 0.25) remain the defaults everywhere a setting is omitted (`DEFAULT_CONF_FACE` / `DEFAULT_CONF_PLATE`, per-call `opts.confThreshold` in detector.js).
+- Single-frame threshold comparison (REQ-114): a "Compare thresholds" section in the Analyze panel decodes ONE frame at a user-chosen time (default `round(duration·0.1)`), runs each model EXACTLY once (new raw accessors `detectFaceRaw` / `detectPlateRaw` return the undecoded outputs so every level reuses the single inference), and renders five side-by-side panels at the fixed levels ≥0.15 / ≥0.30 / ≥0.45 / ≥0.60 / ≥0.75 — each panel showing the frame with its boxes (faces teal, plates violet) and a per-panel count caption. Clicking a panel applies that level to BOTH sensitivity sliders. The button shows a busy state while running and failures surface via toast; `sampleFrameAt()` (analyze.js) shares the analyze loop's decode seam and sample-closing discipline.
+
 ## [1.4.0] — 2026-10-29
 
 Fullscreen-usable controls and a mobile-friendly single-column layout (SPEC-VID-002 amendments REQ-111/112).

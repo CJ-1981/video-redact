@@ -74,3 +74,8 @@ v1.1.0 iterates the review experience of SPEC-VID-001: a solid-black redaction s
 
 - **REQ-111** — In fullscreen and enlarged (zoom) preview modes, transport controls (play/pause, frame step, speed, and an exit control) shall remain reachable via an overlay control bar rendered inside the preview stage, shown only in those modes and auto-hiding after ~3 s of interaction idle (reappears on pointer/touch activity).
 - **REQ-112** — The UI shall be mobile-friendly: at narrow viewport widths (≤ ~820 px) the layout collapses to a single column (right rail below the timeline), controls meet ~40 px touch-target sizing, timeline chip edge zones widen on coarse pointers, and no horizontal overflow occurs at 390 px width.
+
+## Amendments — v1.5.0 (2026-10-29, field feedback round 4)
+
+- **REQ-113** — Detection confidence thresholds shall be user-configurable per class (face default 0.6, plate default 0.25) via sliders in the Analyze panel; the configured values drive the analyze pass (and any re-analysis).
+- **REQ-114** — Before running a full analysis, the user shall be able to run a single-frame threshold comparison: the system decodes one frame at a user-chosen time, runs each model exactly once, and renders side-by-side preview panels at fixed threshold levels (0.15/0.30/0.45/0.60/0.75) with per-panel detection counts (faces teal, plates violet); activating a panel applies that level to the sensitivity sliders. Single-frame decode and inference must complete within ~2 s on the WASM path.

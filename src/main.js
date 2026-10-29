@@ -18,6 +18,9 @@
  *   clampStageHeight(px, viewportH)    stage-height clamp (v1.2.0 handle)
  *   nextStageHeight(px, delta, vh)     handle keyboard step (v1.2.0)
  *   dragStageHeight(startY, y, startH) pointer-drag height (v1.3.1 direction fix)
+ *   transportGlyph(paused)             play/pause glyph (v1.4.0 REQ-111)
+ *   normalizePlaybackRate(rate)        rate clamp to finite > 0 (v1.4.0)
+ *   OVERLAY_HIDE_MS                    overlay auto-hide delay (v1.4.0 REQ-111)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -29,6 +32,14 @@
  * bar (jump/frame-step/play-pause/speed/timecode driven by video media
  * events) and REQ-106 fullscreen preview (requestFullscreen with a
  * `.preview-zoom` in-page fallback + editor.redraw() resize kicks).
+ *
+ * v1.4.0 wiring (REQ-111): the transport actions live in small shared
+ * functions (togglePlay / stepFrame / setSpeed / exitPreview) called by BOTH
+ * the bottom transport bar and the in-stage overlay control bar
+ * (.stage-overlay-controls — shown only in fullscreen/zoom, auto-hidden after
+ * OVERLAY_HIDE_MS of no pointer/touch activity on the stage, re-shown on
+ * activity and on enter). The overlay uses distinct ov-* ids so every
+ * existing #transport-bar E2E selector keeps working.
  *
  * v1.2.0 wiring: the #stage-resize-handle between the preview stage and the
  * transport bar — pointer drag / ArrowUp / ArrowDown resize the stage via the
@@ -301,6 +312,43 @@ export function dragStageHeight(startY, clientY, startH) {
 }
 
 // ---------------------------------------------------------------------------
+// Overlay control-bar view model (pure; v1.4.0 REQ-111)
+// ---------------------------------------------------------------------------
+
+/**
+ * Auto-hide delay for the in-stage overlay control bar (REQ-111): controls
+ * re-appear on any pointer/touch activity inside the stage and fade after
+ * this much idle time — the standard video-player behavior.
+ * @type {number}
+ */
+export const OVERLAY_HIDE_MS = 3000;
+
+/**
+ * Play/pause glyph for a paused state — '▶' when paused, '⏸' while playing.
+ * PURE; shared by the bottom transport bar and the fullscreen overlay bar so
+ * both always show the same glyph for the same state.
+ *
+ * @param {boolean} paused Whether the video is paused.
+ * @returns {'▶'|'⏸'}
+ */
+export function transportGlyph(paused) {
+  return paused ? '▶' : '⏸';
+}
+
+/**
+ * Clamp a playback-rate input to a usable rate: finite and > 0, else 1×.
+ * PURE; every speed selector (bottom bar + overlay) routes through this so
+ * a bogus value can never silence or stall playback.
+ *
+ * @param {unknown} rate Raw selector value (string) or number.
+ * @returns {number} Positive finite playback rate.
+ */
+export function normalizePlaybackRate(rate) {
+  const r = Number(rate);
+  return Number.isFinite(r) && r > 0 ? r : 1;
+}
+
+// ---------------------------------------------------------------------------
 // REQ-021 error mapping tables (pure)
 // ---------------------------------------------------------------------------
 
@@ -479,6 +527,11 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     transportFwd: /** @type {HTMLButtonElement | null} */ ($('transport-fwd')),
     transportSpeed: /** @type {HTMLSelectElement | null} */ ($('transport-speed')),
     transportTime: $('transport-time'),
+    ovBack: /** @type {HTMLButtonElement | null} */ ($('ov-back')),
+    ovPlay: /** @type {HTMLButtonElement | null} */ ($('ov-play')),
+    ovFwd: /** @type {HTMLButtonElement | null} */ ($('ov-fwd')),
+    ovSpeed: /** @type {HTMLSelectElement | null} */ ($('ov-speed')),
+    ovExit: /** @type {HTMLButtonElement | null} */ ($('ov-exit')),
     timelineCurrent: $('timeline-current'),
     timelineDuration: $('timeline-duration'),
     timeline: $('timeline'),
@@ -808,9 +861,9 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     app.tracks = [];
     app.manualNextId = 1;
     // Transport resets with the fresh file (load() resets playbackRate; the
-    // selector must follow or it would show a rate the video no longer has).
-    if (els.transportSpeed) els.transportSpeed.value = '1';
+    // selectors must follow or they would show a rate the video no longer has).
     if (els.video) els.video.playbackRate = 1;
+    syncSpeedSelects();
     resetAnalyzeUi();
     resetExportUi();
     refreshTrackUi();
@@ -1132,27 +1185,56 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   els.exportButton?.addEventListener('click', () => startExport());
   els.exportCancel?.addEventListener('click', () => exportCtl?.abort());
 
-  // --- Transport bar (SPEC-VID-002 REQ-105 / AC-104) -----------------------------
+  // --- Transport (SPEC-VID-002 REQ-105 / AC-104; v1.4.0 REQ-111) ---------------
 
   /**
    * One transport UI refresh from the live video element: play/pause glyph
-   * swap + current/total timecode (formatClock). Driven by the media events
-   * below so it works in EVERY workspace state (editor mount is review-only).
+   * swap (BOTH bars — bottom transport + fullscreen overlay), speed selectors
+   * synced to the live rate, and current/total timecode (formatClock). Driven
+   * by the media events below so it works in EVERY workspace state (editor
+   * mount is review-only).
    */
   function updateTransportUi() {
     const v = els.video;
     if (!v) return;
+    const paused = v.paused;
+    const glyph = transportGlyph(paused);
     if (els.transportPlay) {
-      const paused = v.paused;
-      els.transportPlay.textContent = paused ? '▶' : '⏸';
+      els.transportPlay.textContent = glyph;
       els.transportPlay.title = paused ? 'Play (space)' : 'Pause (space)';
       els.transportPlay.setAttribute('aria-label', paused ? 'Play' : 'Pause');
     }
+    if (els.ovPlay) {
+      els.ovPlay.textContent = glyph;
+      els.ovPlay.title = paused ? 'Play (space)' : 'Pause (space)';
+      els.ovPlay.setAttribute('aria-label', paused ? 'Play' : 'Pause');
+    }
+    syncSpeedSelects();
     const cur = Number.isFinite(v.currentTime) ? v.currentTime : 0;
     const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
     if (els.transportTime) els.transportTime.textContent = `${formatClock(cur)} / ${formatClock(dur)}`;
     if (els.timelineCurrent) els.timelineCurrent.textContent = formatClock(cur);
     if (els.timelineDuration) els.timelineDuration.textContent = formatClock(dur);
+  }
+
+  /** Keep BOTH speed selectors on the video's live playbackRate. */
+  function syncSpeedSelects() {
+    const rate = normalizePlaybackRate(els.video ? els.video.playbackRate : 1);
+    const value = String(rate);
+    if (els.transportSpeed) els.transportSpeed.value = value;
+    if (els.ovSpeed) els.ovSpeed.value = value;
+  }
+
+  /** Shared play/pause toggle — bottom bar, overlay bar and Space all call it. */
+  function togglePlay() {
+    const v = els.video;
+    if (!v) return;
+    if (v.paused) {
+      const p = v.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } else {
+      v.pause();
+    }
   }
 
   /** Frame-step ±1 source frame (same semantics as the ← / → shortcuts). */
@@ -1166,34 +1248,35 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     v.currentTime = Math.min(Math.max(0, v.currentTime + dt), dur);
   }
 
+  /** Shared speed set — both selectors route here and re-sync together. */
+  function setSpeed(rate) {
+    const v = els.video;
+    if (!v) return;
+    v.playbackRate = normalizePlaybackRate(rate);
+    syncSpeedSelects();
+  }
+
   els.transportStart?.addEventListener('click', () => {
     const v = els.video;
     if (v) v.currentTime = 0;
   });
   els.transportBack?.addEventListener('click', () => stepFrame(-1));
   els.transportFwd?.addEventListener('click', () => stepFrame(1));
-  els.transportPlay?.addEventListener('click', () => {
-    const v = els.video;
-    if (!v) return;
-    if (v.paused) {
-      const p = v.play();
-      if (p && typeof p.catch === 'function') p.catch(() => {});
-    } else {
-      v.pause();
-    }
-  });
-  els.transportSpeed?.addEventListener('change', () => {
-    const v = els.video;
-    if (!v) return;
-    const rate = Number(els.transportSpeed?.value);
-    v.playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
-  });
-  for (const ev of ['play', 'pause', 'timeupdate', 'seeked', 'loadedmetadata', 'durationchange']) {
+  els.transportPlay?.addEventListener('click', () => togglePlay());
+  els.transportSpeed?.addEventListener('change', () => setSpeed(els.transportSpeed?.value));
+  // v1.4.0 REQ-111: the overlay bar calls the SAME shared actions.
+  els.ovBack?.addEventListener('click', () => stepFrame(-1));
+  els.ovFwd?.addEventListener('click', () => stepFrame(1));
+  els.ovPlay?.addEventListener('click', () => togglePlay());
+  els.ovSpeed?.addEventListener('change', () => setSpeed(els.ovSpeed?.value));
+  els.ovExit?.addEventListener('click', () => exitPreview());
+  for (const ev of ['play', 'pause', 'timeupdate', 'seeked', 'loadedmetadata', 'durationchange', 'ratechange']) {
     els.video?.addEventListener(ev, updateTransportUi);
   }
   updateTransportUi();
 
-  // --- Fullscreen / enlarge preview (SPEC-VID-002 REQ-106 / AC-105) --------------
+  // --- Fullscreen / enlarge preview (SPEC-VID-002 REQ-106 / AC-105;
+  //     v1.4.0 REQ-111 in-stage overlay controls) --------------------------------
 
   const isNativeFullscreen = () => doc.fullscreenElement === els.previewStage;
   const isZoomFallback = () =>
@@ -1214,13 +1297,15 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
 
   function enterZoomFallback() {
     // iOS Safari & co: no Fullscreen API for elements — cover the viewport
-    // in-page instead (REQ-106). The exit button stays visible on the stage.
+    // in-page instead (REQ-106). The overlay bar (REQ-111) carries the exit.
     els.previewStage?.classList.add('preview-zoom');
     updateFullscreenButton();
     triggerPreviewResize();
+    showOverlayControls(); // enter → visible, idle timer starts
   }
 
-  function exitEnlarge() {
+  /** Exit fullscreen / turn the zoom fallback off (shared exit path). */
+  function exitPreview() {
     if (isNativeFullscreen()) {
       const p = doc.exitFullscreen?.();
       if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -1229,11 +1314,57 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       updateFullscreenButton();
       triggerPreviewResize();
     }
+    hideOverlayControls(); // reset: next enter re-shows from scratch
+  }
+
+  // --- Overlay control-bar auto-hide (REQ-111): the .stage-overlay-controls
+  //     bar is display:flex only in fullscreen/zoom (index.html CSS); the
+  //     .controls-idle class fades it out after OVERLAY_HIDE_MS of no
+  //     pointer/touch activity inside the stage. Any pointerdown/enter/move
+  //     or touchstart on the stage removes it again (and the bar itself
+  //     re-shows on interaction because idle sets pointer-events:none).
+
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let overlayHideTimer = null;
+
+  /** True while the stage fills the screen (either enlarge mode). */
+  const overlayActive = () => isNativeFullscreen() || isZoomFallback();
+
+  /** Re-show the overlay bar and restart the ~3 s idle timer. */
+  function showOverlayControls() {
+    if (!els.previewStage) return;
+    els.previewStage.classList.remove('controls-idle');
+    if (overlayHideTimer !== null) {
+      clearTimeout(overlayHideTimer);
+      overlayHideTimer = null;
+    }
+    if (!overlayActive()) return; // bar not displayed — nothing to auto-hide
+    overlayHideTimer = setTimeout(() => {
+      overlayHideTimer = null;
+      els.previewStage?.classList.add('controls-idle');
+    }, OVERLAY_HIDE_MS);
+  }
+
+  /** Hide the bar now and stop the timer (exit path / re-arm on next enter). */
+  function hideOverlayControls() {
+    if (overlayHideTimer !== null) {
+      clearTimeout(overlayHideTimer);
+      overlayHideTimer = null;
+    }
+    els.previewStage?.classList.add('controls-idle');
+  }
+
+  // Player-style activity surface: the bar fades only while the pointer is
+  // still and reappears on ANY interaction with the enlarged stage. The
+  // listeners are attached unconditionally — outside fullscreen/zoom the bar
+  // is display:none, so the class toggle has no visual effect.
+  for (const ev of ['pointerenter', 'pointermove', 'pointerdown', 'touchstart']) {
+    els.previewStage?.addEventListener(ev, showOverlayControls);
   }
 
   els.fullscreenButton?.addEventListener('click', () => {
     if (isNativeFullscreen() || isZoomFallback()) {
-      exitEnlarge();
+      exitPreview();
       return;
     }
     const stage = els.previewStage;
@@ -1247,6 +1378,10 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   doc.addEventListener('fullscreenchange', () => {
     updateFullscreenButton();
     triggerPreviewResize();
+    // REQ-111: entering fullscreen re-shows the controls with a fresh idle
+    // timer; leaving resets them (hidden until the next enter/activity).
+    if (overlayActive()) showOverlayControls();
+    else hideOverlayControls();
   });
   window.addEventListener('resize', () => {
     // v1.2.0: re-clamp the stage against the new viewport (75vh bound) —
@@ -1255,7 +1390,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   });
   // Escape exits the in-page fallback (native fullscreen gets it for free).
   doc.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && isZoomFallback()) exitEnlarge();
+    if (e.key === 'Escape' && isZoomFallback()) exitPreview();
   });
   updateFullscreenButton();
 
@@ -1350,23 +1485,13 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     if (target && typeof target.closest === 'function' &&
         target.closest('input, select, button, textarea, [contenteditable]')) return;
     if (!(app.step === 'review' || app.step === 'done')) return;
-    const v = els.video;
-    if (!v) return;
+    if (!els.video) return; // togglePlay/stepFrame guard internally too
     if (e.key === ' ') {
       e.preventDefault();
-      if (v.paused) {
-        const p = v.play();
-        if (p && typeof p.catch === 'function') p.catch(() => {});
-      } else {
-        v.pause();
-      }
+      togglePlay();
     } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
-      const fps = Number(app.meta?.fps);
-      const dt = 1 / (fps > 0 ? fps : 30);
-      const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
-      v.pause();
-      v.currentTime = Math.min(Math.max(0, v.currentTime + (e.key === 'ArrowRight' ? dt : -dt)), dur);
+      stepFrame(e.key === 'ArrowRight' ? 1 : -1);
     } else if (e.key === 'b' || e.key === 'B') {
       // Manual-box mode: the canvas drag is live (editor's interaction map);
       // B just tells the user what to do next.

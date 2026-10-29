@@ -12,6 +12,8 @@ import { describe, it, expect } from 'vitest';
 import {
   MIN_TRACK_SPAN_S,
   CHIP_EDGE_PX,
+  CHIP_EDGE_PX_COARSE,
+  effectiveEdgePx,
   renderTimeline,
   hitTestTimeline,
   toggleTrack,
@@ -227,6 +229,56 @@ describe('hitTestTimeline chip edge zones (SPEC-VID-002 REQ-103)', () => {
       track: short,
       zone: 'end',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// effectiveEdgePx (v1.4.0 REQ-112 — coarse-pointer trim targets)
+// ---------------------------------------------------------------------------
+
+describe('effectiveEdgePx (REQ-112 coarse-pointer edge zones)', () => {
+  it('documents the constants (6 px fine pointer, 14 px coarse pointer)', () => {
+    expect(CHIP_EDGE_PX).toBe(6);
+    expect(CHIP_EDGE_PX_COARSE).toBe(14);
+  });
+
+  it('fine pointer (coarse=false) → CHIP_EDGE_PX; coarse (true) → 14 px', () => {
+    expect(effectiveEdgePx(false)).toBe(6);
+    expect(effectiveEdgePx(true)).toBe(14);
+  });
+
+  it('non-boolean input degrades to the fine-pointer zone (never NaN)', () => {
+    expect(effectiveEdgePx(undefined)).toBe(6);
+    expect(effectiveEdgePx(null)).toBe(6);
+    expect(effectiveEdgePx(0)).toBe(6);
+    expect(effectiveEdgePx('yes')).toBe(6);
+  });
+
+  it('a coarse zone passed as edgePx widens hitTestTimeline zones proportionally', () => {
+    // width=100 px, durationSec=10 s → 1 px == 0.1 s; the 14 px coarse zone
+    // is 1.4 s deep (vs 0.6 s fine) both inward and outward.
+    const a = makeTrack({ start: 2, end: 4 });
+    expect(hitTestTimeline(28, 10, 100, [a], 10, effectiveEdgePx(true))?.zone).toBe('start'); // t=2.8 ≤ 1.4
+    expect(hitTestTimeline(28, 10, 100, [a], 10, effectiveEdgePx(false))?.zone).toBe('body'); // fine: 0.8 > 0.6
+    expect(hitTestTimeline(52, 10, 100, [a], 10, effectiveEdgePx(true))?.zone).toBe('end'); // t=5.2: 1.2s past end ≤ 1.4
+  });
+
+  it('outward grabs widen with the coarse zone (fingertip reach)', () => {
+    const a = makeTrack({ start: 2, end: 4 });
+    // t=5.3 is 1.3 s past the end edge: inside the 1.4 s coarse zone, outside
+    // the 0.6 s fine zone.
+    expect(hitTestTimeline(53, 10, 100, [a], 10, effectiveEdgePx(true))).toEqual({
+      track: a,
+      zone: 'end',
+    });
+    expect(hitTestTimeline(53, 10, 100, [a], 10, effectiveEdgePx(false))).toBeNull();
+  });
+
+  it('hitTestTimeline keeps its own CHIP_EDGE_PX default (param behavior intact)', () => {
+    const a = makeTrack({ start: 2, end: 4 });
+    // No edgePx arg → 0.6 s zone, unchanged from v1.3.x.
+    expect(hitTestTimeline(25, 10, 100, [a], 10)?.zone).toBe('start'); // t=2.5 ≤ 0.6
+    expect(hitTestTimeline(28, 10, 100, [a], 10)?.zone).toBe('body'); // t=2.8 > 0.6
   });
 });
 

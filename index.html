@@ -284,6 +284,40 @@
       min-height: 0;
     }
 
+    /* ── Overlay control bar (v1.4.0 REQ-111): transport controls inside the
+       stage, displayed ONLY in fullscreen / zoom modes. Hidden again after
+       ~3 s idle (#preview-stage.controls-idle — main.js idle timer); any
+       pointer/touch activity on the stage re-shows it. ── */
+    .stage-overlay-controls {
+      position: absolute;
+      left: 50%;
+      bottom: 16px;
+      transform: translateX(-50%);
+      z-index: 6; /* above the canvas and the ⛶ corner button */
+      display: none; /* hidden outside fullscreen/zoom */
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      transition: opacity 240ms ease;
+    }
+    #preview-stage:fullscreen .stage-overlay-controls,
+    #preview-stage.preview-zoom .stage-overlay-controls {
+      display: flex;
+    }
+    #preview-stage.controls-idle .stage-overlay-controls {
+      opacity: 0;
+      pointer-events: none; /* idle taps fall through to the stage → re-show */
+    }
+    .stage-overlay-controls button {
+      padding: 4px 10px;
+      font-size: 14px;
+      line-height: 1.2;
+    }
+    .stage-overlay-controls select { padding: 4px 6px; font-size: 12.5px; }
+
     /* ── Stage resize handle (v1.2.0): slim grabber between the preview
        stage and the transport bar; drag ↕ / ArrowUp / ArrowDown resize the
        stage via --stage-h, double-click resets. Wired by main.js. ── */
@@ -510,6 +544,7 @@
       pointer-events: none;
     }
     .toast {
+      max-width: min(92vw, 560px); /* never push the page wider than a phone */
       padding: 10px 18px;
       border-radius: 8px;
       border: 1px solid var(--line);
@@ -523,9 +558,33 @@
 
     [hidden] { display: none !important; }
 
-    @media (max-width: 900px) {
+    /* ── Mobile layout (v1.4.0 REQ-112): at ≤ 820 px the app collapses to a
+       single column — the right rail (tracks, export, attribution) stacks
+       below the timeline, controls get ≥ 40 px touch targets, the stage
+       defaults to 48vh (the resize handle still overrides via its inline
+       --stage-h), and nothing overflows horizontally at 390 px. ── */
+    @media (max-width: 820px) {
+      /* #app-main is a row on desktop with the intake/capability panel pinned
+         at 320 px via an inline flex set by main.js — switching the axis to
+         column makes that inline basis a height, so the workspace takes the
+         full width without fighting the runtime style. */
+      #app-main { flex-direction: column; padding: 12px; }
       #workspace { grid-template-columns: 1fr; }
+      #app-header { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
+      #stepper { flex-wrap: wrap; }
       #stepper li { padding: 6px 8px; }
+      #drop-zone { min-height: 180px; padding: 28px; }
+      #preview-stage { --stage-h: 48vh; }
+      #keyboard-hints .hints { display: none; }
+
+      /* Touch targets: every control ≥ 40 px tall on coarse/narrow screens. */
+      button, select { min-height: 40px; }
+      input.span-input { min-height: 40px; }
+      .track-row .times input.span-input { flex: 1 1 64px; width: auto; }
+      #export-quality { width: 100%; } /* long option text must not overflow */
+
+      /* Transport wraps instead of forcing a second scrollbar-width row. */
+      #transport-bar { flex-wrap: wrap; }
     }
   </style>
 </head>
@@ -581,6 +640,25 @@
           <video id="preview-video" playsinline></video>
           <canvas id="overlay-canvas"></canvas>
           <button id="preview-fullscreen" type="button" title="Enlarge preview" aria-label="Enlarge preview">⛶</button>
+          <!-- REQ-111 (v1.4.0): transport controls reachable inside
+               fullscreen / zoom. Hidden by default; display:flex only under
+               #preview-stage:fullscreen / .preview-zoom, auto-hidden after
+               ~3 s idle via the .controls-idle class (main.js idle timer) —
+               any pointer/touch activity on the stage re-shows the bar.
+               Distinct ov-* IDs keep the #transport-bar E2E selectors intact. -->
+          <div class="stage-overlay-controls" role="group" aria-label="Enlarged preview controls">
+            <button id="ov-back" type="button" title="Step one frame back" aria-label="Frame back">⏪</button>
+            <button id="ov-play" type="button" title="Play (space)" aria-label="Play">▶</button>
+            <button id="ov-fwd" type="button" title="Step one frame forward" aria-label="Frame forward">⏩</button>
+            <select id="ov-speed" aria-label="Playback speed">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+            <button id="ov-exit" type="button" title="Exit enlarged preview" aria-label="Exit enlarged preview">✕</button>
+          </div>
         </div>
         <div id="stage-resize-handle" role="separator" aria-orientation="horizontal" aria-valuemin="220" tabindex="0" aria-label="Resize preview height" title="Drag to resize the preview — double-click resets the height">
           <span class="grip" aria-hidden="true">⋮⋮</span>

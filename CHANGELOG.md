@@ -6,6 +6,15 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-29
+
+Fullscreen-usable controls and a mobile-friendly single-column layout (SPEC-VID-002 amendments REQ-111/112).
+
+### Added
+
+- In-fullscreen overlay controls (REQ-111): an overlay control bar inside the preview stage — play/pause, frame step back/forward, playback speed, and an exit button — shown only in fullscreen / enlarged (zoom) modes so transport stays reachable while the stage fills the screen. Both bars call the same shared transport actions (`togglePlay` / `stepFrame` / `setSpeed` / `exitPreview`), so glyphs, speed selectors and behavior stay in lockstep with the existing bottom transport bar (whose `#transport-bar` / `#export-button` ids and behavior are unchanged). The bar auto-hides after ~3 s of interaction idle and reappears on any pointer/touch activity on the stage, the standard video-player pattern; entering fullscreen or zoom re-shows it with a fresh idle timer.
+- Mobile-friendly layout (REQ-112): at viewport widths ≤ 820 px the app collapses to a single column — the right rail (tracks, export, attribution) stacks below the timeline — with ≥ 40 px touch targets on buttons/selects/inputs, flexible track-row time inputs, a smaller 48 vh default preview stage (the resize handle still overrides it), header/stepper compression, hidden footer keyboard hints, and no horizontal overflow at 390 px. Timeline chip-edge grab zones widen from 6 px to 14 px on coarse (touch) pointers so trims work with a fingertip.
+
 ## [1.3.0] — 2026-10-29
 
 Track-time editing, distinct manual colors, and the trim-gesture fix (SPEC-VID-002 amendments REQ-108/109/110).

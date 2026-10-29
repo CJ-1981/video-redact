@@ -57,6 +57,8 @@ Then open <http://localhost:8000/dist/index.html>. Or skip the local setup entir
 
 4K HEVC (iPhone) input requires hardware HEVC decode in the browser — the capability report tells you before any work starts, and suggests re-recording in H.264 ("Most Compatible") when unavailable.
 
+Mobile Chrome/Edge: single-column layout; processing 4K on phones is slow — desktop recommended.
+
 ## Android recordings
 
 Yes — modern Android camera output is the app's fully-supported path. Recorded on-device or moved to a desktop:

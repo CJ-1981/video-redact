@@ -11,6 +11,8 @@
  *        renderTimeline()      → chips view model + playhead percentage
  *        hitTestTimeline()     → { track, zone } | null (chip edge zones,
  *                                REQ-103 + v1.3.0 REQ-110 outward zones)
+ *        effectiveEdgePx()     → edge-zone width for a pointer kind
+ *                                (v1.4.0 REQ-112: 6 px fine, 14 px touch)
  *        toggleTrack()         → immutable enabled-flip (REQ-014)
  *        trimTrack()           → immutable span trim (SPEC-VID-002 REQ-103)
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
@@ -37,7 +39,8 @@
  *     click            → onSeek(time under pointer)      — chip or bare rail
  *     dblclick on chip → hitTestTimeline → onToggle(id, !enabled)
  *                        (the two preceding clicks also seek — harmless)
- *     drag a chip EDGE (± 6 px zone) → onTrimTrack(id, start, end)
+ *     drag a chip EDGE (± 6 px zone; ± 14 px on touch — REQ-112)
+ *                        → onTrimTrack(id, start, end)
  *                        (chip-edge hit zones from hitTestTimeline; zones
  *                        extend OUTWARD past the edge too — REQ-110: the
  *                        visible edge line of a full-span chip sits on the
@@ -100,6 +103,26 @@ export const MIN_TRACK_SPAN_S = 0.1;
  * @type {number}
  */
 export const CHIP_EDGE_PX = 6;
+
+/**
+ * Chip-edge half-width on coarse pointers (touch), CSS px (v1.4.0 REQ-112):
+ * a fingertip needs roughly double the grab zone of a 6 px mouse cursor.
+ * @type {number}
+ */
+export const CHIP_EDGE_PX_COARSE = 14;
+
+/**
+ * Effective chip-edge half-width for a pointer kind. PURE — unit-testable
+ * seam; mountEditor resolves `coarse` once from matchMedia('(pointer: coarse)')
+ * and passes the result everywhere it calls hitTestTimeline (whose own
+ * default-parameter behavior stays on the fine-grained CHIP_EDGE_PX).
+ *
+ * @param {boolean} coarse True on coarse pointers (touch).
+ * @returns {number} Edge-zone half-width, CSS px (fine → 6, coarse → 14).
+ */
+export function effectiveEdgePx(coarse) {
+  return coarse === true ? CHIP_EDGE_PX_COARSE : CHIP_EDGE_PX;
+}
 
 /** Manual-drag rubber band (REQ-109: manual tracks themselves use the
  * categorical palette — alert red stays on the in-progress rubber band). */
@@ -720,6 +743,13 @@ export function mountEditor(els, hooks) {
   const hasHook = (name) => !!(hooks && typeof hooks[name] === 'function');
   const getState = () =>
     hasHook('getState') ? hooks.getState() : { tracks: [], currentTime: 0 };
+
+  // v1.4.0 REQ-112: coarse (touch) pointers get wider chip-edge grab zones.
+  // matchMedia is browser-only — node (unit tests) degrades to the fine zone.
+  const coarsePointer =
+    typeof globalThis.matchMedia === 'function' &&
+    globalThis.matchMedia('(pointer: coarse)').matches === true;
+  const edgePx = effectiveEdgePx(coarsePointer);
   const callToggle = (id, enabled) => {
     if (hasHook('onToggle')) hooks.onToggle(id, enabled);
   };
@@ -1116,7 +1146,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
     if (hit) callToggle(hit.track.id, !hit.track.enabled);
   }
 
@@ -1152,7 +1182,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, CHIP_EDGE_PX);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
     if (!hit || hit.zone === 'body') return; // plain chip click → seek path
     trimDrag = { id: hit.track.id, zone: hit.zone, moved: false };
     suppressClick = true;
@@ -1213,7 +1243,7 @@ export function mountEditor(els, hooks) {
     const d = duration();
     let cursor = '';
     if (p && d > 0) {
-      const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, CHIP_EDGE_PX);
+      const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
       cursor = !hit ? '' : hit.zone === 'body' ? 'pointer' : 'col-resize';
     }
     const target =

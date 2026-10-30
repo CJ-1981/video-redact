@@ -49,10 +49,10 @@ describe('formatVersionBadge (footer version badge)', () => {
   });
 });
 
-describe('v1.9.0 version stamping wiring', () => {
-  it('package.json is at the 1.9.0 release version', () => {
+describe('v1.10.0 version stamping wiring', () => {
+  it('package.json is at the 1.10.0 release version', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-    expect(pkg.version).toBe('1.9.0');
+    expect(pkg.version).toBe('1.10.0');
   });
 
   it('index.html hosts the #app-version badge in the footer', () => {

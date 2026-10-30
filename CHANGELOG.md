@@ -6,6 +6,22 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-30
+
+The timeline works BEFORE analysis: the review editor now mounts the moment a video is loaded, not after the first analyze completes.
+
+### Fixed
+
+- Timeline, scrub thumb and keyboard transport were dead until the first analysis finished (field report: "it happens only before analysis is made"). Root cause: the workspace UI (preview, transport, timeline, thumb) is visible in the READY state, but `mountEditor` only ran inside the analyze completion path — pre-analyze the timeline was inert markup, the scrub thumb never moved, and Space did nothing. Fix: the editor mounts at READY (file open, capability OK, 0 tracks) through the same `mountEditorSafe` seam (a mount failure stays a readable toast; the doc-level keyboard is still wired first, preserving the v1.9.0 ordering contract), and analyze completion now only sets the merged track state + `editor.refresh()` — no destroy/remount churn at review.
+- Manual redaction regions drawn before running analysis are no longer lost: the analyze pass returns a fresh auto-only track array which used to REPLACE `app.tracks`. A pure `mergeManualTracks(existing, analyzed)` seam keeps every `source === 'manual'` track, appends the analyzed tracks, and re-assigns colliding auto ids past every existing id (`manualNextId` follows the merge). Existing manual regions also stay rendered and enforced in the preview during the pass instead of vanishing mid-analysis.
+- `Space` now toggles playback in the READY state (and the `B` manual-box hint fires there — canvas drawing is live from ready); `←`/`→` frame-step keeps its review-state gating. Export remains state-gated to review/done: nothing can ship pre-analyze (`deriveStep('ready', 'EXPORT_START')` is and stays null).
+
+### Verification
+
+- Probe: `node tools/debug-freeze-emulated.mjs` — new FIRST phase P0 (pre-analyze, READY state, no analysis): play → thumb tracks, Space toggles playback, thumb drag 25%→50% scrubs, a manual box drag creates a track, no page errors. FAILS on the v1.9.0 dist (dead UI), PASSES after the fix; P-A/P-B/P-C (post-analyze) unchanged and green, with a new assertion that the P0 manual region survives analysis (merge).
+- Unit: 540 → 553 tests, all passing. New: `mergeManualTracks` (keep+append, collision re-id, re-analyze replaces autos only, degenerate inputs + no mutation), `deriveStep` ready-carries-a-live-editor / export-gated-pre-analyze, mountApp integration (mount at ready with 0 tracks, no remount on analyze completion, manual boxes survive analysis, Space-at-ready with ←/→ still gated), and empty-track editor mounts (render/refresh safe, position driven, scrub + pin, clean teardown) in `timeline.test.js`.
+- Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
 ## [1.8.2] — 2026-10-30
 
 A runtime self-diagnostic for remote support: `?debug=1` makes the reporting page print its own evidence.

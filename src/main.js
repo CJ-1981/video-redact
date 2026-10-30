@@ -50,6 +50,12 @@
  *                                      editor mount with the throw contained —
  *                                      on failure: onFail(err) + null instead of
  *                                      a dead app shell (v1.9.0 hardening)
+ *   mergeManualTracks(existing, analyzed)
+ *                                      analyze-completion merge (v1.10.0):
+ *                                      manual regions drawn pre-analyze survive
+ *                                      the fresh auto tracks; colliding auto
+ *                                      ids are re-assigned past every existing
+ *                                      id; returns {tracks, manualNextId}
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -185,6 +191,9 @@ const STEP_TRANSITIONS = {
     FILE_OPENED: 'ready',
     CLEAR: 'gate',
   },
+  // v1.10.0: 'ready' carries a LIVE editor (mounted at file-open) — playback,
+  // scrub and manual-box drawing all work here; Export stays gated to the
+  // post-analyze states (review/done) so nothing ships before an analysis ran.
   ready: {
     ANALYZE_START: 'analyzing',
     FILE_OPENED: 'ready',
@@ -703,6 +712,62 @@ export function mountEditorSafe(mountFn, els, hooks, onFail) {
     if (typeof onFail === 'function') onFail(err);
     return null;
   }
+}
+
+/**
+ * Merge freshly analyzed auto tracks with the tracks that already exist
+ * (v1.10.0). PURE — the analyze pass returns a FRESH track array (tracker
+ * output, auto ids from its own counter); since the editor now lives from the
+ * ready state, the user may have drawn MANUAL regions before (or during) the
+ * pass and those must survive it: keep every `source === 'manual'` track
+ * verbatim, then append the analyzed tracks. Auto ids that would collide with
+ * a kept manual id are re-assigned past EVERY existing id (manual + auto) —
+ * ids are per-track identity only (chips/rows/toggle dispatch on them), so a
+ * remap is side-effect free. Non-manual existing tracks do NOT survive: a
+ * re-analyze legitimately replaces the previous auto set.
+ *
+ * Track order: manuals first (creation order — they existed before the pass),
+ * then the analyzed tracks in tracker order. `manualNextId` comes back as
+ * max(merged ids) + 1 so main's manual-id/palette counter can never collide.
+ *
+ * Degradations (never throws): non-array inputs → []; null/invalid entries
+ * are dropped from the kept set; tracks without a finite id pass through
+ * unmapped (they cannot collide).
+ *
+ * @param {import('./types.js').Track[] | null | undefined} existingTracks
+ *     The app's current tracks (may hold manual regions).
+ * @param {import('./types.js').Track[] | null | undefined} analyzedTracks
+ *     The fresh runAnalyze output (auto tracks).
+ * @returns {{tracks: import('./types.js').Track[], manualNextId: number}}
+ *     The merged array and the next free manual id.
+ */
+export function mergeManualTracks(existingTracks, analyzedTracks) {
+  const existing = Array.isArray(existingTracks) ? existingTracks : [];
+  const analyzed = Array.isArray(analyzedTracks) ? analyzedTracks : [];
+  const manual = existing.filter(
+    (t) => !!t && /** @type {{source?: unknown}} */ (/** @type {unknown} */ (t)).source === 'manual',
+  );
+  const autos = analyzed.filter(Boolean);
+  const manualIds = new Set(
+    manual.map((t) => Number(t.id)).filter((id) => Number.isFinite(id)),
+  );
+  let nextId = 0;
+  for (const t of [...manual, ...autos]) {
+    const id = Number(t?.id);
+    if (Number.isFinite(id)) nextId = Math.max(nextId, id);
+  }
+  nextId += 1;
+  const mergedAutos = autos.map((t) => {
+    const id = Number(t?.id);
+    if (!Number.isFinite(id) || !manualIds.has(id)) return t;
+    const fresh = nextId;
+    nextId += 1;
+    return /** @type {import('./types.js').Track} */ ({ ...t, id: fresh });
+  });
+  const tracks = [...manual, ...mergedAutos];
+  const manualNextId =
+    tracks.reduce((m, t) => Math.max(m, Number(t?.id) || 0), 0) + 1;
+  return { tracks, manualNextId };
 }
 
 /**
@@ -1396,6 +1461,13 @@ export async function mountApp(
       applyStepper();
       updateButtons();
       showWorkspace();
+      // v1.10.0: the workspace UI is live the moment a file is open — mount
+      // the editor HERE (ready, 0 tracks), not after the first analyze. The
+      // Blob URL + video src are already assigned above, so the timeline,
+      // scrub thumb, transport Space and manual-box drawing all work
+      // pre-analyze. A mount failure stays contained (mountEditorLive →
+      // mountEditorSafe): readable toast, everything else keeps working.
+      mountEditorLive();
       toast(
         `Opened ${file.name} — ${meta.container}, ${meta.displayWidth}×${meta.displayHeight}` +
           (caps.canAnalyze ? '' : ' — video decode unavailable, see capability report'),
@@ -1596,12 +1668,13 @@ export async function mountApp(
   // --- Keyboard (design-direction: space / ← / → / B in review states) ------
   //
   // v1.9.0 ORDERING CONTRACT: this handler is wired EARLY in mountApp —
-  // before any code path that can mount the editor (enterReview only runs
-  // after an analyze completes, and the editor mount itself is additionally
-  // isolated via mountEditorSafe). The field failure (thumb + keyboard dead
-  // while the transport timecode stayed alive) fits ONE exception killing
-  // every wiring step after the editor mount; registering the shortcuts
-  // FIRST makes that failure mode unable to take the keyboard down with it.
+  // before any code path that can mount the editor (the v1.10.0 ready-mount
+  // lives below in SOURCE order, and only RUNS on a file open, long after
+  // mountApp finished wiring; the mount itself is additionally isolated via
+  // mountEditorSafe). The field failure (thumb + keyboard dead while the
+  // transport timecode stayed alive) fits ONE exception killing every wiring
+  // step after the editor mount; registering the shortcuts FIRST makes that
+  // failure mode unable to take the keyboard down with it.
   //
   // v1.6.1 REG-2: exclusion is limited to the TYPING surfaces
   // (shortcutEnabledFor — input/select/textarea/[contenteditable]; the
@@ -1612,24 +1685,122 @@ export async function mountApp(
   // blur-on-click wiring (keyboard users, native-fullscreen focus anchoring)
   // toggles the video EXACTLY ONCE — the browser's key-activation click on
   // the focused button is cancelled.
+  //
+  // v1.10.0: the editor is live from READY (mounted at file-open), so Space
+  // toggles playback and the B hint fire whenever the preview is visible —
+  // the user expectation pre-analyze, where the workspace already shows.
+  // ←/→ frame-step keeps its review/done gating (at ready the transport
+  // buttons and the focused scrub thumb step frames; the doc shortcut stays
+  // a review-state semantic).
 
   doc.addEventListener('keydown', (e) => {
     const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
     if (!shortcutEnabledFor(target)) return;
-    if (!(app.step === 'review' || app.step === 'done')) return;
     if (!els.video) return; // togglePlay/stepFrame guard internally too
+    const reviewGated = app.step === 'review' || app.step === 'done';
+    const playbackLive = reviewGated || app.step === 'ready';
+    if (!playbackLive) return;
     if (e.key === ' ') {
       e.preventDefault();
       togglePlay();
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    } else if (reviewGated && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       e.preventDefault();
       stepFrame(e.key === 'ArrowRight' ? 1 : -1);
     } else if (e.key === 'b' || e.key === 'B') {
-      // Manual-box mode: the canvas drag is live (editor's interaction map);
-      // B just tells the user what to do next.
+      // Manual-box mode: the canvas drag is live (editor's interaction map,
+      // from ready since v1.10.0); B just tells the user what to do next.
       toast('Drag on the video to draw a manual redaction box — Escape cancels the drag.', { timeoutMs: 4000 });
     }
   });
+
+  // --- Editor mount at ready (v1.10.0) ----------------------------------------
+  //
+  // The workspace (preview, transport, timeline, thumb) is visible the moment
+  // a file is open — the editor must be too. Through v1.9.0 the mount only
+  // ran when the first analyze completed (enterReview), so pre-analyze the
+  // timeline/thumb were dead markup and Space did nothing: the field report
+  // "it happens only before analysis is made". mountEditorLive() owns the
+  // (re)mount: handleFile's success path calls it at READY with 0 tracks;
+  // analyze completion only refreshes the live editor. It sits BELOW the
+  // doc-keyboard registration in source order (the v1.9.0 contract) and runs
+  // through mountEditorSafe — a mount throw becomes a readable toast + diag
+  // counters, never a dead workspace, and the shortcuts can never go down
+  // with it.
+
+  /**
+   * (Re-)mount the editor with the shared els + hooks (v1.10.0). Called on
+   * every successful file-open; `enterReview` deliberately does NOT mount —
+   * it sets tracks + refreshes so the live editor never drops a beat between
+   * ready and review.
+   */
+  function mountEditorLive() {
+    editor?.destroy();
+    editor = /** @type {ReturnType<typeof mountEditor> | null} */ (mountEditorSafe(
+      mountEditorFn,
+      {
+        video: els.video,
+        overlayCanvas: els.overlayCanvas,
+        timeline: els.timeline,
+        chipsContainer: els.chips,
+        playhead: els.playhead,
+        trackList: els.trackList,
+      },
+      {
+        // v1.8.1: `duration` is the editor's fallback when video.duration is
+        // NaN/≤0 (late metadata) — the meta value is set once at load and
+        // never a stale playback capture.
+        getState: () => ({
+          tracks: app.tracks,
+          currentTime: els.video?.currentTime ?? 0,
+          duration: app.meta?.duration,
+        }),
+        onToggle: (trackId, enabled) => {
+          app.tracks = toggleTrack(app.tracks, trackId, enabled);
+          refreshTrackUi();
+        },
+        onSeek: (t) => {
+          const v = els.video;
+          if (!v) return;
+          const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
+          v.currentTime = Math.min(Math.max(0, t), dur);
+        },
+        onManualBox: (box, t) => {
+          const track = manualTrackFromBox(app.manualNextId, t, box, app.meta?.duration);
+          app.manualNextId += 1;
+          app.tracks = [...app.tracks, track];
+          refreshTrackUi();
+        },
+        onTrimTrack: (trackId, start, end) => {
+          // REQ-103: chip-edge drag → model trim, clamped to the video
+          // duration with the 0.1 s minimum span enforced by the model.
+          app.tracks = trimTrack(app.tracks, trackId, start, end, app.meta?.duration);
+          refreshTrackUi();
+        },
+        onSetStyle: (trackId, style) => {
+          // REQ-101: per-track redaction style; the shared burn-in seam
+          // (redact.pixelateFrame) dispatches on it for preview AND export.
+          app.tracks = setTrackStyle(app.tracks, trackId, style);
+          refreshTrackUi();
+        },
+        // v1.7.0: the timeline scrub thumb's ←/→ keys step ±1 frame through the
+        // SAME stepFrame math as the transport buttons (source fps via app.meta).
+        onStepFrame: stepFrame,
+      },
+      // v1.9.0 onFail: surface the mount failure three ways — readable toast
+      // (support can act on it), shared diag counters (errs/lastErr reach the
+      // next [diag] line), console stays clean (mountEditorSafe swallowed the
+      // throw; the toast text carries the message).
+      (err) => {
+        noteRuntimeError(err);
+        const message = err instanceof Error ? err.message : String(err);
+        toast(`Editor failed to start: ${message} — please report`, {
+          kind: 'error',
+          timeoutMs: 8000,
+        });
+      },
+    ));
+    refreshTrackUi();
+  }
 
   // --- Analyze pass (REQ-009 / AC-03) --------------------------------------------
 
@@ -1637,12 +1808,11 @@ export async function mountApp(
     if (deriveStep(app.step, 'ANALYZE_START') == null || !app.input || !app.meta) return;
     const gen = ++app.gen;
 
-    // Re-analyze replaces the review state (tracks + editor).
-    editor?.destroy();
-    editor = null;
-    app.tracks = [];
-    if (els.trackList) els.trackList.textContent = '';
-    refreshTrackUi();
+    // v1.10.0: the editor stays LIVE through the pass (mounted at ready) —
+    // no destroy, no track reset. Existing tracks — manual regions drawn
+    // pre-analyze or during review — stay rendered and enforced in the
+    // preview while analyzing, and enterReview MERGES them with the fresh
+    // auto tracks (mergeManualTracks) instead of replacing the array.
     resetAnalyzeUi();
     resetExportUi();
     app.step = 'analyzing';
@@ -1724,91 +1894,31 @@ export async function mountApp(
       });
   }
 
-  /** Enter review: mount the editor, render tracks (AC-03 includes partial). */
+  /**
+   * Analysis complete (AC-03 includes partial): merge the fresh auto tracks
+   * with the surviving manual ones and refresh the LIVE editor. v1.10.0: the
+   * editor mounted at ready is already driving the workspace, so this path
+   * deliberately does NOT mount (or destroy) anything — set tracks, refresh,
+   * step → review. Re-mounting here used to be the reason the whole workspace
+   * stayed dead until the first analyze finished.
+   */
   function enterReview(result) {
     if (app.step !== 'analyzing') return;
-    app.tracks = Array.isArray(result?.tracks) ? result.tracks : [];
-    // Manual ids must never collide with tracker-assigned auto ids.
-    app.manualNextId = app.tracks.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0) + 1;
-
     const next = deriveStep('analyzing', 'ANALYZE_FINISH');
     if (next == null) return;
+
+    // MERGE (v1.10.0): runAnalyze returns a FRESH auto-only track array.
+    // Manual regions drawn before/during the pass (the editor is live from
+    // ready) survive it; auto ids that collide with a kept manual id are
+    // re-assigned past every existing id, and manualNextId follows the merge.
+    const merged = mergeManualTracks(app.tracks, result?.tracks);
+    app.tracks = merged.tracks;
+    app.manualNextId = merged.manualNextId;
+
     app.step = next;
     applyStepper();
     updateButtons();
-
-    editor?.destroy();
-    // v1.9.0: the mount runs through mountEditorSafe — a throw here used to
-    // propagate into the analyze .then chain and read as "Analysis failed"
-    // with the step already in review and a dead editor. Now: readable
-    // toast, error in the diag counters, state STAYS in review (it was set
-    // above, before the mount), the doc keyboard is already live (wired
-    // first), and the completion status below still renders.
-    editor = /** @type {ReturnType<typeof mountEditor> | null} */ (mountEditorSafe(
-      mountEditorFn,
-      {
-        video: els.video,
-        overlayCanvas: els.overlayCanvas,
-        timeline: els.timeline,
-        chipsContainer: els.chips,
-        playhead: els.playhead,
-        trackList: els.trackList,
-      },
-      {
-        // v1.8.1: `duration` is the editor's fallback when video.duration is
-        // NaN/≤0 (late metadata) — the meta value is set once at load and
-        // never a stale playback capture.
-        getState: () => ({
-          tracks: app.tracks,
-          currentTime: els.video?.currentTime ?? 0,
-          duration: app.meta?.duration,
-        }),
-        onToggle: (trackId, enabled) => {
-          app.tracks = toggleTrack(app.tracks, trackId, enabled);
-          refreshTrackUi();
-        },
-        onSeek: (t) => {
-          const v = els.video;
-          if (!v) return;
-          const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
-          v.currentTime = Math.min(Math.max(0, t), dur);
-        },
-        onManualBox: (box, t) => {
-          const track = manualTrackFromBox(app.manualNextId, t, box, app.meta?.duration);
-          app.manualNextId += 1;
-          app.tracks = [...app.tracks, track];
-          refreshTrackUi();
-        },
-        onTrimTrack: (trackId, start, end) => {
-          // REQ-103: chip-edge drag → model trim, clamped to the video
-          // duration with the 0.1 s minimum span enforced by the model.
-          app.tracks = trimTrack(app.tracks, trackId, start, end, app.meta?.duration);
-          refreshTrackUi();
-        },
-        onSetStyle: (trackId, style) => {
-          // REQ-101: per-track redaction style; the shared burn-in seam
-          // (redact.pixelateFrame) dispatches on it for preview AND export.
-          app.tracks = setTrackStyle(app.tracks, trackId, style);
-          refreshTrackUi();
-        },
-        // v1.7.0: the timeline scrub thumb's ←/→ keys step ±1 frame through the
-        // SAME stepFrame math as the transport buttons (source fps via app.meta).
-        onStepFrame: stepFrame,
-      },
-      // v1.9.0 onFail: surface the mount failure three ways — readable toast
-      // (support can act on it), shared diag counters (errs/lastErr reach the
-      // next [diag] line), console stays clean (mountEditorSafe swallowed the
-      // throw; the toast text carries the message).
-      (err) => {
-        noteRuntimeError(err);
-        const message = err instanceof Error ? err.message : String(err);
-        toast(`Editor failed to start: ${message} — please report`, {
-          kind: 'error',
-          timeoutMs: 8000,
-        });
-      },
-    ));
-    refreshTrackUi();
+    refreshTrackUi(); // editor.refresh() re-renders chips + rows + playhead
 
     // AC-17: surface the ACTIVE provider (createDetectors' effective EP —
     // honest post-fallback fact) as the status-line suffix.
@@ -2068,8 +2178,9 @@ export async function mountApp(
    * swap (BOTH bars — bottom transport + fullscreen overlay), mute glyph +
    * aria-pressed (BOTH bars, v1.8.0), speed selectors synced to the live
    * rate, and current/total timecode (formatClock). Driven by the media
-   * events below so it works in EVERY workspace state (editor mount is
-   * review-only) — `volumechange` keeps external mute flips in sync too.
+   * events below so it works in EVERY workspace state (the editor is live
+   * from ready since v1.10.0) — `volumechange` keeps external mute flips in
+   * sync too.
    */
   function updateTransportUi() {
     const v = els.video;

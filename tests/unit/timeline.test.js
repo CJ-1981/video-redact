@@ -1328,8 +1328,9 @@ function mountGesture(video, { hooks } = {}) {
   const chips = {
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 10 }),
   };
+  const playhead = makeGestureEl();
   const handle = mountEditor(
-    { video, overlayCanvas: null, timeline, chipsContainer: chips, playhead: null, trackList: null },
+    { video, overlayCanvas: null, timeline, chipsContainer: chips, playhead, trackList: null },
     hooks ?? {},
   );
   const down = (pointerId = 1) =>
@@ -1338,7 +1339,7 @@ function mountGesture(video, { hooks } = {}) {
       ({ button: 0, pointerId, stopPropagation() {}, preventDefault() {} });
   const up = (clientX, pointerId = 1) =>
     thumb.__listeners.get('pointerup')({ pointerId, clientX });
-  return { handle, thumb, timeline, chips, down, up };
+  return { handle, thumb, timeline, chips, playhead, down, up };
 }
 
 describe('THUMB_PIN_MS + getGestureState (v1.9.0 gesture diagnostics)', () => {
@@ -1620,5 +1621,79 @@ describe('per-tick exception isolation (v1.9.0: one bad tick must not stop the l
       expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
       handle.destroy();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.10.0 — the editor mounts at READY (file loaded, ZERO tracks), so the
+// pre-analyze timeline must be fully driven: position updates, scrub gesture
+// and clean teardown with an empty track set. This is the unit-side of the
+// P0 probe (tools/debug-freeze-emulated.mjs) that failed on ≤ v1.9.0 builds.
+// ---------------------------------------------------------------------------
+
+describe('mountEditor at READY with zero tracks (v1.10.0 pre-analyze editor)', () => {
+  it('the empty state renders clean: thumb + playhead parked at 0%, refresh safe, position still driven', () => {
+    const video = makeGestureVideo({ duration: 10, currentTime: 0 });
+    const { handle, thumb, playhead } = mountGesture(video, {
+      hooks: { getState: () => ({ tracks: [], currentTime: video.currentTime, duration: 10 }) },
+    });
+    // Initial paint at mount: chips empty (none exist), thumb parked left.
+    handle.redraw();
+    expect(thumb.style.left).toBe('0%');
+    expect(playhead.style.left).toBe('0%');
+    // A refresh with 0 tracks never throws (the ready-state editor refreshes
+    // on every refreshTrackUi call with nothing to show).
+    expect(() => handle.refresh()).not.toThrow();
+    // Position is driven with ZERO tracks: playback pre-analyze moves both.
+    video.currentTime = 5;
+    video.dispatch('timeupdate');
+    expect(parseFloat(thumb.style.left)).toBeCloseTo(50, 5);
+    expect(parseFloat(playhead.style.left)).toBeCloseTo(50, 5);
+    handle.destroy();
+  });
+
+  it('scrub works pre-analyze: a thumb drag seeks and the pin retires when the seek lands', () => {
+    let now = 1_000;
+    const nowMock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const video = makeGestureVideo({ duration: 10, currentTime: 0 });
+      const { handle, thumb, down, up } = mountGesture(video, {
+        hooks: {
+          getState: () => ({ tracks: [], currentTime: video.currentTime, duration: 10 }),
+          onSeek: (t) => {
+            video.currentTime = t; // the host seek path (main.js onSeek)
+          },
+        },
+      });
+      down();
+      up(50); // release at 5s → endpoint seek → thumb parked at 50%, pin armed
+      expect(thumb.style.left).toBe('50%');
+      expect(video.currentTime).toBe(5);
+      // The seek LANDS (currentTime within THUMB_PIN_EPSILON_S of the pin) —
+      // the next timeupdate retires the pin early; the thumb re-derives.
+      now += 50;
+      video.currentTime = 5.02;
+      video.dispatch('timeupdate');
+      expect(parseFloat(thumb.style.left)).toBeCloseTo(50.2, 5);
+      expect(handle.getGestureState().pinRemainingMs).toBe(0); // retired (settled)
+      // And playback moves on freely: the thumb follows immediately.
+      video.currentTime = 6;
+      video.dispatch('timeupdate');
+      expect(thumb.style.left).toBe('60%');
+      handle.destroy();
+    } finally {
+      nowMock.mockRestore();
+    }
+  });
+
+  it('destroy after an empty-track mount detaches every media listener (no pre-analyze leak)', () => {
+    const video = makeGestureVideo({ duration: 10, currentTime: 0 });
+    const { handle } = mountGesture(video, {
+      hooks: { getState: () => ({ tracks: [], currentTime: 0, duration: 10 }) },
+    });
+    expect(video.__listeners.size).toBeGreaterThan(0); // seeked/loadedmetadata/timeupdate
+    handle.destroy();
+    expect(video.__listeners.size).toBe(0);
+    expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
   });
 });

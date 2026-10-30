@@ -30,7 +30,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // instantly here. Nothing else in this file touches them.
 // ---------------------------------------------------------------------------
 
-const { FAKE_META, FAKE_INPUT } = vi.hoisted(() => ({
+const { FAKE_META, FAKE_INPUT, runAnalyzeMock } = vi.hoisted(() => ({
   FAKE_META: {
     container: 'mp4',
     codec: 'avc1',
@@ -53,6 +53,15 @@ const { FAKE_META, FAKE_INPUT } = vi.hoisted(() => ({
     }),
     getAudioTracks: async () => [],
   },
+  // v1.10.0: controllable analyze seam — the merge-across-analyze integration
+  // test resolves the pass WITH auto tracks (mockResolvedValueOnce); the
+  // default stays the v1.9.0 shape (0 tracks, 1 frame, webgpu, not cancelled).
+  runAnalyzeMock: vi.fn(async () => ({
+    tracks: [],
+    frameCount: 1,
+    effectiveEp: 'webgpu',
+    cancelled: false,
+  })),
 }));
 
 vi.mock('../../src/ingest.js', () => ({
@@ -60,7 +69,7 @@ vi.mock('../../src/ingest.js', () => ({
 }));
 
 vi.mock('../../src/analyze.js', () => ({
-  runAnalyze: async () => ({ tracks: [], frameCount: 1, effectiveEp: 'webgpu', cancelled: false }),
+  runAnalyze: runAnalyzeMock,
   sampleFrameAt: async () => {
     throw new Error('unused in unit tests');
   },
@@ -1012,6 +1021,280 @@ describe('mountApp (v1.9.0): an editor-mount failure cannot kill the keyboard', 
       fakeView.__dispatch('unhandledrejection', { reason: 42 });
       expect(globalThis.__VR_DIAG.errs).toBe(3);
       expect(globalThis.__VR_DIAG.lastErr).toBe('42');
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.10.0 — the timeline must work BEFORE analysis. The editor mounts at
+// READY (file loaded), analysis completion only merges fresh auto tracks
+// into the live editor's state (manual regions drawn pre-analyze survive),
+// and the doc shortcuts toggle playback whenever the preview is visible.
+// ---------------------------------------------------------------------------
+
+/** Minimal auto Track (the shape tracker.js emits; only id/source matter to
+ * the merge — the editor re-renders from the array identity). */
+function autoTrack(id, overrides = {}) {
+  return {
+    id,
+    cls: 'face',
+    label: `Face #${id}`,
+    color: '#2DD4BF',
+    keyframes: new Map(),
+    start: 0.5,
+    end: 3,
+    enabled: true,
+    source: 'auto',
+    style: 'pixelate',
+    ...overrides,
+  };
+}
+
+/** Minimal manual Track (manualTrackFromBox's shape). */
+function manualTrack(id, overrides = {}) {
+  return {
+    id,
+    cls: 'manual',
+    label: `Manual #${id}`,
+    color: '#A78BFA',
+    keyframes: new Map(),
+    start: 0,
+    end: 10,
+    enabled: true,
+    source: 'manual',
+    style: 'solid',
+    ...overrides,
+  };
+}
+
+describe('main-wiring: mergeManualTracks (v1.10.0 manual regions survive analysis)', () => {
+  it('keeps manual tracks and appends analyzed autos when no ids collide', () => {
+    const manual = manualTrack(5);
+    const a1 = autoTrack(1);
+    const a2 = autoTrack(2);
+    const merged = main.mergeManualTracks([manual], [a1, a2]);
+    expect(merged.tracks.map((t) => t.id)).toEqual([5, 1, 2]);
+    expect(merged.tracks[0]).toBe(manual); // kept verbatim
+    expect(merged.tracks[1]).toBe(a1); // verbatim (no collision → no re-id)
+    expect(merged.tracks[2]).toBe(a2);
+    expect(merged.manualNextId).toBe(6); // past every merged id
+  });
+
+  it('re-assigns colliding auto ids past EVERY existing id (manual + auto)', () => {
+    const merged = main.mergeManualTracks([manualTrack(1)], [autoTrack(1), autoTrack(2)]);
+    const ids = merged.tracks.map((t) => t.id);
+    expect(ids[0]).toBe(1); // manual keeps its id
+    expect(new Set(ids).size).toBe(ids.length); // collision-free
+    expect(ids).toContain(2); // non-colliding auto untouched
+    // The colliding auto was re-issued past max(existing) — never re-used.
+    expect(ids.filter((id) => id !== 1 && id !== 2)).toHaveLength(1);
+    expect(ids.filter((id) => id !== 1 && id !== 2)[0]).toBeGreaterThan(2);
+    expect(merged.manualNextId).toBe(Math.max(...ids) + 1);
+  });
+
+  it('re-analyze replaces the previous AUTO set (only manuals survive)', () => {
+    const oldAuto = autoTrack(1, { stale: true });
+    const keep = manualTrack(2);
+    const fresh1 = autoTrack(1);
+    const fresh3 = autoTrack(3);
+    const merged = main.mergeManualTracks([oldAuto, keep], [fresh1, fresh3]);
+    expect(merged.tracks).toEqual([keep, fresh1, fresh3]); // old auto gone
+    expect(merged.tracks.some((t) => t.stale)).toBe(false);
+  });
+
+  it('guards degenerate inputs and never mutates its arguments', () => {
+    expect(main.mergeManualTracks(null, null)).toEqual({ tracks: [], manualNextId: 1 });
+    expect(main.mergeManualTracks(undefined, [])).toEqual({ tracks: [], manualNextId: 1 });
+    expect(main.mergeManualTracks([], null)).toEqual({ tracks: [], manualNextId: 1 });
+    // Null entries in the analyzed array are dropped, not kept.
+    const merged = main.mergeManualTracks([manualTrack(3)], [null, autoTrack(4)]);
+    expect(merged.tracks.map((t) => t.id)).toEqual([3, 4]);
+    expect(merged.manualNextId).toBe(5);
+
+    // Inputs stay untouched: arrays, track objects, ids.
+    const existing = [manualTrack(1)];
+    const analyzed = [autoTrack(1)];
+    const analyzedCopy = { id: analyzed[0].id, source: analyzed[0].source };
+    main.mergeManualTracks(existing, analyzed);
+    expect(existing.map((t) => t.id)).toEqual([1]);
+    expect(analyzed.map((t) => ({ id: t.id, source: t.source }))).toEqual([analyzedCopy]);
+  });
+
+  it('is exposed on the module surface (typed pure seam)', () => {
+    expect(typeof main.mergeManualTracks).toBe('function');
+  });
+});
+
+describe('main-wiring: deriveStep v1.10.0 — ready carries a live editor, export stays post-analyze', () => {
+  it('ready legally supports the live editor: analyze is reachable, playback state is stable', () => {
+    expect(main.deriveStep('ready', 'ANALYZE_START')).toBe('analyzing');
+    expect(main.deriveStep('ready', 'FILE_OPENED')).toBe('ready');
+    // Analyze failure lands back on ready — the editor there is LIVE now.
+    expect(main.deriveStep('analyzing', 'ANALYZE_FAIL')).toBe('ready');
+  });
+
+  it('export can never run pre-analyze: no path from gate/ready/analyzing to exporting', () => {
+    expect(main.deriveStep('gate', 'EXPORT_START')).toBeNull();
+    expect(main.deriveStep('ready', 'EXPORT_START')).toBeNull();
+    expect(main.deriveStep('analyzing', 'EXPORT_START')).toBeNull();
+    // And the landing states stay clean: from ready, CLEAR still resets.
+    expect(main.deriveStep('ready', 'CLEAR')).toBe('gate');
+  });
+});
+
+describe('mountApp (v1.10.0): the editor mounts at READY — analysis merges, never mounts', () => {
+  /** Save/restore the two globals mountApp reads in node. */
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+
+  /** Inert editor handle for seam fakes that must not throw. */
+  const inertHandle = () => ({
+    destroy() {},
+    refresh() {},
+    redraw() {},
+    getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+  });
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  it('file-open mounts the editor at ready with 0 tracks; export stays gated pre-analyze', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const mounts = [];
+      await main.mountApp(fakeDoc, {
+        mountEditor: (els, hooks) => {
+          mounts.push({ els, hooks });
+          return inertHandle();
+        },
+      });
+      await openFile(fakeDoc);
+
+      // The mount happened ONCE, at READY — before any analyze.
+      expect(mounts).toHaveLength(1);
+      // The shared DOM handles are wired through.
+      expect(mounts[0].els.video).toBe(fakeDoc.getElementById('preview-video'));
+      expect(mounts[0].els.timeline).toBe(fakeDoc.getElementById('timeline'));
+      expect(mounts[0].els.chipsContainer).toBe(fakeDoc.getElementById('track-chips'));
+      expect(mounts[0].els.playhead).toBe(fakeDoc.getElementById('playhead'));
+      // The editor reads the live state: 0 tracks + the meta duration.
+      const st = mounts[0].hooks.getState();
+      expect(st.tracks).toEqual([]);
+      expect(st.duration).toBe(FAKE_META.duration);
+      // Ready state: analyze offered, export still gated (post-analyze only).
+      expect(fakeDoc.getElementById('analyze-button').textContent).toBe('Analyze');
+      expect(fakeDoc.getElementById('export-button').disabled).toBe(true);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('Space toggles playback at ready; ←/→ frame-step stays review-gated', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      const video = fakeDoc.getElementById('preview-video');
+      video.paused = true;
+      video.playsPlayed = 0;
+
+      const prevented = [];
+      fakeDoc.__dispatch('keydown', {
+        key: ' ',
+        target: null,
+        preventDefault: () => prevented.push('space'),
+      });
+      expect(prevented).toEqual(['space']);
+      expect(video.playsPlayed).toBe(1);
+      expect(video.paused).toBe(false);
+
+      // ←/→ remain a review-state semantic: no frame-step at ready.
+      video.currentTime = 2;
+      const arrowPrevented = [];
+      fakeDoc.__dispatch('keydown', {
+        key: 'ArrowRight',
+        target: null,
+        preventDefault: () => arrowPrevented.push('arrow'),
+      });
+      expect(arrowPrevented).toEqual([]);
+      expect(video.currentTime).toBe(2);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('manual boxes drawn pre-analyze SURVIVE analysis (merge in the live editor, no remount)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const mounts = [];
+      await main.mountApp(fakeDoc, {
+        mountEditor: (els, hooks) => {
+          mounts.push({ els, hooks });
+          return inertHandle();
+        },
+      });
+      // The pass returns FRESH auto tracks whose id space collides with the
+      // manual region the user drew first (tracker ids restart at 1).
+      runAnalyzeMock.mockResolvedValueOnce({
+        tracks: [autoTrack(1), autoTrack(2)],
+        frameCount: 24,
+        effectiveEp: 'webgpu',
+        cancelled: false,
+      });
+      await openFile(fakeDoc);
+      expect(mounts).toHaveLength(1); // the ready mount
+
+      // Draw a manual region PRE-analyze through the live editor's hooks.
+      mounts[0].hooks.onManualBox({ x: 4, y: 4, w: 8, h: 8 }, 1.25);
+      let st = mounts[0].hooks.getState();
+      expect(st.tracks).toHaveLength(1);
+      expect(st.tracks[0]).toMatchObject({ id: 1, source: 'manual', label: 'Manual #1' });
+
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      // NO remount on completion — the ready editor was refreshed in place.
+      expect(mounts).toHaveLength(1);
+      expect(fakeDoc.getElementById('analyze-button').textContent).toBe('Re-analyze');
+      // MERGE: manual first, then the analyzed autos; ids collision-free.
+      st = mounts[0].hooks.getState();
+      expect(st.tracks.map((t) => t.source)).toEqual(['manual', 'auto', 'auto']);
+      const ids = st.tracks.map((t) => t.id);
+      expect(ids[0]).toBe(1); // the pre-analyze manual region kept its id
+      expect(new Set(ids).size).toBe(ids.length);
+      // The counter advanced past the merge — another box cannot collide.
+      mounts[0].hooks.onManualBox({ x: 0, y: 0, w: 2, h: 2 }, 0.5);
+      st = mounts[0].hooks.getState();
+      const ids2 = st.tracks.map((t) => t.id);
+      expect(new Set(ids2).size).toBe(ids2.length);
+      expect(st.tracks[st.tracks.length - 1]).toMatchObject({
+        source: 'manual',
+        label: 'Manual #4',
+      });
     } finally {
       restoreGlobals();
     }

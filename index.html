@@ -168,6 +168,14 @@
     #app-header .tagline { color: var(--ink); font-size: 12px; margin-top: 2px; }
     /* v1.6.0: Clear + Open-another-file share one header slot */
     #header-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+    /* v1.6.2: Clear is a destructive action — alert-red styling (probe: tools/debug-touch-timeline.mjs T4). */
+    #clear-file {
+      color: var(--alert);
+      border-color: var(--alert);
+      background: transparent;
+    }
+    #clear-file:hover { background: #E5484D; color: #fff; }
+    #clear-file:focus-visible { outline: 2px solid var(--alert); outline-offset: 2px; }
     #stepper {
       display: flex;
       gap: 4px;
@@ -394,6 +402,7 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      touch-action: none; /* v1.6.2: app handles tap-seek/trim drags — no scroll takeover */
       background: var(--bg-panel);
       border: 1px solid var(--line);
       border-radius: var(--radius);

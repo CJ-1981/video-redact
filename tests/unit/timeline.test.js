@@ -15,6 +15,7 @@ import {
   CHIP_EDGE_PX_COARSE,
   CLICK_SEEK_MAX_DRAG_PX,
   effectiveEdgePx,
+  timelinePointerAction,
   timelineTimeAt,
   renderTimeline,
   hitTestTimeline,
@@ -888,5 +889,52 @@ describe('timelineTimeAt — pointer x → seek time (v1.6.1 REG-1)', () => {
     // and the threshold must stay below the coarse grab zone (14 px).
     expect(CLICK_SEEK_MAX_DRAG_PX).toBeGreaterThanOrEqual(CHIP_EDGE_PX);
     expect(CLICK_SEEK_MAX_DRAG_PX).toBeLessThan(CHIP_EDGE_PX_COARSE);
+  });
+});
+
+describe('timelinePointerAction — pointerup gesture decision (v1.6.2)', () => {
+  // The v1.6.2 seek path fires on pointerup (WebKit never fires `click` on
+  // plain divs for touch, so the old click listener never saw a finger tap).
+  // This helper IS the decision: a press that started in a chip-edge zone is
+  // a trim of that side; otherwise a release within CLICK_SEEK_MAX_DRAG_PX of
+  // the press is a tap → 'seek'; anything else is 'none'.
+  const M = CLICK_SEEK_MAX_DRAG_PX;
+
+  it('small-movement pointerup on the strip → seek (mouse tap and finger tap alike)', () => {
+    expect(timelinePointerAction(100, 100, false, false, M)).toBe('seek'); // dead-still tap
+    expect(timelinePointerAction(100, 100 + M, false, false, M)).toBe('seek'); // drift exactly at threshold
+    expect(timelinePointerAction(103, 100, false, false, M)).toBe('seek'); // leftward slip
+  });
+
+  it('movement beyond the threshold → none (a drag released on the strip never seeks, REG-1)', () => {
+    expect(timelinePointerAction(100, 100 + M + 0.5, false, false, M)).toBe('none');
+    expect(timelinePointerAction(100, 200, false, false, M)).toBe('none');
+    expect(timelinePointerAction(200, 100, false, false, M)).toBe('none');
+  });
+
+  it("press on a chip-edge zone → that side's trim, NEVER a seek (edge tap included)", () => {
+    expect(timelinePointerAction(40, 40, false, true, M)).toBe('trim-end'); // edge tap, no movement
+    expect(timelinePointerAction(20, 20, true, false, M)).toBe('trim-start');
+    expect(timelinePointerAction(40, 80, false, true, M)).toBe('trim-end'); // even a large drag
+    expect(timelinePointerAction(20, 21, true, false, M)).not.toBe('seek');
+  });
+
+  it('edge latch wins over the movement rule in both directions', () => {
+    // A wiggle near an edge stays a trim decision even when it would pass the
+    // movement test, and a far-from-edge release stays a seek decision even
+    // when edges exist elsewhere on the strip.
+    expect(timelinePointerAction(20, 100, true, false, M)).toBe('trim-start');
+    expect(timelinePointerAction(100, 101, false, false, M)).toBe('seek');
+  });
+
+  it('degrades non-finite coordinates/thresholds without NaN (garbage never seeks blindly)', () => {
+    // NaN coordinates degrade to 0 (same convention as timelineTimeAt).
+    expect(timelinePointerAction(Number.NaN, 5, false, false, M)).toBe('seek');
+    expect(timelinePointerAction(0, Number.NaN, false, false, M)).toBe('seek');
+    // A missing/bogus threshold refuses to seek (safe side).
+    expect(timelinePointerAction(0, 5, false, false, Number.NaN)).toBe('none');
+    expect(timelinePointerAction(0, 5, false, false, -1)).toBe('none');
+    // Missing edge flags behave as "not an edge".
+    expect(timelinePointerAction(100, 100, undefined, undefined, M)).toBe('seek');
   });
 });

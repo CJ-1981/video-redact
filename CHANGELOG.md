@@ -127,3 +127,11 @@ Initial release — SPEC-VID-001: client-side video redaction web app (faces & l
 - Plate model URL: the canonical GitHub release asset sends no CORS headers on any redirect hop, making it unfetchable from a browser — switched to a Hugging Face mirror serving the same bytes (size-pinned) with CORS `*`.
 - Export delivery race: the Blob download could be canceled by premature deletion of the OPFS staging temp — temp cleanup now happens strictly after delivery or cancellation.
 - Preview dilation parity: the editor preview did not dilate redaction boxes exactly like the export burn-in — both paths now share the same `redact.pixelateFrame` seam, keeping the preview pixel-truthful.
+
+## [1.6.2] — 2026-10-30
+
+### Fixed
+- Timeline tap-to-seek on touch devices: seek now fires on pointerup (works on iOS Safari/WebKit where tapping a plain div never produces a click event) and the timeline strip sets `touch-action: none` so a tap with finger drift can't be taken over by page scroll (pointercancel). Desktop mouse path unchanged; chip-edge trim unaffected.
+
+### Changed
+- Clear button styled alert red (destructive-action affordance).

@@ -15,7 +15,10 @@
  *                                (v1.4.0 REQ-112: 6 px fine, 14 px touch)
  *        timelineTimeAt()      → seek time for a pointer x on the axis
  *                                (v1.6.1 REG-1)
- *        CLICK_SEEK_MAX_DRAG_PX  click-vs-drag movement threshold (REG-1)
+ *        timelinePointerAction() → pointerdown/up gesture verdict
+ *                                ('trim-end'|'trim-start'|'seek'|'none',
+ *                                v1.6.2: seek fires on pointerup)
+ *        CLICK_SEEK_MAX_DRAG_PX  tap-vs-drag movement threshold (REG-1)
  *        toggleTrack()         → immutable enabled-flip (REQ-014)
  *        trimTrack()           → immutable span trim (SPEC-VID-002 REQ-103)
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
@@ -39,14 +42,17 @@
  * ---------------------------------------------------------------------------
  *
  *   Timeline (#timeline strip, single-lane chips):
- *     click            → onSeek(time under pointer)      — chip, bare rail,
- *                        timecode labels (clamped to the ends). The time maps
- *                        through the CHIPS-layer rect (the axis the chips and
- *                        playhead live in — v1.6.1 REG-1), and a press→release
- *                        pair that MOVED more than CLICK_SEEK_MAX_DRAG_PX is a
- *                        drag, not a click (no seek).
+ *     press + release (pointerup, ≤ CLICK_SEEK_MAX_DRAG_PX movement)
+ *                      → onSeek(time under pointer)      — chip, bare rail,
+ *                        timecode labels (clamped to the ends). v1.6.2: the
+ *                        seek fires on POINTERUP, not `click` — WebKit never
+ *                        fires click on plain divs for touch, so taps were
+ *                        dead on iOS Safari. The decision (tap vs drag vs
+ *                        chip-edge trim) is the PURE timelinePointerAction.
+ *                        The time maps through the CHIPS-layer rect (the axis
+ *                        the chips and playhead live in — v1.6.1 REG-1).
  *     dblclick on chip → hitTestTimeline → onToggle(id, !enabled)
- *                        (the two preceding clicks also seek — harmless)
+ *                        (the two preceding taps also seek — harmless)
  *     drag a chip EDGE (± 6 px zone; ± 14 px on touch — REQ-112)
  *                        → onTrimTrack(id, start, end)
  *                        (chip-edge hit zones from hitTestTimeline; zones
@@ -58,13 +64,11 @@
  *                        maps the pointer through the chips-layer rect. Each
  *                        pointermove re-emits the span → onTrimTrack →
  *                        refresh → the chip length and the row span readout
- *                        update LIVE. The click that follows a trim is
- *                        suppressed EXACTLY ONCE (v1.6.1 REG-1: the
- *                        suppression can no longer latch — a pointercancel
- *                        resets it, and a pointerup without a follow-up click
- *                        expires it — a canceled gesture must never eat the
- *                        NEXT click). Drags from a chip body or bare rail
- *                        never trim and never seek (body is not a scrubber).
+ *                        update LIVE. A release on an edge zone (an edge tap,
+ *                        zero movement) is a trim-side no-op — never a seek.
+ *                        Drags from a chip body or bare rail never trim, and
+ *                        any press→release that moved further than the
+ *                        threshold never seeks (body is not a scrubber).
  *
  *   Track list (#track-list rows, rendered by the editor):
  *     checkbox change  → onToggle(trackId, checked)
@@ -138,8 +142,8 @@ export function effectiveEdgePx(coarse) {
 }
 
 /**
- * Movement (CSS px, squared-distance radius) above which a strip
- * pointerdown/up pair counts as a DRAG, not a click — a drag released on the
+ * Movement (CSS px) along the timeline axis above which a strip
+ * pointerdown/up pair counts as a DRAG, not a tap — a drag released on the
  * strip must never seek (v1.6.1 REG-1: "click-seek on pointerup only if the
  * movement is under the threshold"). Sits between the fine (6 px) and coarse
  * (14 px) edge zones so an edge-grab wiggle never degenerates into a seek.
@@ -169,6 +173,47 @@ export function timelineTimeAt(x, width, durationSec) {
   if (!(width > 0) || !(Number.isFinite(durationSec) && durationSec > 0)) return 0;
   const t = ((Number.isFinite(x) ? x : 0) / width) * durationSec;
   return Math.min(Math.max(t, 0), durationSec);
+}
+
+/**
+ * Verdict for a completed strip pointer gesture (pointerdown → pointerup).
+ * PURE (v1.6.2 seam, unit-tested) — the pointerup handler resolves it:
+ *
+ *   'trim-end' | 'trim-start'  the press latched a chip-edge zone (the edge
+ *                              flags come from the pointerdown hit test) —
+ *                              the trim drag owns the gesture, and an
+ *                              edge TAP (zero movement) is a trim-side
+ *                              no-op, never a seek;
+ *   'seek'                     a tap: the release landed within `maxDrag`
+ *                              of the press along the timeline axis;
+ *   'none'                     anything else (a drag released on the strip
+ *                              must never seek — v1.6.1 REG-1).
+ *
+ * WebKit note (v1.6.2): the seek previously rode the `click` event, which
+ * Safari never fires on plain divs for touch — finger taps on the timeline
+ * were dead on iOS. Moving the decision to pointerup serves both pointer
+ * kinds through this one path (a mouse tap is a pointerdown/up pair too).
+ * Movement is measured along the strip's axis (x) only: with
+ * touch-action: none on #timeline a vertical slip stays part of the tap
+ * gesture (no scroll takeover), so it no longer cancels a seek.
+ *
+ * @param {number} startX Pointerdown client x, CSS px.
+ * @param {number} endX Pointerup client x, CSS px.
+ * @param {boolean} edgeLeft The press landed in a chip's 'start' edge zone.
+ * @param {boolean} edgeRight The press landed in a chip's 'end' edge zone.
+ * @param {number} maxDrag Max release offset that still counts as a tap
+ *     (CLICK_SEEK_MAX_DRAG_PX). Non-finite/negative → 'none' (never seek on
+ *     garbage); non-finite coordinates degrade to 0 (same convention as
+ *     timelineTimeAt).
+ * @returns {'trim-end'|'trim-start'|'seek'|'none'} The gesture verdict.
+ */
+export function timelinePointerAction(startX, endX, edgeLeft, edgeRight, maxDrag) {
+  if (edgeRight) return 'trim-end';
+  if (edgeLeft) return 'trim-start';
+  const dx = Math.abs(
+    (Number.isFinite(endX) ? endX : 0) - (Number.isFinite(startX) ? startX : 0),
+  );
+  return Number.isFinite(maxDrag) && maxDrag >= 0 && dx <= maxDrag ? 'seek' : 'none';
 }
 
 /** Manual-drag rubber band (REQ-109: manual tracks themselves use the
@@ -1150,16 +1195,22 @@ export function mountEditor(els, hooks) {
     }
   }
 
-  // --- Timeline events: click = seek, dblclick on chip = toggle,
-  //     chip-edge drag = trim (REQ-103) --------------------------------------
+  // --- Timeline events: pointerup tap = seek, dblclick on chip = toggle,
+  //     chip-edge drag = trim (REQ-103; v1.6.2: seek on pointerup) ----------
 
   /** Live chip-edge trim drag: which track/edge is moving, and whether the
    * pointer actually moved (a no-move click must not jump-trim the edge). */
   let trimDrag = /** @type {{id: number, zone: 'start'|'end', moved: boolean} | null} */ (null);
-  /** A trim drag swallowed the pointer: the follow-up click must not seek. */
-  let suppressClick = false;
-  /** Strip pointerdown anchor for the click-vs-drag movement check (REG-1). */
-  let downPos = /** @type {{x: number, y: number} | null} */ (null);
+  /**
+   * Strip pointerdown anchor for the pointerup gesture decision (v1.6.2):
+   * press position plus the press-time hit verdict — whether it latched a
+   * chip edge zone (that side's trim owns the gesture) and whether the press
+   * was primary-button (only primary presses ever seeked via click either).
+   */
+  let downPos =
+    /** @type {{x: number, y: number, edgeLeft: boolean, edgeRight: boolean, primary: boolean} | null} */ (
+      null
+    );
   /** Chip element whose inline cursor we overrode for the edge affordance. */
   let hoverChip = /** @type {HTMLElement | null} */ (null);
 
@@ -1178,33 +1229,6 @@ export function mountEditor(els, hooks) {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top, width: rect.width };
   }
 
-  function onTimelineClick(e) {
-    // v1.6.1 REG-1: the suppression is consumed by exactly one click — and it
-    // can never be LEFT armed by a canceled gesture (see onChipsPointerCancel
-    // and endTrimDrag), so a latched flag can no longer eat a later click.
-    if (suppressClick) {
-      suppressClick = false; // the pointerup of a trim drag — not a seek
-      return;
-    }
-    // A press→release that moved is a drag, not a click: never seek (the
-    // browser still fires `click` after a large same-element drag).
-    if (downPos) {
-      const dx = e.clientX - downPos.x;
-      const dy = e.clientY - downPos.y;
-      downPos = null;
-      if (dx * dx + dy * dy > CLICK_SEEK_MAX_DRAG_PX * CLICK_SEEK_MAX_DRAG_PX) return;
-    }
-    // Seek axis = the CHIPS layer (the rect hitTestTimeline maps and the
-    // playhead is positioned in). Mapping through the full strip rect put
-    // every seek off the clicked point by the timecodes + padding width
-    // (field-reported REG-1); points on the labels/padding clamp to the ends.
-    const p = chipsPos(e) ?? timelinePos(e);
-    if (!p) return;
-    const d = duration();
-    if (!(d > 0)) return;
-    callSeek(timelineTimeAt(p.x, p.width, d));
-  }
-
   function onTimelineDblClick(e) {
     const p = timelinePos(e);
     if (!p) return;
@@ -1216,16 +1240,16 @@ export function mountEditor(els, hooks) {
 
   /**
    * Trim drag lifecycle: pointerdown inside a chip's ± edge zone starts it
-   * ('body' falls through to the ordinary click-to-seek), pointermove maps
+   * ('body' falls through to the pointerup tap-to-seek), pointermove maps
    * the pointer to a time and re-emits the span through onTrimTrack (the
    * moving edge is pre-clamped so the min-span floor holds at the drag
-   * layer), pointerup ends it and suppresses the follow-up click. The
-   * handlers are wired to the whole #timeline STRIP (REQ-110): a pointerdown
-   * at a full-span chip's end-edge boundary pixel hit-tests to the strip —
-   * box interiors exclude the right boundary coordinate, so binding to the
-   * chips layer alone would never even see the event. Pointer x is still
-   * mapped through the CHIPS-layer rect (the space the chips are laid out
-   * in); hitTestTimeline's outward zones handle points slightly outside it.
+   * layer), pointerup ends it. The handlers are wired to the whole
+   * #timeline STRIP (REQ-110): a pointerdown at a full-span chip's end-edge
+   * boundary pixel hit-tests to the strip — box interiors exclude the right
+   * boundary coordinate, so binding to the chips layer alone would never
+   * even see the event. Pointer x is still mapped through the CHIPS-layer
+   * rect (the space the chips are laid out in); hitTestTimeline's outward
+   * zones handle points slightly outside it.
    */
   function applyTrimDrag(clientX) {
     if (!trimDrag || !chipsContainer || !chipsContainer.getBoundingClientRect) return;
@@ -1241,16 +1265,30 @@ export function mountEditor(els, hooks) {
   }
 
   function onChipsPointerDown(e) {
-    downPos = { x: e.clientX, y: e.clientY }; // click-vs-drag anchor (REG-1)
-    if (e.button !== 0) return;
+    // Anchor EVERY press (any button, any strip point) for the pointerup
+    // decision; the edge flags need the chips-space hit test below.
+    downPos = {
+      x: e.clientX,
+      y: e.clientY,
+      edgeLeft: false,
+      edgeRight: false,
+      primary: e.button === 0,
+    };
+    if (!downPos.primary) return;
     const p = chipsPos(e);
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
     const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
-    if (!hit || hit.zone === 'body') return; // plain chip click → seek path
+    if (hit) {
+      // Latch the press-time zone: an edge press hands the gesture to the
+      // trim path (timelinePointerAction will never turn it into a seek),
+      // a body press keeps the tap-to-seek path alive.
+      downPos.edgeLeft = hit.zone === 'start';
+      downPos.edgeRight = hit.zone === 'end';
+    }
+    if (!hit || hit.zone === 'body') return; // plain chip / bare rail tap → pointerup-seek path
     trimDrag = { id: hit.track.id, zone: hit.zone, moved: false };
-    suppressClick = true;
     try {
       timeline.setPointerCapture(e.pointerId);
     } catch {
@@ -1279,27 +1317,42 @@ export function mountEditor(els, hooks) {
     } catch {
       /* never captured or already released */
     }
-    // v1.6.1 REG-1: expire the suppression if the follow-up click never
-    // arrives (release off-strip after a failed capture, etc.) — it must not
-    // latch onto the NEXT click. When the click does exist it is dispatched
-    // synchronously after pointerup, i.e. before this timer, so a real trim's
-    // click is still suppressed exactly once.
-    setTimeout(() => {
-      suppressClick = false;
-    }, 0);
   }
 
+  /**
+   * Seek fires here, on POINTERUP (v1.6.2): WebKit never fires `click` on
+   * plain divs for touch, so the old click-based seek was dead for finger
+   * taps on iOS Safari. One decision path now serves both pointer kinds —
+   * a mouse tap is a pointerdown/up pair too, so the click listener is gone
+   * entirely (no double-fire is possible). A press that latched a chip edge
+   * resolves to a trim (an edge tap is a trim-side no-op, NOT a seek), and a
+   * press→release that moved beyond the threshold is a drag (never a seek,
+   * v1.6.1 REG-1).
+   */
   function onChipsPointerUp(e) {
-    endTrimDrag(e);
+    const start = downPos;
+    endTrimDrag(e); // no-op unless this gesture is a chip-edge trim
+    if (!start || !start.primary) return;
+    downPos = null; // exactly one verdict per press→release pair
+    if (timelinePointerAction(start.x, e.clientX, start.edgeLeft, start.edgeRight, CLICK_SEEK_MAX_DRAG_PX) !== 'seek') {
+      return;
+    }
+    // Seek axis = the CHIPS layer (the rect hitTestTimeline maps and the
+    // playhead is positioned in). Mapping through the full strip rect put
+    // every seek off the tapped point by the timecodes + padding width
+    // (field-reported REG-1); points on the labels/padding clamp to the ends.
+    const p = chipsPos(e) ?? timelinePos(e);
+    if (!p) return;
+    const d = duration();
+    if (!(d > 0)) return;
+    callSeek(timelineTimeAt(p.x, p.width, d));
   }
 
   function onChipsPointerCancel() {
-    // v1.6.1 REG-1: a canceled gesture (touch scroll taking over the strip,
-    // palm rejection, …) never produces a click, so BOTH gesture flags must
-    // reset here. Leaving suppressClick armed used to eat the NEXT click —
-    // the field-reported "clicking the timeline no longer seeks".
+    // A canceled gesture (palm rejection, …) must leave NO residue: both the
+    // trim drag and the pointerup anchor reset here, so a canceled press can
+    // never turn a later tap into a trim or a seek (v1.6.1 REG-1).
     trimDrag = null;
-    suppressClick = false;
     downPos = null;
     resetChipCursor();
   }
@@ -1458,11 +1511,13 @@ export function mountEditor(els, hooks) {
     video.addEventListener('loadedmetadata', render);
   }
   if (timeline) {
-    timeline.addEventListener('click', onTimelineClick);
     timeline.addEventListener('dblclick', onTimelineDblClick);
-    // Trim gesture on the whole STRIP (REQ-110): #timeline contains the chips
-    // layer, so every chips event still arrives — plus the boundary pixel of
-    // a full-span chip's end edge, which hit-tests to the strip itself.
+    // Trim gesture + pointerup tap-to-seek on the whole STRIP (REQ-110):
+    // #timeline contains the chips layer, so every chips event still arrives
+    // — plus the boundary pixel of a full-span chip's end edge, which
+    // hit-tests to the strip itself. v1.6.2: there is NO click listener —
+    // the pointerup path handles taps for mouse AND touch (WebKit never
+    // fires click on plain divs for touch).
     timeline.addEventListener('pointerdown', onChipsPointerDown);
     timeline.addEventListener('pointermove', onChipsPointerMove);
     timeline.addEventListener('pointerup', onChipsPointerUp);
@@ -1498,7 +1553,6 @@ export function mountEditor(els, hooks) {
       video.removeEventListener('loadedmetadata', render);
     }
     if (timeline) {
-      timeline.removeEventListener('click', onTimelineClick);
       timeline.removeEventListener('dblclick', onTimelineDblClick);
       timeline.removeEventListener('pointerdown', onChipsPointerDown);
       timeline.removeEventListener('pointermove', onChipsPointerMove);
@@ -1513,7 +1567,6 @@ export function mountEditor(els, hooks) {
     }
     if (disposeManual) disposeManual();
     trimDrag = null;
-    suppressClick = false;
     downPos = null;
     hoverChip = null;
     pendingBox = null;

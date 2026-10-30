@@ -12,7 +12,7 @@ Local, in-browser video redaction: faces and license plates are detected automat
 | --- | --- |
 | ![Review — pixel-truthful preview, transport bar, timeline chips, track list](docs/screenshots/03-review.png) | ![Export — download started, all steps done](docs/screenshots/04-export.png) |
 
-1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.6.0 · built 2026-10-29`).
+1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.10.0 · built <build date>`).
 2. **Capability** — after opening a file, the app reports container/codec/resolution/fps/audio plus decode and encode probes *before* Analyze is offered. Undecodable files are blocked here, with guidance. The Analyze panel carries the detection-sensitivity sliders and a single-frame "Compare thresholds" preview.
 3. **Review** — detected tracks render as colored chips over their redacted span; the preview is pixel-truthful (it draws the exact redaction the export burns in). Toggle any track, switch its style (pixelate/solid), trim its span, scrub with the transport bar, or draw manual regions (`B`).
 4. **Export** — re-encoded H.264/MP4 (VP9/WebM fallback) with redactions burned in; original audio is packet-copied bit-for-bit.
@@ -37,10 +37,10 @@ Then open <http://localhost:8000/dist/index.html>. Or skip the local setup entir
 - **Capability gate** — per-track decode probes (`track.canDecode()`) and export-encode probes (WebCodecs `isConfigSupported`, H.264 level ladder + VP9) are shown as a report; undecodable input is blocked with actionable guidance and no partial processing.
 - **Detection** — YuNet face detection (2023mar, 640×640 letterboxed) and YOLOv9-t-640 end-to-end license-plate detection, running via onnxruntime-web 1.31.1 with a WebGPU → WASM execution-provider ladder. "Dashcam mode" adds a second tiled pass for small/distant faces and plates — tiles split along the dominant axis, so portrait frames tile vertically into stacked rows. Face/plate confidence thresholds are configurable via sensitivity sliders, and a single-frame comparison shows five fixed threshold levels side by side before you commit to a full analysis.
 - **Tracking** — detections are linked into persistent labeled tracks ("Face #1", "Plate #4") with IoU-gated association and a constant-velocity Kalman filter; gaps are interpolated, and every span is padded ±5 frame periods and dilated 15% (7.5% per side) so no unredacted frame of a detected object survives (privacy-critical AC-05).
-- **Review** — timeline chips with draggable edge handles, per-track redact/keep-visible toggles, and a per-track redaction style (pixelate or solid black), plus a visible draggable scrub handle on the timeline (drag it to scrub — reliably with a desktop mouse too — tap the track to jump, arrow-key steppable when focused). The timeline, scrub handle and Space playback are live the moment a video is loaded — before any analysis — and manual regions drawn pre-analysis are preserved through it. Manual regions drawn on the video (`B`) span the whole clip by default and are trimmed via chip edges or per-track start/end inputs. The preview is pixel-truthful (preview and export share the same render code path) with a transport bar (frame stepping, 0.25×–4× speed, audio mute mirrored into the enlarged-preview controls), fullscreen/enlarge mode with auto-hiding overlay controls, and a draggable preview-height handle.
-- **Mobile** — at viewport widths ≤ 820 px the app collapses to a single column with ≥ 40 px touch targets; timeline chip-edge grab zones widen on touch pointers.
+- **Review** — timeline chips with draggable edge handles, per-track redact/keep-visible toggles, and a per-track redaction style (pixelate or solid black), plus a visible draggable scrub handle on the timeline (drag it to scrub — reliably with a desktop mouse too — tap the track to jump, arrow-key steppable when focused). The timeline, scrub handle and Space playback are live the moment a video is loaded — before any analysis — and manual regions drawn pre-analysis are preserved through it. The scrub thumb follows playback even where the frame loop never fires (a `timeupdate` fallback carries it), keyboard shortcuts keep working after clicking any control, and editor mount/tick failures stay isolated (a readable toast — the rest of the app keeps working). Manual regions drawn on the video (`B`) span the whole clip by default and are trimmed via chip edges or per-track start/end inputs. The preview is pixel-truthful (preview and export share the same render code path) with a transport bar (frame stepping, 0.25×–4× speed, audio mute mirrored into the enlarged-preview controls), fullscreen/enlarge mode with auto-hiding overlay controls, and a draggable preview-height handle.
+- **Mobile** — at viewport widths ≤ 820 px the app collapses to a single column with ≥ 40 px touch targets; timeline chip-edge grab zones widen on touch pointers and tap-to-seek fires on pointerup (works on iOS Safari/WebKit).
 - **Export** — every frame is decoded, redactions burned into the pixels, and the video re-encoded (H.264/MP4 primary → software H.264 → VP9/WebM fallback ladder); audio packets are copied without re-encoding (AAC → MP4, Opus/Vorbis → WebM). Output streams to disk-backed storage (OPFS / File System Access) with progress and cancellation.
-- **Clear** — the header "✕ Clear" button aborts any in-flight pass, unloads the video (blob URL, decoder, export temps) and resets every panel to the landing view; the model cache and your preview-stage height survive.
+- **Clear** — the header "✕ Clear" button (styled red as a destructive action) aborts any in-flight pass, unloads the video (blob URL, decoder, export temps) and resets every panel to the landing view; the model cache and your preview-stage height survive.
 
 ## Privacy
 
@@ -84,7 +84,7 @@ npm run dev           # static server on 127.0.0.1:8000 (no-store; serves src/ E
 npm test              # vitest unit suite (node environment)
 npm run test:coverage # v8 coverage; >= 85% line gate on the 8 logic modules
 npm run test:e2e      # Playwright, Chromium, serial workers (needs: npx playwright install chromium)
-npm run build         # tools/inline.mjs -> single-file dist/index.html (~174 KiB)
+npm run build         # tools/inline.mjs -> single-file dist/index.html (~200 KiB)
 npm run lint          # eslint (flat config)
 npm run typecheck     # tsc --noEmit (checkJs over JSDoc types)
 npm run gate          # lint && typecheck && test && build
@@ -97,7 +97,7 @@ npm run gate          # lint && typecheck && test && build
 
 ## Versioning
 
-Current version: **1.6.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.6.0 · built 2026-10-29`) and in the console at boot. Dev mode (unbuilt) shows `dev build (unbuilt)`.
+Current version: **1.10.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.10.0 · built <date>`) and in the console at boot; with `?debug=1` every diagnostic line also carries the running bundle identity. Dev mode (unbuilt) shows `dev build (unbuilt)`.
 
 ## Known limitations (v1)
 

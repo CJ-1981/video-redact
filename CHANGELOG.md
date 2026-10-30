@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-10-30
+
+### Fixed
+- License-plate detection never fired (found with the user's IMG_5019.MOV — plates clearly visible, zero detections): TWO hard-coded layout mismatches. (1) The output finder accepted only 6-wide tensors while the real open-image-models end2end export emits 7-wide rows `[batch_idx, x1, y1, x2, y2, class_id, score]`; (2) the row parser read stride-6 with score at column 5 — which is class_id (always 0) — so every detection was filtered. Parser now supports both 7-wide and legacy 6-wide layouts (score = last column, box = the 4 columns before class_id). Verified end-to-end on real frames: conf 0.887 at the true plate position (probe: tools/debug-plate.mjs, tools/debug-plate-e2e.mjs).
+
 ## [1.10.0] — 2026-10-30
 
 The timeline works BEFORE analysis: the review editor now mounts the moment a video is loaded, not after the first analyze completes.
@@ -21,6 +26,15 @@ The timeline works BEFORE analysis: the review editor now mounts the moment a vi
 - Probe: `node tools/debug-freeze-emulated.mjs` — new FIRST phase P0 (pre-analyze, READY state, no analysis): play → thumb tracks, Space toggles playback, thumb drag 25%→50% scrubs, a manual box drag creates a track, no page errors. FAILS on the v1.9.0 dist (dead UI), PASSES after the fix; P-A/P-B/P-C (post-analyze) unchanged and green, with a new assertion that the P0 manual region survives analysis (merge).
 - Unit: 540 → 553 tests, all passing. New: `mergeManualTracks` (keep+append, collision re-id, re-analyze replaces autos only, degenerate inputs + no mutation), `deriveStep` ready-carries-a-live-editor / export-gated-pre-analyze, mountApp integration (mount at ready with 0 tracks, no remount on analyze completion, manual boxes survive analysis, Space-at-ready with ←/→ still gated), and empty-track editor mounts (render/refresh safe, position driven, scrub + pin, clean teardown) in `timeline.test.js`.
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
+## [1.9.0] — 2026-10-30
+
+### Added
+- Runtime error + gesture diagnostics in the ?debug=1 line: window error/unhandledrejection counters + last message, focused element, editor gesture state (dragging / release-pin remaining ms), editor-side timeupdate counter.
+
+### Fixed
+- Timeline thumb can no longer freeze permanently: the v1.8.0 release pin (a condition latch that could stop clearing once playback moved away from the pinned position) is replaced by a 350 ms time-boxed pin that self-expires unconditionally; drag-state guaranteed to clear on every gesture end path.
+- Editor mount and per-tick exceptions are isolated: keyboard wiring runs before the editor mounts, a mount failure surfaces a readable toast while keyboard stays live, and one bad tick can never stop the loop.
 
 ## [1.8.2] — 2026-10-30
 
@@ -83,6 +97,14 @@ A visible, draggable scrub handle on the timeline — the standard video-player 
 - Probe: `node tools/debug-touch-timeline.mjs` — T1 (plain tap strip 50%), T2 (jitter tap axis 25%), T2c (mouse click guard), T3 (chip-edge touch trim) all still PASS, plus new T-thumb (thumb parked at 25% after a 25% tap; touch-drag 25%→50% lands |t − 0.5·dur| < 0.15 s with currentTime followed mid-drag).
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
 
+## [1.6.2] — 2026-10-30
+
+### Fixed
+- Timeline tap-to-seek on touch devices: seek now fires on pointerup (works on iOS Safari/WebKit where tapping a plain div never produces a click event) and the timeline strip sets `touch-action: none` so a tap with finger drift can't be taken over by page scroll (pointercancel). Desktop mouse path unchanged; chip-edge trim unaffected.
+
+### Changed
+- Clear button styled alert red (destructive-action affordance).
+
 ## [1.6.1] — 2026-10-29
 
 Field-regression fixes in the review workspace: timeline seeking, keyboard transport, and the enlarged-preview layout.
@@ -99,15 +121,6 @@ Field-regression fixes in the review workspace: timeline seeking, keyboard trans
 - Probe: `node tools/debug-regressions.mjs` (combined v1.6.1 field-regression probe on the real dist) — timeline seek accuracy (strip/axis/chip clicks), suppression latch, trim-then-seek, keyboard transport after clicking controls (incl. fullscreen + time-input exclusion), footer/timeline clearance at max stage height on 1280×800 and 390×844.
 - E2E: 6/6 passing in Chromium (coordinator run).
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
-
-## [1.9.0] — 2026-10-30
-
-### Added
-- Runtime error + gesture diagnostics in the ?debug=1 line: window error/unhandledrejection counters + last message, focused element, editor gesture state (dragging / release-pin remaining ms), editor-side timeupdate counter.
-
-### Fixed
-- Timeline thumb can no longer freeze permanently: the v1.8.0 release pin (a condition latch that could stop clearing once playback moved away from the pinned position) is replaced by a 350 ms time-boxed pin that self-expires unconditionally; drag-state guaranteed to clear on every gesture end path.
-- Editor mount and per-tick exceptions are isolated: keyboard wiring runs before the editor mounts, a mount failure surfaces a readable toast while keyboard stays live, and one bad tick can never stop the loop.
 
 ## [1.6.0] — 2026-10-29
 
@@ -213,11 +226,3 @@ Initial release — SPEC-VID-001: client-side video redaction web app (faces & l
 - Plate model URL: the canonical GitHub release asset sends no CORS headers on any redirect hop, making it unfetchable from a browser — switched to a Hugging Face mirror serving the same bytes (size-pinned) with CORS `*`.
 - Export delivery race: the Blob download could be canceled by premature deletion of the OPFS staging temp — temp cleanup now happens strictly after delivery or cancellation.
 - Preview dilation parity: the editor preview did not dilate redaction boxes exactly like the export burn-in — both paths now share the same `redact.pixelateFrame` seam, keeping the preview pixel-truthful.
-
-## [1.6.2] — 2026-10-30
-
-### Fixed
-- Timeline tap-to-seek on touch devices: seek now fires on pointerup (works on iOS Safari/WebKit where tapping a plain div never produces a click event) and the timeline strip sets `touch-action: none` so a tap with finger drift can't be taken over by page scroll (pointercancel). Desktop mouse path unchanged; chip-edge trim unaffected.
-
-### Changed
-- Clear button styled alert red (destructive-action affordance).

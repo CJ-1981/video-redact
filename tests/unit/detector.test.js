@@ -771,3 +771,46 @@ describe('createDetectors — raw accessors (REQ-114: one inference, no decode)'
     detectors.close();
   });
 });
+
+describe('parsePlateRows — real end2end layouts (v1.10.1 plate-fix regression pin)', () => {
+  // Probe-verified layout (tools/debug-plate.mjs, 2026-10-30): the real
+  // open-image-models export emits [N,7] rows
+  // [batch_idx, x1, y1, x2, y2, class_id, score] in 640-letterbox space.
+  const geom = { ratio: 0.333, padX: 140, padY: 0 }; // 1080x1920 portrait frame
+
+  it('[N,7] layout: parses score from the LAST column and box from cols 1-4 (v1.0-v1.9 read class_id as score — always filtered)', () => {
+    // Row matching the probed real detection: plate at model-space
+    // [252, 296, 362, 326], conf 0.89 (user's IMG_5019.MOV frame-6s).
+    const rows = [
+      0, 252.21, 296.13, 361.65, 326.18, 0, 0.89, // over threshold
+      0, 160.73, 127.68, 171.12, 136.62, 0, 0.06, // under threshold — filtered
+      0, 10, 20, 30, 40, 0, 0.5, // over threshold
+    ];
+    const dets = parsePlateRows(rows, [3, 7], geom, { confThreshold: 0.25 });
+    expect(dets).toHaveLength(2);
+    // unletterbox: (v - pad) / ratio
+    expect(dets[0].conf).toBeCloseTo(0.89, 5);
+    expect(dets[0].box.x).toBeCloseTo((252.21 - 140) / 0.333, 1);
+    expect(dets[0].box.y).toBeCloseTo(296.13 / 0.333, 1);
+    expect(dets[0].box.w).toBeCloseTo((361.65 - 252.21) / 0.333, 1);
+    expect(dets[0].cls).toBe('plate');
+    expect(dets[1].conf).toBeCloseTo(0.5, 5);
+  });
+
+  it('[N,6] legacy layout (no batch column) still parses', () => {
+    const rows = [
+      100, 200, 150, 250, 0, 0.9,
+      0, 0, 10, 10, 0, 0.1,
+    ];
+    const dets = parsePlateRows(rows, [2, 6], geom, { confThreshold: 0.25 });
+    expect(dets).toHaveLength(1);
+    expect(dets[0].conf).toBeCloseTo(0.9, 5);
+    expect(dets[0].box.x).toBeCloseTo((100 - 140) / 0.333, 1);
+  });
+
+  it('NaN score never passes the threshold', () => {
+    const rows = [0, 10, 10, 50, 50, 0, Number.NaN];
+    const dets = parsePlateRows(rows, [1, 7], geom, {});
+    expect(dets).toHaveLength(0);
+  });
+});

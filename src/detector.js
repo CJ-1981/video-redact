@@ -383,12 +383,24 @@ export function decodeYunetOutputs(outputs, shapes, t, opts = {}) {
 
 // @MX:ANCHOR plate end-to-end row parse — letterbox inversion; NMS is graph-embedded upstream (no JS NMS here).
 /**
- * Parse plate-model end-to-end rows `[x1, y1, x2, y2, class_id, score]`
- * (letterboxed coords, graph-embedded NMS — no JS NMS here): filter
- * `score ≥ confThreshold`, un-letterbox, convert to Box (design §4.3).
+ * Parse plate-model end-to-end rows, un-letterbox, filter by score (design
+ * §4.3). TWO output layouts are supported (probed against the real model on
+ * 2026-10-30, tools/debug-plate.mjs — the v1.0–v1.9 parser read the WRONG
+ * columns and filtered every detection, so plate detection never fired):
+ *
+ *   • `[N, 7]` — `[batch_idx, x1, y1, x2, y2, class_id, score]` (the actual
+ *     open-image-models end2end export; verified: score column holds 0-1
+ *     confidences, column 0 is a constant batch index, coordinates are
+ *     letterboxed 640-space).
+ *   • `[N, 6]` — `[x1, y1, x2, y2, class_id, score]` (legacy/alternative
+ *     exports without the batch column).
+ *
+ * The layout is chosen by tensor width (7 → batch offset 1, 6 → offset 0);
+ * score is ALWAYS the last column and the four box columns precede
+ * class_id. Filter `score ≥ confThreshold`, un-letterbox, convert to Box.
  *
  * @param {ArrayLike<number>} rows Flat row-major tensor data.
- * @param {number[]} dims Tensor dims `[n, 6]`.
+ * @param {number[]} dims Tensor dims `[n, 6|7]`.
  * @param {{ratio: number, padX: number, padY: number}} t Letterbox transform.
  * @param {{confThreshold?: number}} [opts] Default: 0.25.
  * @returns {Array<{box: import('./types.js').Box, conf: number, classId: number}>}
@@ -397,21 +409,31 @@ export function decodeYunetOutputs(outputs, shapes, t, opts = {}) {
 export function parsePlateRows(rows, dims, t, opts = {}) {
   const confThreshold = opts.confThreshold ?? 0.25;
   const n = dims[0];
-  const stride = dims.length > 1 ? dims[1] : 6;
+  const stride = dims.length > 1 ? dims[1] : 7;
+  // 7-wide rows carry a leading batch index; 6-wide rows do not. The score
+  // is the last column either way; the box occupies the 4 columns before
+  // class_id.
+  const batchOff = stride === 7 ? 1 : 0;
+  const x1Off = batchOff + 0;
+  const y1Off = batchOff + 1;
+  const x2Off = batchOff + 2;
+  const y2Off = batchOff + 3;
+  const clsOff = batchOff + 4;
+  const scoreOff = stride - 1;
   /** @type {Array<{box: import('./types.js').Box, conf: number, classId: number, cls: 'plate'}>} */
   const out = [];
   for (let i = 0; i < n; i++) {
     const o = i * stride;
-    const score = rows[o + 5];
-    if (score < confThreshold) continue;
-    const x1 = rows[o + 0];
-    const y1 = rows[o + 1];
-    const x2 = rows[o + 2];
-    const y2 = rows[o + 3];
+    const score = rows[o + scoreOff];
+    if (!(score >= confThreshold)) continue; // NaN-safe: NaN never passes
+    const x1 = rows[o + x1Off];
+    const y1 = rows[o + y1Off];
+    const x2 = rows[o + x2Off];
+    const y2 = rows[o + y2Off];
     out.push({
       box: unletterboxBox({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 }, t),
       conf: score,
-      classId: rows[o + 4],
+      classId: rows[o + clsOff],
       cls: 'plate',
     });
   }
@@ -645,8 +667,15 @@ export async function createDetectors(opts = {}) {
    * @returns {import('./types.js').Detection[]}
    */
   const decodePlate = (results, geom, opts = {}) => {
+    // Output width 7 = [batch, x1, y1, x2, y2, class, score] (the real
+    // end2end export — probed 2026-10-30); 6 = legacy layout without the
+    // batch column. The v1.0–v1.9 finder hard-matched 6 and REJECTED the
+    // real tensor, so plate detection never fired.
     const plate = Object.values(results).find(
-      (out) => Array.isArray(out.dims) && out.dims.length >= 2 && out.dims[out.dims.length - 1] === 6,
+      (out) =>
+        Array.isArray(out.dims) &&
+        out.dims.length >= 2 &&
+        (out.dims[out.dims.length - 1] === 7 || out.dims[out.dims.length - 1] === 6),
     );
     if (!plate) return [];
     const [rowsN, colsN] = plate.dims.slice(-2);
@@ -679,8 +708,12 @@ export async function createDetectors(opts = {}) {
     detectPlateRaw: async (frame, geom) => {
       const { results, geom: computed } = await runInference(frame, 'plate');
       const effective = geom ?? computed;
+      // Width 7 = the real end2end layout (batch column); 6 = legacy (see decodePlate).
       const plate = Object.values(results).find(
-        (out) => Array.isArray(out.dims) && out.dims.length >= 2 && out.dims[out.dims.length - 1] === 6,
+        (out) =>
+          Array.isArray(out.dims) &&
+          out.dims.length >= 2 &&
+          (out.dims[out.dims.length - 1] === 7 || out.dims[out.dims.length - 1] === 6),
       );
       if (!plate) return { rows: new Float32Array(0), dims: [0, 6], geom: effective };
       const [rowsN, colsN] = plate.dims.slice(-2);

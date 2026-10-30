@@ -5,7 +5,7 @@ Module responsibilities follow `src/` contracts (design.md §3). Codemaps: `code
 ```
 video-redact/
 ├── index.html                  # Dev shell: CSP, pinned importmap (mediabunny 1.63.0, onnxruntime-web 1.31.1), dark editor UI, serve gate
-├── package.json                # Pinned scripts + deps; version 1.6.0 is the build-stamp source of truth
+├── package.json                # Pinned scripts + deps; version 1.10.0 is the build-stamp source of truth
 ├── eslint.config.js            # Flat ESLint config (src + tools)
 ├── tsconfig.json               # tsc --noEmit checkJs over JSDoc types (src, tools; tests/dist excluded)
 ├── vitest.config.js            # Unit suite: node env, tests/unit/**; v8 coverage (>= 85% gate on logic modules)
@@ -19,9 +19,9 @@ video-redact/
 │   ├── tracker.js              # REQ-006/007 + 109: KalmanCV + gated IoU Tracker, interpolation, dense keyframes, span padding, TRACK_COLORS for auto AND manual tracks
 │   ├── redact.js               # REQ-016 + 101/102: dilate, tracksAt, applyPixelation, applySolid, drawOverlay, pixelateFrame (shared preview/export seam, per-track style dispatch)
 │   ├── analyze.js              # REQ-009 + 113/114: runAnalyze loop (VideoSampleSink, face/plate strides, configurable conf, dashcam tiles, progress, cancel), sampleFrameAt single-frame decode
-│   ├── editor.js               # REQ-012..015 + 101/103/108/109/110: pure timeline model (render/hitTest/toggle/trim/style/clock inputs) + thin DOM adapters (mountEditor)
+│   ├── editor.js               # REQ-012..015 + 101/103/108..110: pure timeline model (render/hitTest/toggle/trim/style/clock inputs) + scrub thumb (thumbLeftPct/thumbAriaValue/thumbPinSettled, THUMB_PIN_*) + thin DOM adapters (mountEditor)
 │   ├── exporter.js             # REQ-017..019/021: runExport burn-in via mediabunny Conversion, codec ladder, OPFS staging, temp cleanup
-│   ├── main.js                 # M5 + SPEC-VID-002 wiring: deriveStep state machine (incl. CLEAR), transport/overlay/fullscreen/stage-resize/threshold-compare/clear wiring, formatters, error mapping, version badge, mountApp
+│   ├── main.js                 # M5 + SPEC-VID-002 wiring: deriveStep state machine (incl. CLEAR), transport/overlay/fullscreen/stage-resize/threshold-compare/clear wiring, mute toggle, keyboard gating (shortcutEnabledFor), ?debug=1 diag (parseDebugFlag/formatDiagLine), mountEditorSafe + mountEditorLive + mergeManualTracks, formatters, error mapping, version badge, mountApp
 │   ├── ort-runtime.d.ts        # Ambient module declaration for the lazily imported 'onnxruntime-web'
 │   └── build-env.d.ts          # Ambient declarations for __APP_VERSION__ / __BUILD_DATE__ build stamps
 ├── tools/
@@ -38,9 +38,15 @@ video-redact/
 │   ├── debug-mobile.mjs        # v1.4.0 REQ-111/112 probe: 390x844 viewport, overflow / touch targets / overlay controls
 │   ├── debug-times-overflow.mjs# v1.4.1 element-level audit: track-row time fields inside the row content box
 │   ├── debug-thresholds.mjs    # v1.5.0 REQ-113/114 probe: sensitivity sliders + threshold-compare panels
-│   └── debug-clear.mjs         # v1.6.0 clear-all probe: teardown, generation counter, OPFS temp sweep, input reset
+│   ├── debug-clear.mjs         # v1.6.0 clear-all probe: teardown, generation counter, OPFS temp sweep, input reset
+│   ├── debug-regressions.mjs   # v1.6.1 field-regression probe: timeline seek accuracy, suppression latch, keyboard-after-click, footer/timeline clearance
+│   ├── debug-touch-timeline.mjs# v1.6.2/1.7.0/1.8.1 touch probe: tap-to-seek, chip-edge touch trim, scrub-thumb drag, playback following
+│   ├── debug-thumb-mouse.mjs   # v1.8.0 real-mouse probe: thumb drag/capture/overshoot, optional WITH_MUTE=1 mute checks
+│   ├── debug-diag.mjs          # v1.8.2/1.9.0 ?debug=1 probe: diag line cadence, bundle identity, tu/vfc/error counters
+│   ├── debug-freeze-repro.mjs  # Thumb-freeze field reproduction probe (v1.8.0/1.9.0 pin work)
+│   └── debug-freeze-emulated.mjs # v1.10.0 probe: FIRST-phase pre-analyze (READY) transport/scrub/keyboard/manual-box checks + post-analyze regression phases
 ├── tests/
-│   ├── unit/                   # 14 vitest files, 469 tests (pure logic + seams; node env)
+│   ├── unit/                   # 14 vitest files, 553 tests (pure logic + seams; node env)
 │   ├── e2e/                    # 5 Playwright specs + fixtures.js + geometry.js helpers (6 tests)
 │   └── fixtures/               # detectable.mp4 (real detected face; provenance in fixture.json), synthetic.mp4
 ├── dist/

@@ -1,6 +1,6 @@
 # Codemap: State (main.js stepper state machine)
 
-`main.js` owns the single `AppState` (see `src/types.js`); `deriveStep(step, event)` is the pure reducer (unit-tested in `main-wiring.test.js` — 39 tests, incl. a v1.6.0 group asserting CLEAR from every known step). Unlisted (state, event) pairs are illegal and derive to `null` — the caller ignores them.
+`main.js` owns the single `AppState` (see `src/types.js`); `deriveStep(step, event)` is the pure reducer (unit-tested in `main-wiring.test.js` — incl. a v1.6.0 group asserting CLEAR from every known step and v1.10.0 groups for the ready-carried editor and export-gating pre-analyze). Unlisted (state, event) pairs are illegal and derive to `null` — the caller ignores them.
 
 ## States
 
@@ -9,7 +9,7 @@
 | State | Meaning | Stepper view (`stepperModel`) |
 | --- | --- | --- |
 | `gate` | No file yet / insecure context | current: ① Capability check; done: — |
-| `ready` | File opened, capability report shown, Analyze enabled | current: ② Analyze; done: ① |
+| `ready` | File opened, capability report shown, Analyze enabled — since v1.10.0 the review editor is ALREADY mounted here (`mountEditorLive()` → `mountEditorSafe`, 0 tracks): timeline, scrub thumb, manual boxes and Space playback are live pre-analysis | current: ② Analyze; done: ① |
 | `analyzing` | Detection pass running (progress + cancel) | current: ② Analyze; done: ① |
 | `review` | Tracks available; preview/timeline/editor active | current: ③ Review; done: ①② |
 | `exporting` | Burn-in export running (progress + cancel) | current: ④ Export; done: ①②③ |
@@ -21,6 +21,9 @@
 gate ──FILE_OPENED──▶ ready
 ready ──ANALYZE_START──▶ analyzing        ready ──FILE_OPENED──▶ ready (new file)
 analyzing ──ANALYZE_FINISH──▶ review      analyzing ──ANALYZE_FAIL──▶ ready
+                                          (v1.10.0: ANALYZE_FINISH does NOT remount the
+                                           editor — it merges tracks via mergeManualTracks
+                                           (manual tracks preserved) and editor.refresh()s)
 review ──ANALYZE_START──▶ analyzing       (re-analyze, e.g. dashcam/sensitivity changed)
 review ──EXPORT_START──▶ exporting        review ──FILE_OPENED──▶ ready
 exporting ──EXPORT_DONE──▶ done           exporting ──EXPORT_FAIL──▶ review
@@ -35,6 +38,8 @@ ANY step ──CLEAR──▶ gate        (v1.6.0: the header ✕ Clear button �
 ```
 
 Cancellation convention: analyze cancel is the `ANALYZE_FINISH` success event carrying a cancelled flag (partial tracks kept, AC-03); export cancel surfaces as `EXPORT_FAIL` with a cancelled marker at the callsite. `CLEAR` is independent of both — it aborts them first and lands on `gate`.
+
+Keyboard gating over states (v1.9.0/1.10.0): the doc-level keyboard handler is wired FIRST (before any editor mount, preserved through v1.10.0); `Space` toggles playback at `ready` (a live editor exists) and in review/done; `←`/`→` frame-step is review/done-gated; `EXPORT_START` is rejected at `ready`/`gate`/`analyzing` (`deriveStep` → null), so nothing can ship pre-analysis. A mount failure at any state surfaces a readable toast while the keyboard stays live (`mountEditorSafe`).
 
 ## Data shapes (`AppState`, src/types.js)
 

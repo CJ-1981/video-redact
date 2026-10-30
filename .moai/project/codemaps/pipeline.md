@@ -62,6 +62,13 @@ All boxes/coordinates are display-oriented native pixels after ingest (ADR-9). S
  │   OR per-row clock inputs, REQ-108), setTrackStyle, manualTrack-   │
  │   FromBox (full-span fixed box, palette color) → Track[] (user-    │
  │   final states); transport bar + fullscreen/zoom overlay controls  │
+ │   v1.10.0: the editor mounts AT READY (before any analysis, 0      │
+ │   tracks) — timeline/scrub thumb/Space/manual boxes live pre-      │
+ │   analyze; ANALYZE_FINISH only merges (below) + editor.refresh()   │
+ │   MANUAL-REGION MERGE on analyze completion (v1.10.0):             │
+ │     main.mergeManualTracks(existingTracks, analyzedTracks) —       │
+ │     keeps every source==='manual' track, appends the analyzed      │
+ │     tracks, re-assigns colliding auto ids past every existing id   │
  └──────────┬─────────────────────────────────────────────────────────┘
             ▼  Export (REQ-017..019, cancellable, streamed)
  ┌────────────────────────────────────────────────────────────────────┐

@@ -1157,6 +1157,7 @@ export function mountEditor(els, hooks) {
 
   function tick() {
     frameHandle = 0;
+    if (usingVFC && globalThis.__VR_DIAG) globalThis.__VR_DIAG.vfc += 1; // v1.8.2 diag: rVFC DELIVERED this tick (rAF fallback never counts)
     drawPreview(); // may throw on invariant violation → loop halts (fail-closed)
     updatePlayhead();
     scheduleFrame();

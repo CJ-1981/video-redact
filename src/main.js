@@ -42,6 +42,9 @@
  *                                      selection (v1.6.0 — clearing it lets
  *                                      re-selecting the SAME file re-fire
  *                                      the input's `change` event)
+ *   parseDebugFlag(search)             ?debug=1 support-diagnostics flag (v1.8.2)
+ *   formatDiagLine(snapshot)           diag snapshot → compact JSON line (v1.8.2)
+ *   DIAG_KEY_ORDER                     canonical [diag] line key order (v1.8.2)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -123,6 +126,19 @@ const MODEL_DISPLAY_NAMES = {
  */
 const APP_VERSION = globalThis.__APP_VERSION__ ?? 'dev';
 const BUILD_DATE = globalThis.__BUILD_DATE__ ?? '';
+
+/**
+ * v1.8.2 shared diagnostics counters (`?debug=1` remote support): main.js's
+ * `timeupdate` listener bumps `tu`, the editor's rVFC-DELIVERED tick bumps
+ * `vfc` (see editor.js tick — the rAF fallback never counts); the `?debug=1`
+ * log tick reads and RESETS both every 2 s. The object exists unconditionally
+ * — one `++` per media/frame event is the entire always-on cost; without the
+ * flag nothing ever reads or logs it. Shared via `globalThis.__VR_DIAG` so
+ * editor.js (imported before this module body runs) can reach it at runtime
+ * without an import cycle.
+ * @type {{tu: number, vfc: number}}
+ */
+const VR_DIAG = (globalThis.__VR_DIAG = globalThis.__VR_DIAG ?? { tu: 0, vfc: 0 });
 
 // ---------------------------------------------------------------------------
 // Stepper state machine: gate → ready → analyzing → review → exporting → done
@@ -580,6 +596,68 @@ export function shortcutEnabledFor(focusEl, opts = {}) {
     return true;
   }
   return /** @type {Element} */ (focusEl).closest(selector) == null;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime diagnostics (pure; v1.8.2 ?debug=1 remote support)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical key order of the `[diag]` console line (v1.8.2). formatDiagLine
+ * emits keys in THIS order regardless of the snapshot's construction order,
+ * so two diag lines — or two machines' lines — diff by eye. Identity first
+ * (v/build: WHICH bundle is actually running), then transport state, then
+ * the two signal counters (tu/vfc) that prove whether timeupdate / rVFC
+ * fire at all on the reporting machine.
+ * @type {string[]}
+ */
+export const DIAG_KEY_ORDER = [
+  'v', 'build', 'secure', 'step', 't', 'dur', 'paused', 'rate', 'muted',
+  'tu', 'vfc', 'pin', 'thumbLeft', 'tracks', 'webgpu',
+];
+
+/**
+ * Parse the `?debug=1` support-diagnostics URL flag (v1.8.2). PURE. Accepts
+ * `debug=1` or `debug=true`, position-independent (`?debug=1`, `&debug=1`,
+ * a missing leading '?' is tolerated). Everything else is deterministically
+ * OFF — flag absent, bare `?debug`, `debug=0`/`debug=false`, any case
+ * variation — so support can dictate ONE exact URL with no ambiguity
+ * (duplicate `debug` keys: the first value wins, URLSearchParams semantics).
+ *
+ * @param {string} search `location.search` ('' or '?a=b&debug=1').
+ * @returns {boolean}
+ */
+export function parseDebugFlag(search) {
+  const value = new URLSearchParams(search).get('debug');
+  return value === '1' || value === 'true';
+}
+
+/**
+ * Diagnostics snapshot → the compact one-line JSON body of the `[diag]`
+ * console line (v1.8.2). PURE. Keys emit in DIAG_KEY_ORDER first (unknown /
+ * future keys follow in their own insertion order); numbers are
+ * finite-guarded (NaN/±Infinity → null — an unloaded video's NaN duration
+ * must never break the log line) and `undefined` becomes an explicit null
+ * so the key always survives serialization.
+ *
+ * @param {Record<string, unknown> | null | undefined} [snapshot]
+ * @returns {string} Compact JSON — '{"v":"1.8.2",…}', no spaces.
+ */
+export function formatDiagLine(snapshot) {
+  const src = snapshot && typeof snapshot === 'object' ? snapshot : {};
+  const keys = [
+    ...DIAG_KEY_ORDER,
+    ...Object.keys(src).filter((k) => !DIAG_KEY_ORDER.includes(k)),
+  ];
+  /** @type {Record<string, unknown>} */
+  const ordered = {};
+  for (const key of keys) {
+    if (!Object.hasOwn(src, key)) continue;
+    const value = src[key];
+    if (typeof value === 'number' && !Number.isFinite(value)) ordered[key] = null;
+    else ordered[key] = value === undefined ? null : value;
+  }
+  return JSON.stringify(ordered);
 }
 
 // ---------------------------------------------------------------------------
@@ -1943,6 +2021,82 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     els.video?.addEventListener(ev, updateTransportUi);
   }
   updateTransportUi();
+  // v1.8.2: unconditional timeupdate counter — the ?debug=1 log tick reads
+  // and resets it (one `++` per event is the entire cost when the flag is
+  // absent). Kept separate from updateTransportUi so the diagnostics signal
+  // can never be entangled with UI refresh behavior.
+  els.video?.addEventListener('timeupdate', () => {
+    VR_DIAG.tu += 1;
+  });
+
+  // --- v1.8.2 ?debug=1 runtime diagnostics (remote support) -------------------
+  //
+  // Field problem: on a remote report we cannot see WHICH dist bundle the
+  // browser cached, nor whether its timeupdate / rVFC signals fire at all
+  // (the v1.8.1 thumb-freeze condition). With `?debug=1` in the URL, mountApp
+  // logs ONE compact JSON line to the console every 2 s (10-minute lifetime
+  // cap — a support session must never flood the log). Each line carries:
+  //   v/build — the RUNNING bundle identity (same stamps as the footer
+  //             badge; a stale cached bundle is immediately identifiable),
+  //   tu      — timeupdate events since the previous line (listener above),
+  //   vfc     — rVFC-DELIVERED frame ticks since the previous line (counted
+  //             in editor.js's tick ONLY — the rAF fallback never counts).
+  //             Playing with `vfc: 0` while `tu > 0` proves frame
+  //             presentation is dead on that machine and timeupdate is
+  //             carrying — exactly the split v1.8.1 fixed.
+  //   plus    secure/step/t/dur/paused/rate/muted/pin/thumbLeft/tracks/webgpu.
+  //   `pin` is always null from here: the editor's thumb release pin is
+  //   closure-private and not observable from main.js (honest unknown).
+  // Without the flag: no interval, no logging — zero overhead.
+  // (Runs only past the secure-context gate: a gated page wires nothing.)
+
+  /** Log cadence + lifetime cap for the [diag] line (v1.8.2). */
+  const DIAG_INTERVAL_MS = 2000;
+  const DIAG_MAX_LIFETIME_MS = 10 * 60 * 1000;
+
+  /** One [diag] snapshot → console line; reads + resets the shared counters. */
+  function logDiagTick() {
+    const v = els.video;
+    const view = doc.defaultView;
+    const thumb = typeof doc.getElementById === 'function'
+      ? doc.getElementById('timeline-thumb')
+      : null;
+    const tu = VR_DIAG.tu;
+    const vfc = VR_DIAG.vfc;
+    VR_DIAG.tu = 0;
+    VR_DIAG.vfc = 0;
+    console.info('[diag]', formatDiagLine({
+      v: APP_VERSION,
+      build: BUILD_DATE || null,
+      secure: view ? view.isSecureContext === true : null,
+      step: app.step,
+      t: v ? +Number(v.currentTime).toFixed(2) : null,
+      dur: v ? +Number(v.duration).toFixed(2) : null, // NaN (no metadata) → null
+      paused: v ? v.paused === true : null,
+      rate: v ? +Number(v.playbackRate).toFixed(2) : null,
+      muted: v ? v.muted === true : null,
+      tu,
+      vfc,
+      pin: null,
+      thumbLeft: thumb && thumb.style ? thumb.style.left : null,
+      tracks: app.tracks.length,
+      webgpu: view ? 'gpu' in view.navigator : null,
+    }));
+  }
+
+  if (parseDebugFlag(doc.defaultView?.location?.search ?? '')) {
+    console.info('[diag] enabled (?debug=1) — one line every 2s, auto-stops after 10min');
+    const diagStartedAt = Date.now();
+    /** @type {ReturnType<typeof setInterval>} */
+    const diagTimer = setInterval(() => {
+      if (Date.now() - diagStartedAt >= DIAG_MAX_LIFETIME_MS) {
+        clearInterval(diagTimer);
+        console.info('[diag] stopped — 10-minute lifetime cap');
+        return;
+      }
+      logDiagTick();
+    }, DIAG_INTERVAL_MS);
+  }
 
   // --- Fullscreen / enlarge preview (SPEC-VID-002 REQ-106 / AC-105;
   //     v1.4.0 REQ-111 in-stage overlay controls) --------------------------------

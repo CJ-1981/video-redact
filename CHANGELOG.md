@@ -6,6 +6,21 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-10-30
+
+A runtime self-diagnostic for remote support: `?debug=1` makes the reporting page print its own evidence.
+
+### Added
+
+- `?debug=1` runtime diagnostics: with the flag in the URL, mountApp logs ONE compact JSON line to the console every 2 s (auto-stops after 10 minutes so a support session never floods the log). Each `[diag]` line leads with the RUNNING bundle identity — `v` (shipped version) + `build` (build date), the same stamps the footer badge shows, so a stale cached bundle is immediately identifiable — then the live transport facts the v1.8.1 field report needs: `tu` (timeupdate events since the previous line, counted by main.js's dedicated listener) and `vfc` (rVFC-DELIVERED frame ticks since the previous line, counted inside editor.js's tick only — the rAF fallback never counts), so playing with `vfc: 0` while `tu > 0` proves frame presentation is dead on that machine and `timeupdate` is carrying the position. Also per line: `secure`, `step`, `t`/`dur`, `paused`/`rate`/`muted`, `pin` (the editor's thumb release pin is closure-private → always `null`, honest unknown), `thumbLeft` (live `#timeline-thumb` `style.left`), `tracks`, `webgpu`. The counters ride a shared `globalThis.__VR_DIAG = {tu, vfc}` that always exists — one `++` per event — but WITHOUT the flag there is no interval and no logging (zero overhead).
+- Pure seams, unit-pinned: `parseDebugFlag(search)` (accepts `debug=1` / `debug=true` anywhere in the query; everything else — absent, bare `?debug`, `0`/`false`, case variations — is deterministically OFF) and `formatDiagLine(snapshot)` (compact JSON, canonical `DIAG_KEY_ORDER` key order, finite-guarded numbers, `undefined` → null). New probe `tools/debug-diag.mjs` (desktop viewport, fixture playing).
+
+### Verification
+
+- Unit: 510 → 517 tests, all passing (14 files; new `?debug=1 runtime diagnostics` block in `main-wiring.test.js` — flag acceptance/rejection, canonical key order, finite guards, full-snapshot compact round-trip, non-object tolerance, counter-wiring asserts; `version.test.js` now pins 1.8.2).
+- Probe: `node tools/debug-diag.mjs` — loads `dist/index.html?debug=1` with the detectable fixture: P1 a `[diag]` line every ~2 s (±700 ms), P2 every line carries `v: "1.8.2"`, P3 `tu`/`vfc` keys present, P4 a flagless page logs zero `[diag]` lines.
+- Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
 ## [1.8.1] — 2026-10-30
 
 The scrub thumb follows playback again on browsers where the frame loop never fires.

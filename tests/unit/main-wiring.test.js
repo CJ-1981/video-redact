@@ -7,6 +7,8 @@
  *   - mapExportErrorToMessage    — REQ-021 export stage → recovery message
  *   - describeIngestFailure      — REQ-001/021 ingest failure → message
  *   - renderProbeRows / metaSummaryRows — capability-report view models
+ *   - parseDebugFlag / formatDiagLine / DIAG_KEY_ORDER — ?debug=1 runtime
+ *     diagnostics (v1.8.2 support)
  * mountApp() itself is the thin DOM wiring and stays untested (no DOM here).
  *
  * Importing src/main.js in node must stay side-effect free (the auto-mount
@@ -14,7 +16,12 @@
  * tests/unit/scaffold.test.js imports the same module in the node env.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
 import * as main from '../../src/main.js';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 const CAPS_FIXTURE = {
   secureContext: true,
@@ -509,5 +516,76 @@ describe('shortcutEnabledFor — typing-surface exclusion (v1.6.1 REG-2)', () =>
   it('the export surface grew with the v1.6.1 helpers', () => {
     expect(typeof main.shortcutEnabledFor).toBe('function');
     expect(typeof main.SHORTCUT_TYPING_SELECTOR).toBe('string');
+  });
+});
+
+describe('main-wiring: ?debug=1 runtime diagnostics (v1.8.2)', () => {
+  it('parseDebugFlag accepts debug=1 and debug=true anywhere in the query', () => {
+    expect(main.parseDebugFlag('?debug=1')).toBe(true);
+    expect(main.parseDebugFlag('?v=2&debug=1&x=y')).toBe(true); // &debug=1 mid-query
+    expect(main.parseDebugFlag('?debug=true')).toBe(true);
+    expect(main.parseDebugFlag('?a=b&debug=true')).toBe(true);
+    expect(main.parseDebugFlag('debug=1')).toBe(true); // missing leading '?' tolerated
+  });
+
+  it('parseDebugFlag is deterministically OFF for everything else', () => {
+    expect(main.parseDebugFlag('')).toBe(false);
+    expect(main.parseDebugFlag('?foo=1')).toBe(false);
+    expect(main.parseDebugFlag('?debug')).toBe(false); // bare flag, no value
+    expect(main.parseDebugFlag('?debug=')).toBe(false);
+    expect(main.parseDebugFlag('?debug=0')).toBe(false);
+    expect(main.parseDebugFlag('?debug=false')).toBe(false);
+    expect(main.parseDebugFlag('?debug=on')).toBe(false);
+    expect(main.parseDebugFlag('?Debug=1')).toBe(false); // name is case-sensitive
+    expect(main.parseDebugFlag('?debug=1&debug=0')).toBe(true); // first value wins
+  });
+
+  it('formatDiagLine emits keys in the canonical DIAG_KEY_ORDER', () => {
+    const line = main.formatDiagLine({ vfc: 7, tracks: 0, tu: 3, step: 'ready', v: '1.8.2' });
+    expect(line.startsWith('{"v"')).toBe(true); // identity leads
+    expect(line.indexOf('"tu"')).toBeLessThan(line.indexOf('"vfc"'));
+    expect(line.indexOf('"step"')).toBeLessThan(line.indexOf('"tracks"'));
+    expect(JSON.parse(line)).toEqual({ v: '1.8.2', step: 'ready', tu: 3, vfc: 7, tracks: 0 });
+  });
+
+  it('formatDiagLine finite-guards numbers and keeps undefined keys as null', () => {
+    expect(main.formatDiagLine({ dur: NaN })).toBe('{"dur":null}');
+    expect(main.formatDiagLine({ t: Infinity })).toBe('{"t":null}');
+    expect(main.formatDiagLine({ t: -Infinity })).toBe('{"t":null}');
+    expect(main.formatDiagLine({ pin: undefined })).toBe('{"pin":null}');
+    expect(main.formatDiagLine({ tu: 0, vfc: 0 })).toBe('{"tu":0,"vfc":0}');
+  });
+
+  it('formatDiagLine serializes a full support snapshot compactly (round-trip)', () => {
+    const line = main.formatDiagLine({
+      v: '1.8.2', build: '2026-10-30', secure: true, step: 'review',
+      t: 3.14159, dur: NaN, paused: false, rate: 1, muted: false,
+      tu: 12, vfc: 0, pin: null, thumbLeft: '12.5%', tracks: 2, webgpu: true,
+    });
+    const parsed = JSON.parse(line);
+    expect(parsed).toEqual({
+      v: '1.8.2', build: '2026-10-30', secure: true, step: 'review',
+      // no rounding here — the snapshot's toFixed(2) owns that, this only finite-guards
+      t: 3.14159, dur: null, paused: false, rate: 1, muted: false,
+      tu: 12, vfc: 0, pin: null, thumbLeft: '12.5%', tracks: 2, webgpu: true,
+    });
+    expect(Object.keys(parsed)).toEqual(main.DIAG_KEY_ORDER);
+    expect(line).not.toContain(' '); // compact — stays one console line
+  });
+
+  it('formatDiagLine tolerates missing/non-object input', () => {
+    expect(main.formatDiagLine()).toBe('{}');
+    expect(main.formatDiagLine(null)).toBe('{}');
+    expect(main.formatDiagLine(42)).toBe('{}');
+  });
+
+  it('diag counters are wired: main shares __VR_DIAG, editor bumps vfc in its rVFC tick', () => {
+    const mainSrc = readFileSync(join(ROOT, 'src', 'main.js'), 'utf8');
+    // Shared counter object exists (module scope) + a timeupdate bump in mountApp.
+    expect(mainSrc).toContain('globalThis.__VR_DIAG = globalThis.__VR_DIAG ?? { tu: 0, vfc: 0 }');
+    expect(mainSrc).toContain("addEventListener('timeupdate'");
+    // editor.js counts ONLY the rVFC-delivered tick (guarded by usingVFC).
+    const editorSrc = readFileSync(join(ROOT, 'src', 'editor.js'), 'utf8');
+    expect(editorSrc).toMatch(/if \(usingVFC && globalThis\.__VR_DIAG\) globalThis\.__VR_DIAG\.vfc \+= 1/);
   });
 });

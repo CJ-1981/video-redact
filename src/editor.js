@@ -22,6 +22,8 @@
  *        thumbLeftPct()        → scrub-thumb left % (v1.7.0; shares the
  *                                playhead clamp-and-scale rule)
  *        thumbAriaValue()      → scrub-thumb aria-valuenow seconds (v1.7.0)
+ *        thumbPinSettled()     → has the post-release seek landed? (v1.8.0
+ *                                release-pin seam; THUMB_PIN_EPSILON_S)
  *        toggleTrack()         → immutable enabled-flip (REQ-014)
  *        trimTrack()           → immutable span trim (SPEC-VID-002 REQ-103)
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
@@ -83,6 +85,19 @@
  *                          until release). A still tap on the thumb lands the
  *                          endpoint seek at the playhead's own position — a
  *                          harmless no-op.
+ *                          v1.8.0 desktop-mouse fixes: (a) RELEASE PIN — the
+ *                          drag guard drops before the endpoint seek completes,
+ *                          so the frame loop re-derived the thumb from stale
+ *                          video.currentTime and yanked it back until `seeked`
+ *                          (visible seek latency on desktop = "the handle
+ *                          doesn't stick"); the release point is now pinned
+ *                          (thumbPinSettled seam) until the seek lands. (b)
+ *                          CAPTURE NET — the move/up/cancel handlers are
+ *                          mirrored on window for the gesture's lifetime and
+ *                          drive the same drag whenever the event target is
+ *                          NOT the thumb, so a silently failed
+ *                          setPointerCapture (cursor outruns the 20 px thumb
+ *                          → drag dies mid-gesture) can no longer kill a drag.
  *     keyboard on the focused thumb (role="slider")
  *                        → ←/→ ±1 frame via hooks.onStepFrame (the SAME step
  *                          math as the transport buttons; falls back to ±1/30 s
@@ -263,6 +278,45 @@ export function thumbLeftPct(currentTimeSec, durationSec) {
  */
 export function thumbAriaValue(currentTimeSec) {
   return Number.isFinite(currentTimeSec) && currentTimeSec > 0 ? currentTimeSec : 0;
+}
+
+/**
+ * How close the displayed time must be to the thumb's pinned release point
+ * before the release pin self-clears, seconds (v1.8.0). A seek is "landed"
+ * when currentTime reaches its target; the epsilon absorbs float drift and
+ * the last sub-frame of decoder rounding. Well under one rendered frame at
+ * any sane fps, and far below any real seek latency.
+ * @type {number}
+ */
+export const THUMB_PIN_EPSILON_S = 0.05;
+
+/**
+ * Has the post-release endpoint seek reached the pinned release point?
+ * PURE (v1.8.0 seam, unit-tested) — updateThumb consults this to decide
+ * whether a stale displayTime may move the thumb again.
+ *
+ * v1.8.0 desktop fix: onThumbPointerUp releases the drag guard BEFORE the
+ * endpoint seek completes, so until `seeked` fires, video.currentTime still
+ * reads the PRE-drag position — every frame loop tick re-derived the thumb
+ * from it and visibly yanked the handle back off the release point (read as
+ * "the scrub handle doesn't work" on desktop browsers/hardware where seek
+ * latency is tens-to-hundreds of ms; headless seeks are sub-frame and hid
+ * it). While the release pin is set, updateThumb steps aside until EITHER
+ * `seeked` fires OR this predicate reports the displayed time has caught up.
+ *
+ * Non-finite input is "settled" — there is nothing meaningful to guard, and
+ * a pin that can never be compared must never wedge the thumb.
+ *
+ * @param {number} pinnedTimeSec The release-point time the thumb was left at.
+ * @param {number} currentTimeSec The currently displayed time.
+ * @returns {boolean} True when the seek has landed (or can't be compared).
+ */
+export function thumbPinSettled(pinnedTimeSec, currentTimeSec) {
+  if (!Number.isFinite(pinnedTimeSec) || !Number.isFinite(currentTimeSec)) return true;
+  // Millisecond precision: binary-float noise (2 − 0.05 → 0.05000…004) must
+  // never flip the verdict at the epsilon boundary.
+  const driftMs = Math.round(Math.abs(currentTimeSec - pinnedTimeSec) * 1000);
+  return driftMs <= THUMB_PIN_EPSILON_S * 1000;
 }
 
 /** Manual-drag rubber band (REQ-109: manual tracks themselves use the
@@ -1043,13 +1097,22 @@ export function mountEditor(els, hooks) {
 
   /**
    * v1.7.0 scrub handle: position the thumb at the playhead and keep its ARIA
-   * values honest (aria-valuemax = duration, aria-valuenow = seconds). A live
-   * thumb DRAG owns the position instead — updateThumb steps aside while
-   * `thumbDrag` is set so a lagging seek (video.currentTime updates
-   * asynchronously) can never drag the thumb back off the pointer.
+   * values honest (aria-valuemax = duration, aria-valuenow = seconds). Two
+   * states step aside so a stale displayTime can never fight the gesture
+   * (v1.8.0 desktop fix — see thumbPinSettled):
+   *   - while `thumbDrag` is live: a lagging seek (video.currentTime updates
+   *     asynchronously) must never drag the thumb back off the pointer;
+   *   - while the RELEASE PIN is set (endpoint seek still in flight after
+   *     pointerup): the pre-seek position must never yank the thumb back off
+   *     the release point. Cleared by `seeked`, by the settled check here, or
+   *     by the next gesture/destroy.
    */
   function updateThumb() {
     if (!thumb || thumbDrag) return;
+    if (thumbPin !== null) {
+      if (!thumbPinSettled(thumbPin, displayTime())) return;
+      thumbPin = null;
+    }
     const d = duration();
     const t = displayTime();
     if (thumb.style) thumb.style.left = `${thumbLeftPct(t, d)}%`;
@@ -1085,8 +1148,10 @@ export function mountEditor(els, hooks) {
     scheduleFrame();
   }
 
-  /** Immediate redraw after a scrub (vfc may not fire while paused). */
+  /** Immediate redraw after a scrub (vfc may not fire while paused). The seek
+   * that just landed also retires the thumb's release pin (v1.8.0). */
   function onSeeked() {
+    clearThumbPin();
     drawPreview();
     updatePlayhead();
   }
@@ -1488,6 +1553,63 @@ export function mountEditor(els, hooks) {
 
   /** Live thumb drag: the captured pointerId and the last throttled-seek stamp. */
   let thumbDrag = /** @type {{pointerId: number, lastSeekAt: number} | null} */ (null);
+  /**
+   * v1.8.0 release pin: the endpoint time the thumb was left at on pointerup,
+   * guarded until the seek lands (`seeked` or thumbPinSettled). null = no pin.
+   * Without it the drag guard dropped BEFORE the endpoint seek completed and
+   * the frame loop yanked the thumb back to the stale pre-seek position —
+   * on desktop browsers/hardware with real seek latency that visibly reads as
+   * "dragging the scrub handle doesn't stick".
+   * @type {number | null}
+   */
+  let thumbPin = null;
+
+  /** Drop the release pin (seek landed / gesture restarted / teardown). */
+  function clearThumbPin() {
+    thumbPin = null;
+  }
+
+  /**
+   * v1.8.0 capture net. The drag handlers above live on the thumb itself, so
+   * they only receive events while `setPointerCapture` retargets the gesture.
+   * If capture silently fails (engine/driver edge cases), the first move that
+   * outruns the 20px thumb targets ANOTHER element and the drag dies
+   * mid-gesture — the classic desktop "the scrub handle doesn't work" — and a
+   * release outside #timeline would leak `thumbDrag` (the thumb freezes
+   * forever, since updateThumb steps aside while it is set). While a drag is
+   * live, window-level capture listeners mirror every event whose target is
+   * NOT the thumb into the same handlers; with a healthy capture the target
+   * IS the thumb and these are exact no-ops (the thumb handler owns it).
+   * @param {PointerEvent} e
+   * @returns {boolean} True when the net consumed the event.
+   */
+  function thumbNetHandle(e) {
+    if (!thumbDrag || e.pointerId !== thumbDrag.pointerId || e.target === thumb) return false;
+    return true;
+  }
+  function onWindowThumbMove(e) {
+    if (thumbNetHandle(e)) onThumbPointerMove(e);
+  }
+  function onWindowThumbUp(e) {
+    if (thumbNetHandle(e)) onThumbPointerUp(e);
+  }
+  function onWindowThumbCancel(e) {
+    if (thumbNetHandle(e)) onThumbPointerCancel(e);
+  }
+  /** Attach/detach the gesture-scoped capture net. Guarded for the node test
+   * environment (no window — destroy() must stay inert there too). */
+  function armThumbNet() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    window.addEventListener('pointermove', onWindowThumbMove, true);
+    window.addEventListener('pointerup', onWindowThumbUp, true);
+    window.addEventListener('pointercancel', onWindowThumbCancel, true);
+  }
+  function disarmThumbNet() {
+    if (typeof window === 'undefined' || typeof window.removeEventListener !== 'function') return;
+    window.removeEventListener('pointermove', onWindowThumbMove, true);
+    window.removeEventListener('pointerup', onWindowThumbUp, true);
+    window.removeEventListener('pointercancel', onWindowThumbCancel, true);
+  }
 
   /**
    * Map a client x to a seek time through the CHIPS-layer rect — the SAME axis
@@ -1518,11 +1640,13 @@ export function mountEditor(els, hooks) {
     // latch, no tap-to-seek anchor — the thumb owns scrubbing only.
     e.stopPropagation();
     thumbDrag = { pointerId: e.pointerId, lastSeekAt: 0 };
+    clearThumbPin(); // a fresh gesture owns the position again
     try {
       thumb.setPointerCapture(e.pointerId);
     } catch {
       /* detached thumb — capture is best-effort */
     }
+    armThumbNet(); // v1.8.0: gesture-scoped fallback if capture silently fails
     e.preventDefault();
   }
 
@@ -1540,6 +1664,7 @@ export function mountEditor(els, hooks) {
   function onThumbPointerUp(e) {
     if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
     thumbDrag = null;
+    disarmThumbNet();
     try {
       thumb.releasePointerCapture(e.pointerId);
     } catch {
@@ -1550,6 +1675,11 @@ export function mountEditor(els, hooks) {
     const t = thumbTimeAtClientX(e.clientX);
     if (t != null) {
       moveThumbToTime(t);
+      // v1.8.0 release pin: the drag guard is already gone, so pin the
+      // release point until the seek lands — otherwise the frame loop
+      // re-derives the thumb from the stale pre-seek currentTime and yanks
+      // it back (updateThumb consults the pin via thumbPinSettled).
+      thumbPin = t;
       callSeek(t);
     }
   }
@@ -1558,6 +1688,8 @@ export function mountEditor(els, hooks) {
     if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
     // Canceled gesture (palm rejection, …): no endpoint seek, no residue.
     thumbDrag = null;
+    disarmThumbNet();
+    clearThumbPin();
     try {
       thumb.releasePointerCapture(e.pointerId);
     } catch {
@@ -1791,6 +1923,8 @@ export function mountEditor(els, hooks) {
     downPos = null;
     hoverChip = null;
     thumbDrag = null;
+    disarmThumbNet(); // v1.8.0: a drag torn down mid-gesture leaves no net
+    clearThumbPin();
     pendingBox = null;
     if (ctx && canvas && canvas.width > 0) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);

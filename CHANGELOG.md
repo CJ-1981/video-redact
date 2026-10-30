@@ -6,6 +6,24 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-30
+
+Desktop-mouse reliability for the timeline scrub handle, plus an audio mute button on both control bars.
+
+### Fixed
+
+- Timeline thumb drag on desktop browsers. Field report: "timeline scrub handle doesn't work on PC browser." A new real-mouse probe (`tools/debug-thumb-mouse.mjs` — the v1.6.2 touch probe only ever exercised TOUCHSCREEN input) could not reproduce a dead drag in desktop Chromium or Firefox, but instrumentation exposed two latent desktop-only failure modes with exactly the reported symptom, both now fixed in `editor.js`: (1) **release race** — `pointerup` dropped the drag guard BEFORE the endpoint seek completed, so the frame loop re-derived the thumb from the stale pre-seek `video.currentTime` and visibly yanked the handle back off the release point until `seeked` landed (sub-frame in headless probes; tens-to-hundreds of ms on real desktop hardware — read as "the handle doesn't stick"). The release point is now PINNED (`thumbPin`, pure seam `thumbPinSettled` + `THUMB_PIN_EPSILON_S`) until the seek lands: cleared by `seeked`, by the settled check, by the next gesture, or by teardown. (2) **silent pointer-capture failure** — the drag lived only on the thumb's own `pointermove`/`pointerup` listeners, so a capture that failed without throwing killed the drag the moment the cursor outran the 20 px thumb (and a release outside `#timeline` leaked the drag state, freezing the thumb forever). A gesture-scoped window-level capture net (armed on `pointerdown`, disarmed on end/teardown) now mirrors move/up/cancel into the same handlers whenever the event target is not the thumb — an exact no-op while capture works.
+
+### Added
+
+- Audio mute button (v1.8.0): `#mute-button` in the transport bar and `#ov-mute` in the fullscreen/zoom overlay bar (after the step cluster, before speed — all existing E2E selectors untouched). Both route through the shared `toggleMute()`, which flips `video.muted` (NEVER volume — the user's volume level survives muting), and their glyph (`muteGlyph`: 🔊/🔇), `aria-pressed` and Mute/Unmute labels are driven by the `volumechange` event so EXTERNAL mute flips (browser media controls) stay in sync too. New files load unmuted and `clearAll` resets to unmuted (teardown checklist).
+
+### Verification
+
+- Unit: 501 → 507 tests, all passing (14 files; `thumbPinSettled` release-pin tests in `timeline.test.js`, `muteGlyph` + mute markup contract in `mobile-ui.test.js`).
+- Probe: `node tools/debug-thumb-mouse.mjs` — real-mouse drag checks M0 (click-to-park), M1 (paused drag, mid-drag follow + release + no snap-back), M1b (grab at the half-clipped 0% position), M1c (fast fling — capture sentinel), M1d (overshoot clamps), M1e (30 px vertical drift off the thumb — capture sentinel), M1f (immediate re-grab), M2 (drag while PLAYING) — PASS on Chromium; BROWSER=firefox run PASS; WITH_MUTE=1 adds M3 (mute toggle, external-flip mirror, clearAll reset on both bars).
+- Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
 ## [1.7.0] — 2026-10-30
 
 A visible, draggable scrub handle on the timeline — the standard video-player slider pattern, replacing tap-only scrubbing (field reports: timeline taps still don't register on some real devices).

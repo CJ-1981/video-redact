@@ -788,6 +788,10 @@
             <button id="ov-back" type="button" title="Step one frame back" aria-label="Frame back">⏪</button>
             <button id="ov-play" type="button" title="Play (space)" aria-label="Play">▶</button>
             <button id="ov-fwd" type="button" title="Step one frame forward" aria-label="Frame forward">⏩</button>
+            <!-- v1.8.0: audio mute (mirrors #mute-button; same shared toggleMute).
+                 AFTER the step cluster, BEFORE speed — keeps the back/play/fwd
+                 trio contiguous and every ov-* E2E selector intact. -->
+            <button id="ov-mute" type="button" title="Mute" aria-label="Mute" aria-pressed="false">🔊</button>
             <select id="ov-speed" aria-label="Playback speed">
               <option value="0.25">0.25×</option>
               <option value="0.5">0.5×</option>
@@ -806,6 +810,10 @@
           <button id="transport-back" type="button" title="Step one frame back" aria-label="Frame back">⏪</button>
           <button id="transport-play" type="button" title="Play (space)" aria-label="Play">▶</button>
           <button id="transport-fwd" type="button" title="Step one frame forward" aria-label="Frame forward">⏩</button>
+          <!-- v1.8.0: audio mute — video.muted toggle (never volume=0), glyph
+               + aria-pressed driven by volumechange so external mute state
+               stays in sync. After the step cluster, before speed. -->
+          <button id="mute-button" type="button" title="Mute" aria-label="Mute" aria-pressed="false">🔊</button>
           <select id="transport-speed" aria-label="Playback speed">
             <option value="0.25">0.25×</option>
             <option value="0.5">0.5×</option>

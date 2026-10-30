@@ -22,6 +22,7 @@
  *   nextStageHeight(px, delta, vh)     handle keyboard step (v1.2.0)
  *   dragStageHeight(startY, y, startH) pointer-drag height (v1.3.1 direction fix)
  *   transportGlyph(paused)             play/pause glyph (v1.4.0 REQ-111)
+ *   muteGlyph(muted)                   mute/unmute glyph (v1.8.0)
  *   normalizePlaybackRate(rate)        rate clamp to finite > 0 (v1.4.0)
  *   SHORTCUT_TYPING_SELECTOR / shortcutEnabledFor(focusEl, opts)
  *                                      doc-shortcut focus gating — typing
@@ -397,6 +398,19 @@ export function transportGlyph(paused) {
 }
 
 /**
+ * Mute glyph for a muted state — '🔇' when muted, '🔊' when audible (v1.8.0).
+ * PURE; shared by the bottom transport bar (#mute-button) and the fullscreen
+ * overlay bar (#ov-mute) so both always show the same glyph for the same
+ * state.
+ *
+ * @param {boolean} muted Whether the video is muted.
+ * @returns {'🔇'|'🔊'}
+ */
+export function muteGlyph(muted) {
+  return muted ? '🔇' : '🔊';
+}
+
+/**
  * Clamp a playback-rate input to a usable rate: finite and > 0, else 1×.
  * PURE; every speed selector (bottom bar + overlay) routes through this so
  * a bogus value can never silence or stall playback.
@@ -750,9 +764,12 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     transportFwd: /** @type {HTMLButtonElement | null} */ ($('transport-fwd')),
     transportSpeed: /** @type {HTMLSelectElement | null} */ ($('transport-speed')),
     transportTime: $('transport-time'),
+    // v1.8.0: audio mute on BOTH bars (transport + fullscreen overlay).
+    muteButton: /** @type {HTMLButtonElement | null} */ ($('mute-button')),
     ovBack: /** @type {HTMLButtonElement | null} */ ($('ov-back')),
     ovPlay: /** @type {HTMLButtonElement | null} */ ($('ov-play')),
     ovFwd: /** @type {HTMLButtonElement | null} */ ($('ov-fwd')),
+    ovMute: /** @type {HTMLButtonElement | null} */ ($('ov-mute')),
     ovSpeed: /** @type {HTMLSelectElement | null} */ ($('ov-speed')),
     ovExit: /** @type {HTMLButtonElement | null} */ ($('ov-exit')),
     timelineCurrent: $('timeline-current'),
@@ -1130,8 +1147,13 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     app.tracks = [];
     app.manualNextId = 1;
     // Transport resets with the fresh file (load() resets playbackRate; the
-    // selectors must follow or they would show a rate the video no longer has).
-    if (els.video) els.video.playbackRate = 1;
+    // selectors must follow or they would show a rate the video no longer
+    // has). v1.8.0: a fresh file also starts UNMUTED — mute is a per-video
+    // listening choice, never a property of the next one.
+    if (els.video) {
+      els.video.playbackRate = 1;
+      els.video.muted = false;
+    }
     syncSpeedSelects();
     resetAnalyzeUi();
     resetExportUi();
@@ -1310,6 +1332,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       v.removeAttribute('src');
       v.load(); // empty resource selection: frees the decoder, resets time
       v.playbackRate = 1;
+      v.muted = false; // v1.8.0 teardown checklist: reset to unmuted
     }
     // mediabunny Input.dispose() cancels in-flight reads and closes decoders
     // (verified in node_modules/mediabunny .d.ts); degrade to a plain
@@ -1777,10 +1800,11 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
 
   /**
    * One transport UI refresh from the live video element: play/pause glyph
-   * swap (BOTH bars — bottom transport + fullscreen overlay), speed selectors
-   * synced to the live rate, and current/total timecode (formatClock). Driven
-   * by the media events below so it works in EVERY workspace state (editor
-   * mount is review-only).
+   * swap (BOTH bars — bottom transport + fullscreen overlay), mute glyph +
+   * aria-pressed (BOTH bars, v1.8.0), speed selectors synced to the live
+   * rate, and current/total timecode (formatClock). Driven by the media
+   * events below so it works in EVERY workspace state (editor mount is
+   * review-only) — `volumechange` keeps external mute flips in sync too.
    */
   function updateTransportUi() {
     const v = els.video;
@@ -1797,6 +1821,7 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       els.ovPlay.title = paused ? 'Play (space)' : 'Pause (space)';
       els.ovPlay.setAttribute('aria-label', paused ? 'Play' : 'Pause');
     }
+    syncMuteButtons(v.muted === true);
     syncSpeedSelects();
     const cur = Number.isFinite(v.currentTime) ? v.currentTime : 0;
     const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
@@ -1813,6 +1838,24 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     if (els.ovSpeed) els.ovSpeed.value = value;
   }
 
+  /**
+   * Keep BOTH mute buttons on the given muted state (v1.8.0): muteGlyph,
+   * aria-pressed (a toggle button's contract) and the title/aria-label swap.
+   * Called from updateTransportUi (which `volumechange` drives) so an
+   * EXTERNAL mute flip (browser media keys/controls) is mirrored too.
+   * @param {boolean} muted
+   */
+  function syncMuteButtons(muted) {
+    const glyph = muteGlyph(muted);
+    for (const btn of [els.muteButton, els.ovMute]) {
+      if (!btn) continue;
+      btn.textContent = glyph;
+      btn.title = muted ? 'Unmute' : 'Mute';
+      btn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+      btn.setAttribute('aria-pressed', String(muted));
+    }
+  }
+
   /** Shared play/pause toggle — bottom bar, overlay bar and Space all call it. */
   function togglePlay() {
     const v = els.video;
@@ -1823,6 +1866,17 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     } else {
       v.pause();
     }
+  }
+
+  /**
+   * Shared audio mute toggle (v1.8.0) — bottom bar, overlay bar. Flips
+   * `video.muted` (NEVER volume: muting must not destroy the user's volume),
+   * and the glyph/aria sync rides the `volumechange` event this fires.
+   */
+  function toggleMute() {
+    const v = els.video;
+    if (!v) return;
+    v.muted = !v.muted;
   }
 
   /** Frame-step ±1 source frame (same semantics as the ← / → shortcuts). */
@@ -1852,10 +1906,13 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   els.transportFwd?.addEventListener('click', () => stepFrame(1));
   els.transportPlay?.addEventListener('click', () => togglePlay());
   els.transportSpeed?.addEventListener('change', () => setSpeed(els.transportSpeed?.value));
+  // v1.8.0: both mute buttons route through the SAME shared toggle.
+  els.muteButton?.addEventListener('click', () => toggleMute());
   // v1.4.0 REQ-111: the overlay bar calls the SAME shared actions.
   els.ovBack?.addEventListener('click', () => stepFrame(-1));
   els.ovFwd?.addEventListener('click', () => stepFrame(1));
   els.ovPlay?.addEventListener('click', () => togglePlay());
+  els.ovMute?.addEventListener('click', () => toggleMute());
   els.ovSpeed?.addEventListener('change', () => setSpeed(els.ovSpeed?.value));
   els.ovExit?.addEventListener('click', () => exitPreview());
   // v1.6.1 REG-2: every transport/overlay control releases focus after pointer
@@ -1865,13 +1922,17 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   blurAfterClick(els.transportBack);
   blurAfterClick(els.transportFwd);
   blurAfterClick(els.transportPlay);
+  blurAfterClick(els.muteButton);
   blurAfterChange(els.transportSpeed);
   blurAfterClick(els.ovBack);
   blurAfterClick(els.ovFwd);
   blurAfterClick(els.ovPlay);
+  blurAfterClick(els.ovMute);
   blurAfterChange(els.ovSpeed);
   blurAfterClick(els.ovExit);
-  for (const ev of ['play', 'pause', 'timeupdate', 'seeked', 'loadedmetadata', 'durationchange', 'ratechange']) {
+  // volumechange (v1.8.0): drives the mute glyph/aria sync so external mute
+  // flips (browser media controls) and toggleMute() both stay in sync.
+  for (const ev of ['play', 'pause', 'timeupdate', 'seeked', 'loadedmetadata', 'durationchange', 'ratechange', 'volumechange']) {
     els.video?.addEventListener(ev, updateTransportUi);
   }
   updateTransportUi();

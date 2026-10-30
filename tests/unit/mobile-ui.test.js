@@ -17,6 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 import {
   OVERLAY_HIDE_MS,
   transportGlyph,
+  muteGlyph,
   normalizePlaybackRate,
 } from '../../src/main.js';
 
@@ -75,6 +76,22 @@ describe('REQ-111: .stage-overlay-controls lives inside #preview-stage', () => {
     }
   });
 
+  it('v1.8.0 mute buttons exist on BOTH bars (transport + overlay), unmuted default', () => {
+    for (const id of ['mute-button', 'ov-mute']) {
+      const at = HTML.indexOf(`id="${id}"`);
+      expect(at).toBeGreaterThan(-1);
+      // Toggle-button contract ships in the markup: aria-pressed starts false
+      // and the audible glyph is the initial text.
+      const tag = HTML.slice(HTML.lastIndexOf('<button', at), HTML.indexOf('</button>', at));
+      expect(tag).toContain('aria-pressed="false"');
+      expect(tag).toContain('🔊');
+      expect(tag).toContain('type="button"');
+    }
+    // Each bar owns exactly one of them (ids are unique).
+    expect(HTML.split('id="mute-button"').length - 1).toBe(1);
+    expect(HTML.split('id="ov-mute"').length - 1).toBe(1);
+  });
+
   it('overlay speed select offers the same options as the bottom bar', () => {
     const speeds = ['value="0.25"', 'value="0.5"', 'value="1"', 'value="2"', 'value="4"'];
     const bar = HTML.slice(HTML.indexOf('id="transport-speed"'), HTML.indexOf('</select>', HTML.indexOf('id="transport-speed"')));
@@ -115,6 +132,16 @@ describe('REQ-111: overlay pure helpers (src/main.js)', () => {
   it('transportGlyph: ▶ when paused, ⏸ while playing (both bars share it)', () => {
     expect(transportGlyph(true)).toBe('▶');
     expect(transportGlyph(false)).toBe('⏸');
+  });
+
+  it('muteGlyph: 🔇 when muted, 🔊 when audible (v1.8.0, both bars share it)', () => {
+    expect(muteGlyph(true)).toBe('🔇');
+    expect(muteGlyph(false)).toBe('🔊');
+    // Non-boolean truthiness maps by the same rule (muted is read as `=== true`
+    // at the call site; the pure helper normalizes the same way).
+    expect(muteGlyph(1)).toBe('🔇');
+    expect(muteGlyph(0)).toBe('🔊');
+    expect(muteGlyph(undefined)).toBe('🔊');
   });
 
   it('normalizePlaybackRate clamps to finite > 0 with a 1× fallback', () => {

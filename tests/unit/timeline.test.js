@@ -19,6 +19,8 @@ import {
   timelineTimeAt,
   thumbLeftPct,
   thumbAriaValue,
+  thumbPinSettled,
+  THUMB_PIN_EPSILON_S,
   renderTimeline,
   hitTestTimeline,
   toggleTrack,
@@ -635,7 +637,7 @@ describe('DOM adapter guards (node environment, no faked DOM)', () => {
     for (const fn of [
       renderTimeline, hitTestTimeline, toggleTrack, trimTrack, setTrackStyle,
       tracksAtForView, manualTrackFromBox, parseClockInput, formatSpan,
-      scaleTracksToCanvas, thumbLeftPct, thumbAriaValue,
+      scaleTracksToCanvas, thumbLeftPct, thumbAriaValue, thumbPinSettled,
       beginManualBox, mountEditor,
     ]) {
       expect(typeof fn).toBe('function');
@@ -1014,6 +1016,44 @@ describe('scrub-thumb drag → time mapping (v1.7.0; existing timelineTimeAt sea
     expect(timelineTimeAt(-40, w, dur)).toBe(0); // dragged left of the axis
     expect(timelineTimeAt(w + 40, w, dur)).toBe(dur); // dragged right of the axis
     expect(thumbLeftPct(timelineTimeAt(w + 40, w, dur), dur)).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Release pin (v1.8.0): the pointerup endpoint seek lands asynchronously; the
+// pin keeps stale frames from yanking the thumb back off the release point.
+// ---------------------------------------------------------------------------
+
+describe('thumbPinSettled (v1.8.0 scrub-handle release-pin guard)', () => {
+  it('settles when the displayed time has reached the pinned release point', () => {
+    expect(thumbPinSettled(1.5, 1.5)).toBe(true); // exact landing
+    expect(thumbPinSettled(1.5, 1.53)).toBe(true); // within the epsilon
+    expect(thumbPinSettled(1.5, 1.549)).toBe(true);
+  });
+
+  it('stays armed while the displayed time is still the stale pre-seek position', () => {
+    // The defect this guards: after release at 1.5s, currentTime still reads
+    // the pre-drag 0.76s until `seeked` — the pin must hold the thumb there.
+    expect(thumbPinSettled(1.5, 0.76)).toBe(false);
+    expect(thumbPinSettled(1.5, 1.4)).toBe(false); // near but not landed
+  });
+
+  it('epsilon covers float drift around the pinned time in both directions', () => {
+    const eps = THUMB_PIN_EPSILON_S;
+    expect(thumbPinSettled(2, 2 + eps)).toBe(true);
+    expect(thumbPinSettled(2, 2 - eps)).toBe(true);
+    // Clearly beyond the epsilon (margins far outside float dust): still armed.
+    expect(thumbPinSettled(2, 2 + eps * 1.5)).toBe(false);
+    expect(thumbPinSettled(2, 2 - eps * 1.5)).toBe(false);
+    // Half the epsilon: comfortably settled.
+    expect(thumbPinSettled(2, 2 + eps * 0.5)).toBe(true);
+  });
+
+  it('non-finite input settles (nothing meaningful to guard; the pin never wedges)', () => {
+    expect(thumbPinSettled(Number.NaN, 1.5)).toBe(true);
+    expect(thumbPinSettled(1.5, Number.NaN)).toBe(true);
+    expect(thumbPinSettled(Number.POSITIVE_INFINITY, 1.5)).toBe(true);
+    expect(thumbPinSettled(1.5, Number.POSITIVE_INFINITY)).toBe(true);
   });
 });
 

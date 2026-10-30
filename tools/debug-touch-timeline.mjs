@@ -24,6 +24,11 @@
  *       serve both pointer kinds).
  *   T3  chip-edge TOUCH drag (finger down on the widest chip's end edge, drag
  *       left 60 px, up) → chip width shrinks ≥ 20 px (trim still works).
+ *   T-thumb v1.7.0 scrub handle: after parking the playhead at the axis's 25%
+ *       (a plain tap — the thumb must follow), TOUCH-drag the thumb
+ *       (touchStart on the disc, touchMove to the axis's 50%, touchEnd) →
+ *       |t − 0.5·dur| < 0.15 s after release AND currentTime followed the
+ *       move (mid-drag sample: t past the 25% grab point, thumb x advanced).
  *   T4  Clear button is styled alert red (text rgb(229,72,77), alert-tinted
  *       border, white-on-red :hover rule in the CSSOM) AND remains
  *       functional: clicking it returns the stepper to the gate step.
@@ -261,6 +266,74 @@ try {
     before.chipW - afterW >= 20,
     `chip#${before.id} before=${before.chipW.toFixed(0)}px after=${afterW.toFixed(0)}px ` +
       `[pointerdown=${g3.dpd} up=${g3.dpu} CANCEL=${g3.dpc}]`,
+  );
+
+  // ======================================================================
+  // T-thumb — v1.7.0 scrub handle: touchscreen DRAG 25% → 50% (+ follow)
+  // ======================================================================
+  console.log('--- T-thumb: touchscreen drag of #timeline-thumb 25% → 50% ---');
+  await toZero();
+  await page.waitForTimeout(250);
+  // Fresh axis rect (T1–T3 may have scrolled/toasted; never trust stale coords).
+  const axisNow = await page.evaluate(() => {
+    const b = document.getElementById('timeline-track').getBoundingClientRect();
+    return { left: b.left, top: b.top, w: b.width, h: b.height };
+  });
+  // Park the playhead at the axis's 25% with a plain tap — this also exercises
+  // the playhead-follow rendering (the thumb must ride along to 25%).
+  await page.touchscreen.tap(axisNow.left + axisNow.w * 0.25, axisNow.top + axisNow.h / 2);
+  await page.waitForTimeout(400);
+  const thumbAt25 = await page.evaluate(() => {
+    const el = document.getElementById('timeline-thumb');
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return { cx: b.left + b.width / 2, cy: b.top + b.height / 2 };
+  });
+  const parkedT = await page.evaluate(() => document.getElementById('preview-video').currentTime);
+  const parkedOk =
+    !!thumbAt25 &&
+    Math.abs(parkedT - 0.25 * dur) < 0.15 &&
+    Math.abs(thumbAt25.cx - (axisNow.left + axisNow.w * 0.25)) < 8;
+  check(
+    'T-thumba thumb rides the playhead: parked at axis 25% after a 25% tap',
+    !!parkedOk,
+    `t=${parkedT.toFixed(3)} expected ${(0.25 * dur).toFixed(3)} thumbCx=${
+      thumbAt25 ? thumbAt25.cx.toFixed(1) : 'MISSING'
+    } expected ${(axisNow.left + axisNow.w * 0.25).toFixed(1)}`,
+  );
+  // TOUCH-drag the thumb from 25% to the axis's 50% through 4 move steps,
+  // sampling the video time + thumb x mid-drag (the throttled live scrub).
+  const targetX = axisNow.left + axisNow.w * 0.5;
+  let midSample = null;
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: thumbAt25.cx, y: thumbAt25.cy }],
+  });
+  await page.waitForTimeout(60);
+  for (let i = 1; i <= 4; i++) {
+    const x = thumbAt25.cx + ((targetX - thumbAt25.cx) * i) / 4;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: thumbAt25.cy }] });
+    await page.waitForTimeout(60);
+    if (i === 2) {
+      midSample = await page.evaluate(() => ({
+        t: document.getElementById('preview-video').currentTime,
+        thumbCx: (() => {
+          const b = document.getElementById('timeline-thumb').getBoundingClientRect();
+          return b.left + b.width / 2;
+        })(),
+      }));
+    }
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForTimeout(500);
+  const tThumb = await page.evaluate(() => document.getElementById('preview-video').currentTime);
+  const followedOk =
+    !!midSample && midSample.t > 0.25 * dur && midSample.thumbCx > thumbAt25.cx + 4;
+  check(
+    'T-thumbb touch-drag 25%→50% seeks to 0.5·dur (time followed mid-drag)',
+    Math.abs(tThumb - 0.5 * dur) < 0.15 && !!followedOk,
+    `t=${tThumb.toFixed(3)} expected ${(0.5 * dur).toFixed(3)} ` +
+      `mid={t=${midSample ? midSample.t.toFixed(3) : 'n/a'}, thumbCx=${midSample ? midSample.thumbCx.toFixed(0) : 'n/a'}}`,
   );
 
   // ======================================================================

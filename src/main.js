@@ -1515,6 +1515,9 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
           app.tracks = setTrackStyle(app.tracks, trackId, style);
           refreshTrackUi();
         },
+        // v1.7.0: the timeline scrub thumb's ←/→ keys step ±1 frame through the
+        // SAME stepFrame math as the transport buttons (source fps via app.meta).
+        onStepFrame: stepFrame,
       },
     );
     refreshTrackUi();

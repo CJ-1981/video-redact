@@ -430,6 +430,43 @@
       box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
       pointer-events: none;
     }
+    /* v1.7.0: draggable scrub handle — the standard video-player slider thumb.
+       Rides the playhead position inside #timeline-track (position: relative;
+       overflow: hidden clips the disc's outer half at the 0%/100% extremes,
+       exactly where the playhead sits too). touch-action: none keeps the drag
+       ours (no scroll takeover), z-index keeps it above chips + playhead. */
+    #timeline-thumb {
+      position: absolute;
+      top: 50%;
+      left: 0%;
+      width: 20px;
+      height: 20px;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--bg-panel);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+      z-index: 3;
+      cursor: grab;
+      touch-action: none;
+    }
+    #timeline-thumb:active { cursor: grabbing; }
+    /* Fat-finger extension: the visible disc is 20px; the hit target is a
+       36×28px invisible rect centered on it (pointer events on ::after target
+       the thumb element itself). */
+    #timeline-thumb::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 36px;
+      height: 28px;
+      transform: translate(-50%, -50%);
+    }
+    #timeline-thumb:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
 
     /* ── Right rail ── */
     #right-rail {
@@ -784,6 +821,7 @@
           <div id="timeline-track">
             <div id="track-chips"></div>
             <div id="playhead"></div>
+            <div id="timeline-thumb" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="Drag to scrub · arrows step when focused"></div>
           </div>
           <span id="timeline-duration" class="num timecode">0:00.0</span>
         </section>

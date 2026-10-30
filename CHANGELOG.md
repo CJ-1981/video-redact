@@ -6,6 +6,20 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-30
+
+A visible, draggable scrub handle on the timeline — the standard video-player slider pattern, replacing tap-only scrubbing (field reports: timeline taps still don't register on some real devices).
+
+### Added
+
+- Draggable scrub handle (v1.7.0): a 20 px round thumb (`#timeline-thumb`, accent color, panel border, soft shadow) rides the playhead position inside the timeline track and moves with it during playback. Grabbing it and dragging scrubs the video live — pointer drags map through the chips-layer rect (`timelineTimeAt`) and seek throttled at ~50 ms with an exact endpoint seek on release — and the strip's existing interactions are untouched: tapping the track still jumps, chip-edge trims still trim, chip dblclick still toggles (the thumb's `pointerdown` stops propagation, so the strip gesture block never owns a thumb press). The hit target is extended to 36×28 px for fingers (`::after`), `touch-action: none` keeps the drag out of page scroll, and the focused thumb is keyboard-steppable (`role="slider"` with honest `aria-valuemin/max/now` in seconds; ←/→ step ±1 frame through the same `stepFrame` math as the transport buttons via the new `onStepFrame` mount hook, ↑/↓ ±1 s). Pure seams: `thumbLeftPct` (shares the playhead clamp-and-scale mapping) and `thumbAriaValue`.
+
+### Verification
+
+- Unit: 491 → 501 tests, all passing (14 files; 10 new scrub-thumb tests in `timeline.test.js`).
+- Probe: `node tools/debug-touch-timeline.mjs` — T1 (plain tap strip 50%), T2 (jitter tap axis 25%), T2c (mouse click guard), T3 (chip-edge touch trim) all still PASS, plus new T-thumb (thumb parked at 25% after a 25% tap; touch-drag 25%→50% lands |t − 0.5·dur| < 0.15 s with currentTime followed mid-drag).
+- Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
 ## [1.6.1] — 2026-10-29
 
 Field-regression fixes in the review workspace: timeline seeking, keyboard transport, and the enlarged-preview layout.

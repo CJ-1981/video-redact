@@ -19,6 +19,9 @@
  *                                ('trim-end'|'trim-start'|'seek'|'none',
  *                                v1.6.2: seek fires on pointerup)
  *        CLICK_SEEK_MAX_DRAG_PX  tap-vs-drag movement threshold (REG-1)
+ *        thumbLeftPct()        → scrub-thumb left % (v1.7.0; shares the
+ *                                playhead clamp-and-scale rule)
+ *        thumbAriaValue()      → scrub-thumb aria-valuenow seconds (v1.7.0)
  *        toggleTrack()         → immutable enabled-flip (REQ-014)
  *        trimTrack()           → immutable span trim (SPEC-VID-002 REQ-103)
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
@@ -69,6 +72,23 @@
  *                        Drags from a chip body or bare rail never trim, and
  *                        any press→release that moved further than the
  *                        threshold never seeks (body is not a scrubber).
+ *     drag the scrub THUMB (#timeline-thumb, v1.7.0)
+ *                        → LIVE scrub: pointerdown stopPropagation (the strip
+ *                          gesture above never owns a thumb press — no trim
+ *                          latch, no tap verdict), setPointerCapture, then
+ *                          pointermove maps the pointer through the CHIPS-layer
+ *                          rect (timelineTimeAt) and seeks THROTTLED (~50 ms);
+ *                          pointerup fires the exact endpoint seek. The thumb
+ *                          follows the pointer live (the drag owns its position
+ *                          until release). A still tap on the thumb lands the
+ *                          endpoint seek at the playhead's own position — a
+ *                          harmless no-op.
+ *     keyboard on the focused thumb (role="slider")
+ *                        → ←/→ ±1 frame via hooks.onStepFrame (the SAME step
+ *                          math as the transport buttons; falls back to ±1/30 s
+ *                          seek when the hook is absent), ↑/↓ ±1 s via onSeek;
+ *                          handled keys stopPropagation so the doc-level
+ *                          shortcuts never double-fire, unhandled keys bubble.
  *
  *   Track list (#track-list rows, rendered by the editor):
  *     checkbox change  → onToggle(trackId, checked)
@@ -214,6 +234,35 @@ export function timelinePointerAction(startX, endX, edgeLeft, edgeRight, maxDrag
     (Number.isFinite(endX) ? endX : 0) - (Number.isFinite(startX) ? startX : 0),
   );
   return Number.isFinite(maxDrag) && maxDrag >= 0 && dx <= maxDrag ? 'seek' : 'none';
+}
+
+/**
+ * Left position (%) of the scrub-handle thumb for a playback time (v1.7.0).
+ * PURE — the same clamp-and-scale rule renderTimeline applies to the playhead,
+ * extracted so the thumb, the playhead line and the drag/keyboard paths share
+ * ONE mapping (thumbLeftPct(t, d) === renderTimeline([], d, t).playheadPct).
+ *
+ * @param {number} currentTimeSec Playback time, seconds.
+ * @param {number} durationSec Video duration (> 0; 0/NaN → 0%).
+ * @returns {number} 0–100, clamped; non-finite time or duration → 0.
+ */
+export function thumbLeftPct(currentTimeSec, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (dur <= 0 || !Number.isFinite(currentTimeSec)) return 0;
+  const clamped = Math.min(Math.max(currentTimeSec, 0), dur);
+  return (clamped / dur) * 100;
+}
+
+/**
+ * The scrub-handle thumb's `aria-valuenow` (v1.7.0): the playback position in
+ * seconds. PURE — non-finite or negative input degrades to 0 (an ARIA value
+ * must never be NaN; the upper bound lives in the separate `aria-valuemax`).
+ *
+ * @param {number} currentTimeSec Playback time, seconds.
+ * @returns {number} Finite, non-negative seconds.
+ */
+export function thumbAriaValue(currentTimeSec) {
+  return Number.isFinite(currentTimeSec) && currentTimeSec > 0 ? currentTimeSec : 0;
 }
 
 /** Manual-drag rubber band (REQ-109: manual tracks themselves use the
@@ -807,14 +856,20 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  * the loop halts rather than ever showing an unredacted frame).
  *
  * @param {object} els Stable DOM handles:
- *     `{ video, overlayCanvas, timeline, chipsContainer, playhead, trackList }`.
- *     The timeline strip is the trim-handle gesture surface (REQ-103, and
- *     REQ-110: bound to #timeline so boundary-edge grabs on full-span chips
- *     are seen); pointer geometry still maps through the chips layer.
+ *     `{ video, overlayCanvas, timeline, chipsContainer, playhead, trackList,
+ *        timelineThumb? }`. The timeline strip is the trim-handle gesture
+ *     surface (REQ-103, and REQ-110: bound to #timeline so boundary-edge grabs
+ *     on full-span chips are seen); pointer geometry still maps through the
+ *     chips layer. `timelineThumb` (v1.7.0) is the draggable scrub handle —
+ *     when omitted it is resolved as the static `#timeline-thumb` inside the
+ *     strip markup.
  * @param {object} hooks Callbacks into main.js:
  *     `{ onToggle(trackId, enabled), onSeek(t), onManualBox(box, t),
  *        onTrimTrack(trackId, start, end), onSetStyle(trackId, style),
- *        getState() → { tracks, currentTime } }`.
+ *        onStepFrame(dir)?, getState() → { tracks, currentTime } }`.
+ *     `onStepFrame` (v1.7.0, optional) is the thumb's ±1-frame keyboard path —
+ *     the host's own step math (source fps); without it the thumb falls back
+ *     to a ±1/30 s seek.
  * @returns {{destroy: () => void, refresh: () => void,
  *            redraw: () => void}} `destroy` tears all listeners/frames down
  *     on step change; `refresh` re-renders chips + track list + playhead from
@@ -830,6 +885,14 @@ export function mountEditor(els, hooks) {
   const timeline = (els && els.timeline) || null;
   const chipsContainer = (els && els.chipsContainer) || null;
   const playhead = (els && els.playhead) || null;
+  // v1.7.0 scrub handle: an explicit handle wins; otherwise the static
+  // #timeline-thumb inside the strip markup (main.js passes neither — the
+  // thumb ships as part of #timeline-track in index.html).
+  const thumb =
+    (els && els.timelineThumb) ||
+    (timeline && typeof timeline.querySelector === 'function'
+      ? timeline.querySelector('#timeline-thumb')
+      : null);
   const trackList = (els && els.trackList) || null;
 
   const hasHook = (name) => !!(hooks && typeof hooks[name] === 'function');
@@ -853,6 +916,13 @@ export function mountEditor(els, hooks) {
   };
   const callSetStyle = (id, style) => {
     if (hasHook('onSetStyle')) hooks.onSetStyle(id, style);
+  };
+  // v1.7.0 thumb keyboard: ±1 frame rides the host's step math (main.js's
+  // stepFrame knows the source fps via app.meta); without the hook a ~30 fps
+  // seek fallback keeps the thumb steppable in partial-hook embeds.
+  const callStepFrame = (dir) => {
+    if (hasHook('onStepFrame')) hooks.onStepFrame(dir);
+    else callSeek(clampTime(displayTime() + dir / 30));
   };
 
   const doc = typeof document !== 'undefined' ? document : null;
@@ -971,7 +1041,26 @@ export function mountEditor(els, hooks) {
     drawPending();
   }
 
+  /**
+   * v1.7.0 scrub handle: position the thumb at the playhead and keep its ARIA
+   * values honest (aria-valuemax = duration, aria-valuenow = seconds). A live
+   * thumb DRAG owns the position instead — updateThumb steps aside while
+   * `thumbDrag` is set so a lagging seek (video.currentTime updates
+   * asynchronously) can never drag the thumb back off the pointer.
+   */
+  function updateThumb() {
+    if (!thumb || thumbDrag) return;
+    const d = duration();
+    const t = displayTime();
+    if (thumb.style) thumb.style.left = `${thumbLeftPct(t, d)}%`;
+    if (typeof thumb.setAttribute === 'function') {
+      thumb.setAttribute('aria-valuemax', String(Number.isFinite(d) && d > 0 ? d : 0));
+      thumb.setAttribute('aria-valuenow', String(thumbAriaValue(t)));
+    }
+  }
+
   function updatePlayhead() {
+    updateThumb();
     if (!playhead) return;
     const d = duration();
     const pct = d > 0 ? (clampTime(displayTime()) / d) * 100 : 0;
@@ -1044,6 +1133,7 @@ export function mountEditor(els, hooks) {
     }
 
     if (playhead) playhead.style.left = `${vm.playheadPct}%`;
+    updateThumb();
 
     if (trackList) renderTrackList(state.tracks, d);
   }
@@ -1390,6 +1480,121 @@ export function mountEditor(els, hooks) {
     }
   }
 
+  // --- Scrub thumb: drag = throttled scrub seeks + exact endpoint (v1.7.0) --
+
+  /** Min interval between live scrub seeks during a thumb drag, ms. The exact
+   * endpoint seek rides pointerup, so throttling never loses the destination. */
+  const THUMB_SEEK_THROTTLE_MS = 50;
+
+  /** Live thumb drag: the captured pointerId and the last throttled-seek stamp. */
+  let thumbDrag = /** @type {{pointerId: number, lastSeekAt: number} | null} */ (null);
+
+  /**
+   * Map a client x to a seek time through the CHIPS-layer rect — the SAME axis
+   * the strip tap-seek, hitTestTimeline, the playhead and the thumb itself are
+   * positioned in (v1.6.1 REG-1 rule: never map through the full strip rect).
+   * @param {number} clientX Pointer client x, CSS px.
+   * @returns {number | null} Seconds, or null when geometry/duration is unusable.
+   */
+  function thumbTimeAtClientX(clientX) {
+    const rect =
+      chipsContainer && typeof chipsContainer.getBoundingClientRect === 'function'
+        ? chipsContainer.getBoundingClientRect()
+        : null;
+    const d = duration();
+    if (!rect || !(rect.width > 0) || !(d > 0)) return null;
+    return timelineTimeAt(clientX - rect.left, rect.width, d);
+  }
+
+  /** Move the thumb visually (no seek) — the drag's live follow. */
+  function moveThumbToTime(t) {
+    if (!thumb || !thumb.style) return;
+    thumb.style.left = `${thumbLeftPct(t, duration())}%`;
+  }
+
+  function onThumbPointerDown(e) {
+    if (e.button !== 0) return;
+    // The strip gesture block must never see this press: no chip-edge trim
+    // latch, no tap-to-seek anchor — the thumb owns scrubbing only.
+    e.stopPropagation();
+    thumbDrag = { pointerId: e.pointerId, lastSeekAt: 0 };
+    try {
+      thumb.setPointerCapture(e.pointerId);
+    } catch {
+      /* detached thumb — capture is best-effort */
+    }
+    e.preventDefault();
+  }
+
+  function onThumbPointerMove(e) {
+    if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
+    const t = thumbTimeAtClientX(e.clientX);
+    if (t == null) return;
+    moveThumbToTime(t); // live follow regardless of seek throttling
+    const now = Date.now();
+    if (now - thumbDrag.lastSeekAt < THUMB_SEEK_THROTTLE_MS) return;
+    thumbDrag.lastSeekAt = now;
+    callSeek(t);
+  }
+
+  function onThumbPointerUp(e) {
+    if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
+    thumbDrag = null;
+    try {
+      thumb.releasePointerCapture(e.pointerId);
+    } catch {
+      /* never captured or already released */
+    }
+    // Exact endpoint seek (never throttled). A still tap on the thumb lands at
+    // the pointer's own mapped time — the playhead's position, a no-op re-seek.
+    const t = thumbTimeAtClientX(e.clientX);
+    if (t != null) {
+      moveThumbToTime(t);
+      callSeek(t);
+    }
+  }
+
+  function onThumbPointerCancel(e) {
+    if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
+    // Canceled gesture (palm rejection, …): no endpoint seek, no residue.
+    thumbDrag = null;
+    try {
+      thumb.releasePointerCapture(e.pointerId);
+    } catch {
+      /* never captured */
+    }
+  }
+
+  /**
+   * Keyboard on the focused thumb: ←/→ ±1 frame via hooks.onStepFrame (the
+   * SAME step math as the transport buttons), ↑/↓ ±1 s via onSeek. Handled
+   * keys stopPropagation so the doc-level shortcuts never double-fire; every
+   * other key (Space, Tab, …) bubbles untouched.
+   */
+  function onThumbKeyDown(e) {
+    let handled = true;
+    switch (e.key) {
+      case 'ArrowLeft':
+        callStepFrame(-1);
+        break;
+      case 'ArrowRight':
+        callStepFrame(1);
+        break;
+      case 'ArrowUp':
+        callSeek(clampTime(displayTime() + 1));
+        break;
+      case 'ArrowDown':
+        callSeek(clampTime(displayTime() - 1));
+        break;
+      default:
+        handled = false;
+    }
+    if (handled) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
+
   // --- Track list events: checkbox = toggle, select = style, span inputs =
   //     trim (REQ-108), row = seek -------------------------------------------
 
@@ -1524,6 +1729,15 @@ export function mountEditor(els, hooks) {
     timeline.addEventListener('pointercancel', onChipsPointerCancel);
     timeline.addEventListener('pointerleave', onChipsPointerLeave);
   }
+  if (thumb && typeof thumb.addEventListener === 'function') {
+    // v1.7.0 scrub handle: its own gesture surface. pointerdown stops
+    // propagation, so the strip listeners above never see a thumb press.
+    thumb.addEventListener('pointerdown', onThumbPointerDown);
+    thumb.addEventListener('pointermove', onThumbPointerMove);
+    thumb.addEventListener('pointerup', onThumbPointerUp);
+    thumb.addEventListener('pointercancel', onThumbPointerCancel);
+    thumb.addEventListener('keydown', onThumbKeyDown);
+  }
   if (trackList) {
     trackList.addEventListener('change', onListChange);
     trackList.addEventListener('keydown', onListKeyDown);
@@ -1560,6 +1774,13 @@ export function mountEditor(els, hooks) {
       timeline.removeEventListener('pointercancel', onChipsPointerCancel);
       timeline.removeEventListener('pointerleave', onChipsPointerLeave);
     }
+    if (thumb && typeof thumb.removeEventListener === 'function') {
+      thumb.removeEventListener('pointerdown', onThumbPointerDown);
+      thumb.removeEventListener('pointermove', onThumbPointerMove);
+      thumb.removeEventListener('pointerup', onThumbPointerUp);
+      thumb.removeEventListener('pointercancel', onThumbPointerCancel);
+      thumb.removeEventListener('keydown', onThumbKeyDown);
+    }
     if (trackList) {
       trackList.removeEventListener('change', onListChange);
       trackList.removeEventListener('keydown', onListKeyDown);
@@ -1569,6 +1790,7 @@ export function mountEditor(els, hooks) {
     trimDrag = null;
     downPos = null;
     hoverChip = null;
+    thumbDrag = null;
     pendingBox = null;
     if (ctx && canvas && canvas.width > 0) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);

@@ -17,6 +17,8 @@ import {
   effectiveEdgePx,
   timelinePointerAction,
   timelineTimeAt,
+  thumbLeftPct,
+  thumbAriaValue,
   renderTimeline,
   hitTestTimeline,
   toggleTrack,
@@ -633,7 +635,8 @@ describe('DOM adapter guards (node environment, no faked DOM)', () => {
     for (const fn of [
       renderTimeline, hitTestTimeline, toggleTrack, trimTrack, setTrackStyle,
       tracksAtForView, manualTrackFromBox, parseClockInput, formatSpan,
-      scaleTracksToCanvas, beginManualBox, mountEditor,
+      scaleTracksToCanvas, thumbLeftPct, thumbAriaValue,
+      beginManualBox, mountEditor,
     ]) {
       expect(typeof fn).toBe('function');
     }
@@ -936,5 +939,138 @@ describe('timelinePointerAction — pointerup gesture decision (v1.6.2)', () => 
     expect(timelinePointerAction(0, 5, false, false, -1)).toBe('none');
     // Missing edge flags behave as "not an edge".
     expect(timelinePointerAction(100, 100, undefined, undefined, M)).toBe('seek');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scrub thumb (v1.7.0): thumbLeftPct / thumbAriaValue + the drag→time mapping
+// ---------------------------------------------------------------------------
+
+describe('thumbLeftPct (v1.7.0 scrub-handle position)', () => {
+  it('maps a playback time to its percentage of the duration', () => {
+    expect(thumbLeftPct(2.5, 10)).toBeCloseTo(25, 10);
+    expect(thumbLeftPct(5, 10)).toBeCloseTo(50, 10);
+    expect(thumbLeftPct(0, 10)).toBe(0);
+  });
+
+  it('clamps into [0%, 100%]: negative → 0, exact end and beyond → 100', () => {
+    expect(thumbLeftPct(-0.5, 10)).toBe(0);
+    expect(thumbLeftPct(10, 10)).toBe(100);
+    expect(thumbLeftPct(42, 10)).toBe(100);
+  });
+
+  it('degrades to 0 on zero/negative/NaN duration and non-finite time (never NaN)', () => {
+    expect(thumbLeftPct(5, 0)).toBe(0);
+    expect(thumbLeftPct(5, -1)).toBe(0);
+    expect(thumbLeftPct(5, Number.NaN)).toBe(0);
+    expect(thumbLeftPct(Number.NaN, 10)).toBe(0);
+    expect(thumbLeftPct(Number.POSITIVE_INFINITY, 10)).toBe(0);
+    expect(Number.isFinite(thumbLeftPct(5, 10))).toBe(true);
+  });
+
+  it('shares ONE mapping with the playhead: thumbLeftPct === renderTimeline().playheadPct', () => {
+    // The thumb rides the playhead position — the two must never diverge.
+    for (const [t, d] of [[2.5, 10], [0, 10], [10, 10], [42, 10], [5, 0], [Number.NaN, 10]]) {
+      expect(thumbLeftPct(t, d)).toBe(renderTimeline([], d, t).playheadPct);
+    }
+  });
+});
+
+describe('thumbAriaValue (v1.7.0 scrub-handle aria-valuenow)', () => {
+  it('passes finite non-negative seconds through unchanged', () => {
+    expect(thumbAriaValue(0)).toBe(0);
+    expect(thumbAriaValue(4.2)).toBeCloseTo(4.2, 10);
+    expect(thumbAriaValue(83.25)).toBeCloseTo(83.25, 10);
+  });
+
+  it('degrades non-finite and negative input to 0 (ARIA values never NaN)', () => {
+    expect(thumbAriaValue(Number.NaN)).toBe(0);
+    expect(thumbAriaValue(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(thumbAriaValue(-1)).toBe(0);
+    expect(thumbAriaValue(undefined)).toBe(0);
+  });
+});
+
+describe('scrub-thumb drag → time mapping (v1.7.0; existing timelineTimeAt seam)', () => {
+  it('a drag from the 25% position to the 50% position seeks dur/4 → dur/2', () => {
+    // The DOM drag maps every pointermove through timelineTimeAt on the
+    // CHIPS-layer rect — no new mapping exists to unit-test, so assert the
+    // gesture's endpoints through THE existing mapping (grab at 25%, release
+    // at 50% of the axis width).
+    const w = 402;
+    const dur = 3.04;
+    const grabT = timelineTimeAt(0.25 * w, w, dur);
+    const releaseT = timelineTimeAt(0.5 * w, w, dur);
+    expect(grabT).toBeCloseTo(dur / 4, 10);
+    expect(releaseT).toBeCloseTo(dur / 2, 10);
+    // ...and the release endpoint equals thumbLeftPct at that time (thumb
+    // parks where the seek landed).
+    expect(thumbLeftPct(releaseT, dur)).toBeCloseTo(50, 10);
+  });
+
+  it('clamped drag endpoints land exactly on the ends (thumb dragged past both edges)', () => {
+    const w = 400;
+    const dur = 8;
+    expect(timelineTimeAt(-40, w, dur)).toBe(0); // dragged left of the axis
+    expect(timelineTimeAt(w + 40, w, dur)).toBe(dur); // dragged right of the axis
+    expect(thumbLeftPct(timelineTimeAt(w + 40, w, dur), dur)).toBe(100);
+  });
+});
+
+describe('mountEditor wires the scrub thumb (v1.7.0; guarded node fakes)', () => {
+  /** Minimal DOM-element fake: listener map + style + attributes. */
+  function makeFakeEl() {
+    const listeners = new Map();
+    return {
+      style: {},
+      attrs: {},
+      addEventListener(type, fn) {
+        listeners.set(type, fn);
+      },
+      removeEventListener(type, fn) {
+        if (listeners.get(type) === fn) listeners.delete(type);
+      },
+      setAttribute(k, v) {
+        this.attrs[k] = v;
+      },
+      __listeners: listeners,
+    };
+  }
+
+  it('attaches the thumb gesture/keyboard listeners and positions it on redraw', () => {
+    const timeline = makeFakeEl();
+    const thumb = makeFakeEl();
+    timeline.querySelector = () => thumb;
+    const handle = mountEditor({ video: null, overlayCanvas: null, timeline, chipsContainer: null, playhead: null, trackList: null }, {});
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'keydown']) {
+      expect(typeof thumb.__listeners.get(type), `listener ${type}`).toBe('function');
+    }
+    // redraw() → updateThumb: parked at the degenerate 0% with honest ARIA.
+    handle.redraw();
+    expect(thumb.style.left).toBe('0%');
+    expect(thumb.attrs['aria-valuemax']).toBe('0');
+    expect(thumb.attrs['aria-valuenow']).toBe('0');
+    handle.destroy();
+    expect(thumb.__listeners.size).toBe(0); // every thumb listener detached
+  });
+
+  it('destroy() with a live thumb drag resets the drag state (no residue)', () => {
+    const timeline = makeFakeEl();
+    const thumb = makeFakeEl();
+    timeline.querySelector = () => thumb;
+    const handle = mountEditor({ video: null, overlayCanvas: null, timeline, chipsContainer: null, playhead: null, trackList: null }, {});
+    const down = thumb.__listeners.get('pointerdown');
+    const up = thumb.__listeners.get('pointerup');
+    const stopPropagation = () => {};
+    const preventDefault = () => {};
+    // A press → release cycle through the real handlers (capture calls are
+    // guarded try/catch on the fake; the up handler must clear the drag).
+    down({ button: 0, pointerId: 7, stopPropagation, preventDefault, clientX: 0 });
+    expect(() => up({ pointerId: 7, clientX: 0 })).not.toThrow();
+    // A foreign pointerId must be ignored by both handlers.
+    expect(() => down({ button: 0, pointerId: 99, stopPropagation, preventDefault, clientX: 0 })).not.toThrow();
+    expect(() => up({ pointerId: 1234, clientX: 0 })).not.toThrow();
+    expect(() => handle.destroy()).not.toThrow();
+    expect(thumb.__listeners.size).toBe(0);
   });
 });

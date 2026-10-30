@@ -15,13 +15,56 @@
  * is guarded by `typeof document`) — that property is asserted too, because
  * tests/unit/scaffold.test.js imports the same module in the node env.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import * as main from '../../src/main.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+// ---------------------------------------------------------------------------
+// v1.9.0 node harness mocks (file-wide): the mountApp integration tests below
+// drive the REAL wiring through a fake document; ingest/analyze are the two
+// modules that can only work against real media bytes, so they resolve
+// instantly here. Nothing else in this file touches them.
+// ---------------------------------------------------------------------------
+
+const { FAKE_META, FAKE_INPUT } = vi.hoisted(() => ({
+  FAKE_META: {
+    container: 'mp4',
+    codec: 'avc1',
+    codedWidth: 64,
+    codedHeight: 64,
+    displayWidth: 64,
+    displayHeight: 64,
+    rotation: 0,
+    fps: 30,
+    duration: 4,
+    audio: null,
+  },
+  FAKE_INPUT: {
+    getPrimaryVideoTrack: async () => ({
+      codec: 'avc1',
+      canDecode: async () => true,
+      displayWidth: 64,
+      displayHeight: 64,
+      computePacketStats: async () => ({ averagePacketRate: 30 }),
+    }),
+    getAudioTracks: async () => [],
+  },
+}));
+
+vi.mock('../../src/ingest.js', () => ({
+  openInput: async () => ({ input: FAKE_INPUT, meta: FAKE_META }),
+}));
+
+vi.mock('../../src/analyze.js', () => ({
+  runAnalyze: async () => ({ tracks: [], frameCount: 1, effectiveEp: 'webgpu', cancelled: false }),
+  sampleFrameAt: async () => {
+    throw new Error('unused in unit tests');
+  },
+}));
 
 const CAPS_FIXTURE = {
   secureContext: true,
@@ -541,11 +584,11 @@ describe('main-wiring: ?debug=1 runtime diagnostics (v1.8.2)', () => {
   });
 
   it('formatDiagLine emits keys in the canonical DIAG_KEY_ORDER', () => {
-    const line = main.formatDiagLine({ vfc: 7, tracks: 0, tu: 3, step: 'ready', v: '1.8.2' });
+    const line = main.formatDiagLine({ vfc: 7, tracks: 0, tu: 3, step: 'ready', v: '1.9.0' });
     expect(line.startsWith('{"v"')).toBe(true); // identity leads
     expect(line.indexOf('"tu"')).toBeLessThan(line.indexOf('"vfc"'));
     expect(line.indexOf('"step"')).toBeLessThan(line.indexOf('"tracks"'));
-    expect(JSON.parse(line)).toEqual({ v: '1.8.2', step: 'ready', tu: 3, vfc: 7, tracks: 0 });
+    expect(JSON.parse(line)).toEqual({ v: '1.9.0', step: 'ready', tu: 3, vfc: 7, tracks: 0 });
   });
 
   it('formatDiagLine finite-guards numbers and keeps undefined keys as null', () => {
@@ -558,19 +601,50 @@ describe('main-wiring: ?debug=1 runtime diagnostics (v1.8.2)', () => {
 
   it('formatDiagLine serializes a full support snapshot compactly (round-trip)', () => {
     const line = main.formatDiagLine({
-      v: '1.8.2', build: '2026-10-30', secure: true, step: 'review',
+      v: '1.9.0', build: '2026-10-30', secure: true, step: 'review',
       t: 3.14159, dur: NaN, paused: false, rate: 1, muted: false,
-      tu: 12, vfc: 0, pin: null, thumbLeft: '12.5%', tracks: 2, webgpu: true,
+      tu: 12, vfc: 0, tued: 12, errs: 1, lastErr: 'probe-boom',
+      drag: false, pin: false, pinMs: 0, thumbLeft: '12.5%',
+      focus: 'BODY', tracks: 2, webgpu: true,
     });
     const parsed = JSON.parse(line);
     expect(parsed).toEqual({
-      v: '1.8.2', build: '2026-10-30', secure: true, step: 'review',
+      v: '1.9.0', build: '2026-10-30', secure: true, step: 'review',
       // no rounding here — the snapshot's toFixed(2) owns that, this only finite-guards
       t: 3.14159, dur: null, paused: false, rate: 1, muted: false,
-      tu: 12, vfc: 0, pin: null, thumbLeft: '12.5%', tracks: 2, webgpu: true,
+      tu: 12, vfc: 0, tued: 12, errs: 1, lastErr: 'probe-boom',
+      drag: false, pin: false, pinMs: 0, thumbLeft: '12.5%',
+      focus: 'BODY', tracks: 2, webgpu: true,
     });
     expect(Object.keys(parsed)).toEqual(main.DIAG_KEY_ORDER);
     expect(line).not.toContain(' '); // compact — stays one console line
+  });
+
+  it('v1.9.0 diag keys: every new evidence field exists, in the documented order', () => {
+    // The v1.9.0 additions — the unreproducible field failure demanded a
+    // conclusive line: page exceptions (errs/lastErr), the editor's own
+    // timeupdate path (tued), and the editor gesture state (drag/pin/pinMs).
+    expect(main.DIAG_KEY_ORDER).toEqual([
+      'v', 'build', 'secure', 'step', 't', 'dur', 'paused', 'rate', 'muted',
+      'tu', 'vfc', 'tued', 'errs', 'lastErr', 'drag', 'pin', 'pinMs',
+      'thumbLeft', 'focus', 'tracks', 'webgpu',
+    ]);
+    const line = main.formatDiagLine({
+      tu: 1, vfc: 2, tued: 3, errs: 4, lastErr: 'e', drag: true,
+      pin: true, pinMs: 120, thumbLeft: '5%', focus: 'BUTTON#analyze-button',
+    });
+    expect(line.indexOf('"tu"')).toBeLessThan(line.indexOf('"vfc"'));
+    expect(line.indexOf('"vfc"')).toBeLessThan(line.indexOf('"tued"'));
+    expect(line.indexOf('"tued"')).toBeLessThan(line.indexOf('"errs"'));
+    expect(line.indexOf('"errs"')).toBeLessThan(line.indexOf('"lastErr"'));
+    expect(line.indexOf('"lastErr"')).toBeLessThan(line.indexOf('"drag"'));
+    expect(line.indexOf('"drag"')).toBeLessThan(line.indexOf('"pin"'));
+    expect(line.indexOf('"pin"')).toBeLessThan(line.indexOf('"pinMs"'));
+    expect(line.indexOf('"pinMs"')).toBeLessThan(line.indexOf('"thumbLeft"'));
+    expect(line.indexOf('"thumbLeft"')).toBeLessThan(line.indexOf('"focus"'));
+    const parsed = JSON.parse(line);
+    expect(parsed.pinMs).toBe(120);
+    expect(parsed.focus).toBe('BUTTON#analyze-button');
   });
 
   it('formatDiagLine tolerates missing/non-object input', () => {
@@ -582,10 +656,364 @@ describe('main-wiring: ?debug=1 runtime diagnostics (v1.8.2)', () => {
   it('diag counters are wired: main shares __VR_DIAG, editor bumps vfc in its rVFC tick', () => {
     const mainSrc = readFileSync(join(ROOT, 'src', 'main.js'), 'utf8');
     // Shared counter object exists (module scope) + a timeupdate bump in mountApp.
-    expect(mainSrc).toContain('globalThis.__VR_DIAG = globalThis.__VR_DIAG ?? { tu: 0, vfc: 0 }');
+    expect(mainSrc).toContain('globalThis.__VR_DIAG = globalThis.__VR_DIAG ?? {');
+    for (const key of ['tu: 0', 'vfc: 0', 'tickErr: 0', 'tued: 0', 'errs: 0', 'lastErr: null']) {
+      expect(mainSrc, `__VR_DIAG field ${key}`).toContain(key);
+    }
     expect(mainSrc).toContain("addEventListener('timeupdate'");
+    // v1.9.0: the runtime error listeners are ALWAYS on (not behind ?debug=1).
+    expect(mainSrc).toContain("addEventListener('error'");
+    expect(mainSrc).toContain("addEventListener('unhandledrejection'");
     // editor.js counts ONLY the rVFC-delivered tick (guarded by usingVFC).
     const editorSrc = readFileSync(join(ROOT, 'src', 'editor.js'), 'utf8');
     expect(editorSrc).toMatch(/if \(usingVFC && globalThis\.__VR_DIAG\) globalThis\.__VR_DIAG\.vfc \+= 1/);
+    // v1.9.0: the editor counts its own timeupdate path + per-tick failures.
+    expect(editorSrc).toContain('tued');
+    expect(editorSrc).toContain('tickErr');
+    expect(editorSrc).toContain("[editor-tick-error]");
+  });
+
+  it('v1.9.0 reorder contract: keyboard wiring precedes the isolated editor mount', () => {
+    const src = readFileSync(join(ROOT, 'src', 'main.js'), 'utf8');
+    // First doc keydown listener = the transport shortcuts (moved early in
+    // v1.9.0); the Escape-zoom handler registers later.
+    const keyboardAt = src.indexOf("doc.addEventListener('keydown', (e) => {");
+    const mountCallAt = src.indexOf('(mountEditorSafe('); // cast line (v1.9.0)
+    expect(keyboardAt).toBeGreaterThan(-1);
+    expect(mountCallAt).toBeGreaterThan(keyboardAt);
+    // The mount runs through the isolated seam, and its failure toast exists.
+    expect(src).toContain('export function mountEditorSafe(');
+    expect(src).toContain('Editor failed to start: ${message} — please report');
+    // Shortcuts handler sits before the analyze section (the first code path
+    // that can ever reach an editor mount).
+    const analyzeAt = src.indexOf('// --- Analyze pass');
+    expect(keyboardAt).toBeLessThan(analyzeAt);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// focusLabel (v1.9.0 diag focus field)
+// ---------------------------------------------------------------------------
+
+describe('focusLabel (v1.9.0 diag focus field)', () => {
+  it('renders TAG#id and bare TAG', () => {
+    expect(main.focusLabel({ tagName: 'BUTTON', id: 'analyze-button' })).toBe(
+      'BUTTON#analyze-button',
+    );
+    expect(main.focusLabel({ tagName: 'BODY', id: '' })).toBe('BODY');
+    expect(main.focusLabel({ tagName: 'DIV' })).toBe('DIV');
+  });
+
+  it('degrades missing/dead elements to null (never throws, never empty)', () => {
+    expect(main.focusLabel(null)).toBeNull();
+    expect(main.focusLabel(undefined)).toBeNull();
+    expect(main.focusLabel({})).toBeNull();
+    expect(main.focusLabel({ tagName: '', id: 'x' })).toBeNull();
+    expect(main.focusLabel({ tagName: 42, id: 'x' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mountEditorSafe (v1.9.0 editor-mount exception isolation)
+// ---------------------------------------------------------------------------
+
+describe('mountEditorSafe (v1.9.0 editor-mount exception isolation)', () => {
+  it('passes the handle through and forwards els/hooks on success', () => {
+    const seen = {};
+    const handle = { destroy() {} };
+    const mount = (els, hooks) => {
+      seen.els = els;
+      seen.hooks = hooks;
+      return handle;
+    };
+    const onFail = () => {
+      throw new Error('onFail must not run on success');
+    };
+    const out = main.mountEditorSafe(mount, { a: 1 }, { b: 2 }, onFail);
+    expect(out).toBe(handle);
+    expect(seen.els).toEqual({ a: 1 });
+    expect(seen.hooks).toEqual({ b: 2 });
+  });
+
+  it('a throwing mount → null + onFail with the RAW error, never propagates', () => {
+    const boom = new Error('boom-editor');
+    const seen = [];
+    const out = main.mountEditorSafe(() => {
+      throw boom;
+    }, {}, {}, (err) => seen.push(err));
+    expect(out).toBeNull();
+    expect(seen).toEqual([boom]);
+  });
+
+  it('degenerate seams are safe: non-function → null; missing onFail → silent null', () => {
+    expect(main.mountEditorSafe(null, {}, {})).toBeNull();
+    expect(main.mountEditorSafe(undefined, {}, {})).toBeNull();
+    expect(() => main.mountEditorSafe(() => { throw new Error('x'); }, {}, {})).not.toThrow();
+    expect(main.mountEditorSafe(() => { throw new Error('x'); }, {}, {})).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.9.0 mountApp node harness — the field-failure hardening, proven end to
+// end in node against a fake document (no jsdom). mountApp takes a `doc` and
+// injectable seams, so the REAL wiring runs here: a throwing mountEditor
+// seam simulates the field failure and the doc-level keyboard must still be
+// registered AND still toggle playback afterwards; window error listeners
+// must be ALWAYS on (no ?debug=1) and feed errs/lastErr.
+// ---------------------------------------------------------------------------
+
+/** Minimal DOM-element fake good enough for mountApp's guarded wiring. */
+function makeFakeEl(tag = 'DIV') {
+  const listeners = new Map();
+  const el = {
+    tagName: tag,
+    style: {},
+    dataset: {},
+    attrs: {},
+    children: [],
+    listeners,
+    hidden: false,
+    disabled: false,
+    value: '',
+    textContent: '',
+    title: '',
+    className: '',
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      listeners.get(type)?.delete(fn);
+    },
+    dispatch(type, event = {}) {
+      for (const fn of [...(listeners.get(type) ?? [])]) fn({ target: el, ...event });
+    },
+    appendChild(child) {
+      el.children.push(child);
+      return child;
+    },
+    append(...kids) {
+      el.children.push(...kids);
+    },
+    replaceChildren(...kids) {
+      el.children = kids;
+    },
+    remove() {},
+    setAttribute(k, v) {
+      el.attrs[k] = String(v);
+    },
+    getAttribute(k) {
+      return el.attrs[k] ?? null;
+    },
+    blur() {},
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    getBoundingClientRect() {
+      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    },
+  };
+  return el;
+}
+
+/** Fake document + view with listener recorders and per-id element stubs. */
+function makeFakeEnv() {
+  const viewListeners = new Map();
+  const fakeView = {
+    isSecureContext: true,
+    innerHeight: 800,
+    scrollY: 0,
+    navigator: { userAgent: 'node-fake' },
+    addEventListener(type, fn) {
+      if (!viewListeners.has(type)) viewListeners.set(type, new Set());
+      viewListeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      viewListeners.get(type)?.delete(fn);
+    },
+    /** Test-side dispatch: run every registered view listener for `type`. */
+    __dispatch(type, event = {}) {
+      for (const fn of [...(viewListeners.get(type) ?? [])]) fn(event);
+    },
+  };
+  const docListeners = new Map();
+  const elsById = new Map();
+  const fakeDoc = {
+    body: { dataset: {} },
+    activeElement: null,
+    fullscreenElement: null,
+    readyState: 'complete',
+    defaultView: fakeView,
+    getElementById(id) {
+      if (!elsById.has(id)) {
+        if (id === 'preview-video') {
+          const video = makeFakeEl('VIDEO');
+          video.paused = true;
+          video.currentTime = 0;
+          video.duration = Number.NaN;
+          video.playbackRate = 1;
+          video.muted = false;
+          video.playsPlayed = 0;
+          video.play = () => {
+            video.paused = false;
+            video.playsPlayed += 1;
+            return Promise.resolve();
+          };
+          video.pause = () => {
+            video.paused = true;
+          };
+          video.load = () => {};
+          video.removeAttribute = () => {};
+          video.src = '';
+          elsById.set(id, video);
+        } else if (id === 'file-input') {
+          const input = makeFakeEl('INPUT');
+          input.files = [
+            Object.assign(new Blob([new Uint8Array([1, 2, 3])], { type: 'video/mp4' }), {
+              name: 'clip.mp4',
+            }),
+          ];
+          elsById.set(id, input);
+        } else {
+          elsById.set(id, makeFakeEl('DIV'));
+        }
+      }
+      return elsById.get(id);
+    },
+    createElement(tag) {
+      return makeFakeEl(String(tag).toUpperCase());
+    },
+    addEventListener(type, fn) {
+      if (!docListeners.has(type)) docListeners.set(type, new Set());
+      docListeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      docListeners.get(type)?.delete(fn);
+    },
+    /** Test-side dispatch: run every registered doc listener for `type`. */
+    __dispatch(type, event = {}) {
+      for (const fn of [...(docListeners.get(type) ?? [])]) fn(event);
+    },
+    __docListeners: docListeners,
+  };
+  return { fakeDoc, fakeView, viewListeners, docListeners, elsById };
+}
+
+/** MountApp wiring is async; the analyze path resolves on the macrotask queue. */
+async function flushApp() {
+  for (let i = 0; i < 12; i += 1) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+/** Drive the REAL wiring through file-open → analyze → (failing) editor mount. */
+async function openAndAnalyze(fakeDoc) {
+  fakeDoc.getElementById('file-input').dispatch('change');
+  await flushApp(); // openInput + probeCapabilities + handleFile continuation
+  fakeDoc.getElementById('analyze-button').dispatch('click');
+  await flushApp(); // runAnalyze promise → enterReview → (failing) mount
+}
+
+/** Flatten the toast region into its text messages. */
+function toastTexts(fakeDoc) {
+  return fakeDoc
+    .getElementById('toast-region')
+    .children.map((toast) => toast.children?.[0]?.textContent ?? '');
+}
+
+describe('mountApp (v1.9.0): an editor-mount failure cannot kill the keyboard', () => {
+  /** Save/restore the two globals mountApp reads in node. */
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true; // capability.secureContextInfo seam
+    globalThis.window = fakeView; // the bare `window` resize listener
+  }
+
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+
+  it('end-to-end: throwing mountEditor → review state + toast + diag error, and Space STILL toggles play', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    globalThis.__VR_DIAG.errs = 0;
+    globalThis.__VR_DIAG.lastErr = null;
+    try {
+      await main.mountApp(fakeDoc, {
+        mountEditor: () => {
+          throw new Error('boom-editor');
+        },
+      });
+      // Keyboard registered during mount, before any editor could mount.
+      const keydownCount = fakeDoc.__docListeners.get('keydown')?.size ?? 0;
+      expect(keydownCount).toBeGreaterThanOrEqual(1);
+      await openAndAnalyze(fakeDoc);
+
+      // State still entered review (the failure happened AFTER the transition).
+      expect(fakeDoc.getElementById('analyze-button').textContent).toBe('Re-analyze');
+      // The failure is user-readable and machine-recorded.
+      expect(toastTexts(fakeDoc)).toContain(
+        'Editor failed to start: boom-editor — please report',
+      );
+      expect(globalThis.__VR_DIAG.errs).toBeGreaterThanOrEqual(1);
+      expect(globalThis.__VR_DIAG.lastErr).toBe('boom-editor');
+
+      // THE CONTRACT: Space still toggles playback after the editor died.
+      const video = fakeDoc.getElementById('preview-video');
+      video.paused = true;
+      video.playsPlayed = 0;
+      const prevented = [];
+      // Dispatch through every registered doc keydown handler (the shortcuts
+      // handler + the Escape-zoom handler; only the shortcuts path acts on
+      // Space) — the SAME path a real keydown takes through the document.
+      fakeDoc.__dispatch('keydown', {
+        key: ' ',
+        target: null,
+        preventDefault: () => prevented.push(' '),
+      });
+      expect(prevented).toContain(' ');
+      expect(video.playsPlayed).toBe(1);
+      expect(video.paused).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('window error listeners are ALWAYS on (no ?debug=1) and feed errs/lastErr', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    globalThis.__VR_DIAG.errs = 0;
+    globalThis.__VR_DIAG.lastErr = null;
+    try {
+      await main.mountApp(fakeDoc); // REAL mountEditor seam — never invoked here
+      // The diag interval is OFF (no ?debug=1) yet the listeners exist.
+      fakeView.__dispatch('error', { message: 'first boom' });
+      expect(globalThis.__VR_DIAG.errs).toBe(1);
+      expect(globalThis.__VR_DIAG.lastErr).toBe('first boom');
+      const long = new Error(`second boom — ${'x'.repeat(120)}`);
+      fakeView.__dispatch('unhandledrejection', { reason: long });
+      expect(globalThis.__VR_DIAG.errs).toBe(2);
+      expect(globalThis.__VR_DIAG.lastErr).toBe(long.message.slice(0, 80));
+      // A non-Error rejection reason degrades to a string, never throws.
+      fakeView.__dispatch('unhandledrejection', { reason: 42 });
+      expect(globalThis.__VR_DIAG.errs).toBe(3);
+      expect(globalThis.__VR_DIAG.lastErr).toBe('42');
+    } finally {
+      restoreGlobals();
+    }
   });
 });

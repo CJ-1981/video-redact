@@ -84,6 +84,15 @@ Field-regression fixes in the review workspace: timeline seeking, keyboard trans
 - E2E: 6/6 passing in Chromium (coordinator run).
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
 
+## [1.9.0] — 2026-10-30
+
+### Added
+- Runtime error + gesture diagnostics in the ?debug=1 line: window error/unhandledrejection counters + last message, focused element, editor gesture state (dragging / release-pin remaining ms), editor-side timeupdate counter.
+
+### Fixed
+- Timeline thumb can no longer freeze permanently: the v1.8.0 release pin (a condition latch that could stop clearing once playback moved away from the pinned position) is replaced by a 350 ms time-boxed pin that self-expires unconditionally; drag-state guaranteed to clear on every gesture end path.
+- Editor mount and per-tick exceptions are isolated: keyboard wiring runs before the editor mounts, a mount failure surfaces a readable toast while keyboard stays live, and one bad tick can never stop the loop.
+
 ## [1.6.0] — 2026-10-29
 
 A "✕ Clear" button that unloads the current video and resets the whole app to the landing view.

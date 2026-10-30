@@ -18,4 +18,4 @@ declare var __BUILD_DATE__: string | undefined;
  * listener bumps `tu`, and the log tick reads + resets both. May be absent
  * (script order) — every reader guards.
  */
-declare var __VR_DIAG: { tu: number, vfc: number } | undefined;
+declare var __VR_DIAG: { tu: number, vfc: number, tickErr: number, tued: number, errs: number, lastErr: string | null } | undefined;

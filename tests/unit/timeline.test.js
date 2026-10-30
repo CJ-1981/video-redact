@@ -8,12 +8,13 @@
  * beginManualBox) are guarded no-ops without one. Rendering/interaction is
  * E2E territory (Playwright, tests/e2e).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   MIN_TRACK_SPAN_S,
   CHIP_EDGE_PX,
   CHIP_EDGE_PX_COARSE,
   CLICK_SEEK_MAX_DRAG_PX,
+  THUMB_PIN_MS,
   effectiveEdgePx,
   timelinePointerAction,
   timelineTimeAt,
@@ -1249,5 +1250,375 @@ describe('mountEditor playback following (v1.8.1 thumb-froze regression)', () =>
     expect(t2.style.left).toBe('0%');
     handle.destroy();
     h2.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.9.0 — gesture diagnostics + hardening: getGestureState, the TIME-BOXED
+// release pin (deadline OR settled, whichever first), the drag-flag residue
+// guarantee (pointerleave / window blur / destroy), and per-tick exception
+// isolation. Harness: the same guarded node fakes as the v1.8.1 block above.
+// ---------------------------------------------------------------------------
+
+/** Minimal DOM-element fake (listener map + style + attributes). */
+function makeGestureEl() {
+  const listeners = new Map();
+  return {
+    style: {},
+    attrs: {},
+    addEventListener(type, fn) {
+      listeners.set(type, fn);
+    },
+    removeEventListener(type, fn) {
+      if (listeners.get(type) === fn) listeners.delete(type);
+    },
+    setAttribute(k, v) {
+      this.attrs[k] = v;
+    },
+    releasePointerCapture() {},
+    setPointerCapture() {},
+    __listeners: listeners,
+  };
+}
+
+/** Fake <video> whose rVFC registers but never auto-fires (starved loop). */
+function makeGestureVideo({ duration = 10, currentTime = 0 } = {}) {
+  const listeners = new Map();
+  const vfc = { next: 0, pending: new Map() };
+  return {
+    currentTime,
+    duration,
+    addEventListener(type, fn) {
+      listeners.set(type, fn);
+    },
+    removeEventListener(type, fn) {
+      if (listeners.get(type) === fn) listeners.delete(type);
+    },
+    requestVideoFrameCallback(cb) {
+      vfc.next += 1;
+      vfc.pending.set(vfc.next, cb);
+      return vfc.next;
+    },
+    cancelVideoFrameCallback(h) {
+      vfc.pending.delete(h);
+    },
+    dispatch(type) {
+      listeners.get(type)?.();
+    },
+    fireFrame() {
+      // Real rVFC semantics: a delivered callback is consumed after firing.
+      const pending = [...vfc.pending.values()];
+      vfc.pending.clear();
+      for (const cb of pending) cb();
+    },
+    __listeners: listeners,
+    __vfc: vfc,
+  };
+}
+
+/**
+ * Mount with a thumb + a chips layer whose rect is 100 px wide — so a
+ * pointerup at clientX=50 maps to exactly half the duration (the endpoint
+ * seek that ARMS the release pin). No canvas → position-only updates.
+ */
+function mountGesture(video, { hooks } = {}) {
+  const timeline = makeGestureEl();
+  const thumb = makeGestureEl();
+  timeline.querySelector = () => thumb;
+  const chips = {
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 10 }),
+  };
+  const handle = mountEditor(
+    { video, overlayCanvas: null, timeline, chipsContainer: chips, playhead: null, trackList: null },
+    hooks ?? {},
+  );
+  const down = (pointerId = 1) =>
+    thumb.__listeners
+      .get('pointerdown')
+      ({ button: 0, pointerId, stopPropagation() {}, preventDefault() {} });
+  const up = (clientX, pointerId = 1) =>
+    thumb.__listeners.get('pointerup')({ pointerId, clientX });
+  return { handle, thumb, timeline, chips, down, up };
+}
+
+describe('THUMB_PIN_MS + getGestureState (v1.9.0 gesture diagnostics)', () => {
+  it('the pin deadline constant is exported and sub-half-second', () => {
+    expect(THUMB_PIN_MS).toBe(350);
+    expect(THUMB_PIN_MS).toBeLessThan(500); // never a user-noticeable freeze
+  });
+
+  it('getGestureState: idle → {dragging: false, pinRemainingMs: 0}', () => {
+    const { handle } = mountGesture(makeGestureVideo());
+    expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
+    handle.destroy();
+  });
+
+  it('getGestureState: dragging during a fake drag; pinRemainingMs counts down to 0', () => {
+    const nowMock = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    try {
+      const { handle, down, up } = mountGesture(makeGestureVideo());
+      down();
+      expect(handle.getGestureState().dragging).toBe(true);
+      up(50); // endpoint seek at 5s → pin armed at now=1000, deadline 1350
+      expect(handle.getGestureState().dragging).toBe(false);
+      expect(handle.getGestureState().pinRemainingMs).toBe(THUMB_PIN_MS);
+      nowMock.mockReturnValue(1_100);
+      expect(handle.getGestureState().pinRemainingMs).toBe(THUMB_PIN_MS - 100);
+      nowMock.mockReturnValue(1_349);
+      expect(handle.getGestureState().pinRemainingMs).toBe(1);
+      nowMock.mockReturnValue(1_350);
+      expect(handle.getGestureState().pinRemainingMs).toBe(0); // expired
+      handle.destroy();
+    } finally {
+      nowMock.mockRestore();
+    }
+  });
+});
+
+describe('time-boxed release pin expiry (v1.9.0 THE regression pin)', () => {
+  it('REGRESSION: suppression self-expires after THUMB_PIN_MS even when the seek NEVER lands', () => {
+    // The v1.8.0 field-failure shape, made deterministic: the endpoint seek
+    // fires but never completes (no hooks → no seek → `seeked` never fires),
+    // the displayed time stays stale at 0s, so thumbPinSettled(5, 0) is
+    // false FOREVER. The old condition-based pin held the thumb at 50%
+    // forever; the time-boxed pin must give the position back at 350 ms.
+    let now = 2_000;
+    const nowMock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const video = makeGestureVideo({ duration: 10, currentTime: 0 });
+      const { handle, thumb, down, up } = mountGesture(video);
+      handle.redraw();
+      expect(thumb.style.left).toBe('0%');
+
+      down();
+      up(50); // release point 5s → thumb parks at 50%, pin armed
+      expect(thumb.style.left).toBe('50%');
+
+      // Before the deadline: every timeupdate still steps aside (the seek is
+      // "in flight" — the stale 0s position must not yank the thumb back).
+      video.dispatch('timeupdate');
+      expect(thumb.style.left).toBe('50%');
+      now = 2_000 + THUMB_PIN_MS - 1;
+      video.dispatch('timeupdate');
+      expect(thumb.style.left).toBe('50%');
+
+      // The deadline passes — suppression ends UNCONDITIONALLY (settled never
+      // passed, `seeked` never fired): the thumb follows the live time again.
+      now = 2_000 + THUMB_PIN_MS;
+      video.dispatch('timeupdate');
+      expect(thumb.style.left).toBe('0%'); // currentTime 0 of 10 → 0%
+      // And the state agrees: the pin is gone.
+      expect(handle.getGestureState().pinRemainingMs).toBe(0);
+      handle.destroy();
+    } finally {
+      nowMock.mockRestore();
+    }
+  });
+
+  it('the pin still clears EARLY when the seek lands (deadline OR settled, whichever first)', () => {
+    let now = 3_000;
+    const nowMock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const video = makeGestureVideo({ duration: 10, currentTime: 0 });
+      const { handle, thumb, down, up } = mountGesture(video);
+      down();
+      up(50); // pin at 5s, deadline 3350
+      now = 3_100;
+      video.dispatch('timeupdate'); // stale 0s → still pinned at 50%
+      expect(thumb.style.left).toBe('50%');
+      // The seek lands (currentTime within THUMB_PIN_EPSILON_S of the pin).
+      video.currentTime = 5.02;
+      video.dispatch('timeupdate');
+      // Settled → pin cleared early; the thumb re-derives from the LIVE time.
+      expect(parseFloat(thumb.style.left)).toBeCloseTo(50.2, 5);
+      // NOW playback moves on and the thumb follows immediately (no deadline
+      // wait: the settled path retired the pin early).
+      video.currentTime = 6;
+      video.dispatch('timeupdate');
+      expect(thumb.style.left).toBe('60%');
+      handle.destroy();
+    } finally {
+      nowMock.mockRestore();
+    }
+  });
+
+  it('a new gesture re-arms cleanly: pin cleared on pointerdown, deadline reset on the next release', () => {
+    let now = 5_000;
+    const nowMock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const { handle, down, up } = mountGesture(makeGestureVideo());
+      down();
+      up(50); // pin armed at 5000 → 5350
+      expect(handle.getGestureState().pinRemainingMs).toBe(THUMB_PIN_MS);
+      now = 5_200; // 150 ms into the old pin
+      down(); // a fresh gesture owns the position again
+      expect(handle.getGestureState().pinRemainingMs).toBe(0);
+      now = 5_250;
+      up(25); // new release at 2.5s → NEW deadline from NOW (5600, not 5350)
+      expect(handle.getGestureState().pinRemainingMs).toBe(THUMB_PIN_MS);
+      handle.destroy();
+    } finally {
+      nowMock.mockRestore();
+    }
+  });
+});
+
+describe('drag-flag residue guarantee (v1.9.0: every end path clears the gesture)', () => {
+  it('pointercancel clears the drag (existing path, now via the shared ender)', () => {
+    const { handle, thumb, down } = mountGesture(makeGestureVideo());
+    down(9);
+    expect(handle.getGestureState().dragging).toBe(true);
+    thumb.__listeners.get('pointercancel')({ pointerId: 9 });
+    expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
+    handle.destroy();
+  });
+
+  it('a foreign-pointerId cancel/leave is ignored (still dragging)', () => {
+    const { handle, thumb, down } = mountGesture(makeGestureVideo());
+    down(9);
+    thumb.__listeners.get('pointercancel')({ pointerId: 1234 });
+    expect(handle.getGestureState().dragging).toBe(true);
+    thumb.__listeners.get('pointerleave')({ pointerId: 1234 });
+    expect(handle.getGestureState().dragging).toBe(true);
+    handle.destroy();
+  });
+
+  it('pointerleave MID-DRAG ends the gesture (capture was lost — no residue)', () => {
+    const { handle, thumb, down } = mountGesture(makeGestureVideo());
+    down(9);
+    expect(handle.getGestureState().dragging).toBe(true);
+    thumb.__listeners.get('pointerleave')({ pointerId: 9 });
+    expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
+    handle.destroy();
+  });
+
+  it('window blur mid-drag ends the gesture; the blur guard dies with destroy()', () => {
+    const winListeners = new Map(); // type -> Set<fn>
+    const savedWindow = globalThis.window;
+    globalThis.window = {
+      addEventListener(type, fn) {
+        if (!winListeners.has(type)) winListeners.set(type, new Set());
+        winListeners.get(type).add(fn);
+      },
+      removeEventListener(type, fn) {
+        winListeners.get(type)?.delete(fn);
+      },
+    };
+    try {
+      const { handle, thumb, down } = mountGesture(makeGestureVideo());
+      const blurs = winListeners.get('blur');
+      expect(blurs?.size).toBe(1); // editor-lifetime guard armed at mount
+      down(9);
+      expect(handle.getGestureState().dragging).toBe(true);
+      for (const fn of blurs) fn();
+      expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
+      handle.destroy();
+      expect(winListeners.get('blur')?.size ?? 0).toBe(0); // guard removed
+    } finally {
+      if (savedWindow === undefined) delete globalThis.window;
+      else globalThis.window = savedWindow;
+    }
+  });
+
+  it('destroy() during a live drag clears the gesture state (no leak)', () => {
+    const { handle, down } = mountGesture(makeGestureVideo());
+    down(4);
+    expect(handle.getGestureState().dragging).toBe(true);
+    handle.destroy();
+    expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
+  });
+});
+
+describe('per-tick exception isolation (v1.9.0: one bad tick must not stop the loop)', () => {
+  /** Canvas ctx whose drawImage always throws — the failing seam. */
+  function throwingCtxCanvas() {
+    return {
+      width: 0,
+      height: 0,
+      style: {},
+      getContext: () => ({
+        clearRect() {},
+        drawImage() {
+          throw new Error('draw boom');
+        },
+      }),
+    };
+  }
+
+  it('a throwing draw seam keeps the loop alive: re-scheduled + tickErr counted, warn ONCE', () => {
+    const diag = (globalThis.__VR_DIAG = { tu: 0, vfc: 0, tickErr: 0, tued: 0 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const video = makeGestureVideo({ duration: 10, currentTime: 0 });
+      video.videoWidth = 640;
+      video.videoHeight = 360;
+      video.readyState = 2;
+      const handle = mountEditor(
+        { video, overlayCanvas: throwingCtxCanvas(), timeline: null, chipsContainer: null, playhead: null, trackList: null },
+        {},
+      );
+      const armed = video.__vfc.pending.size; // the loop is armed
+      expect(armed).toBe(1);
+
+      video.fireFrame(); // tick: drawPreview throws → isolated
+      expect(diag.tickErr).toBe(1);
+      expect(diag.vfc).toBe(1); // the rVFC delivery still counted
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toBe('[editor-tick-error]');
+      expect(video.__vfc.pending.size).toBe(1); // re-scheduled — LOOP ALIVE
+
+      video.fireFrame(); // the next tick still runs
+      expect(diag.tickErr).toBe(2);
+      expect(warn).toHaveBeenCalledTimes(1); // but the console warns ONCE
+      handle.destroy();
+    } finally {
+      warn.mockRestore();
+      delete globalThis.__VR_DIAG;
+    }
+  });
+
+  it('the timeupdate fallback survives a throwing position write and still counts itself', () => {
+    const diag = (globalThis.__VR_DIAG = { tu: 0, vfc: 0, tickErr: 0, tued: 0 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const video = makeGestureVideo({ duration: 10, currentTime: 2.5 });
+      const thumb = makeGestureEl();
+      Object.defineProperty(thumb.style, 'left', {
+        set() {
+          throw new Error('style write boom');
+        },
+      });
+      const timeline = makeGestureEl();
+      timeline.querySelector = () => thumb;
+      const handle = mountEditor(
+        { video, overlayCanvas: null, timeline, chipsContainer: null, playhead: null, trackList: null },
+        {},
+      );
+      video.dispatch('timeupdate'); // onTimeUpdate → tued++, updatePlayhead throws
+      expect(diag.tued).toBe(1); // the editor's own listener proved itself
+      expect(diag.tickErr).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      // A second timeupdate still arrives (handler alive) and counts again.
+      video.dispatch('timeupdate');
+      expect(diag.tued).toBe(2);
+      handle.destroy();
+    } finally {
+      warn.mockRestore();
+      delete globalThis.__VR_DIAG;
+    }
+  });
+
+  it('getGestureState exists on every mount shape (contract surface)', () => {
+    for (const handle of [
+      mountEditor(null, null),
+      mountEditor(
+        { video: null, overlayCanvas: null, timeline: null, chipsContainer: null, playhead: null, trackList: null },
+        {},
+      ),
+    ]) {
+      expect(typeof handle.getGestureState).toBe('function');
+      expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
+      handle.destroy();
+    }
   });
 });

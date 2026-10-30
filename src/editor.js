@@ -23,7 +23,11 @@
  *                                playhead clamp-and-scale rule)
  *        thumbAriaValue()      → scrub-thumb aria-valuenow seconds (v1.7.0)
  *        thumbPinSettled()     → has the post-release seek landed? (v1.8.0
- *                                release-pin seam; THUMB_PIN_EPSILON_S)
+ *                                release-pin seam; THUMB_PIN_EPSILON_S;
+ *                                v1.9.0 pairs it with the hard THUMB_PIN_MS
+ *                                deadline — deadline OR settled, whichever
+ *                                first, so the pin can never latch forever)
+ *        THUMB_PIN_MS          → release-pin max lifetime, ms (v1.9.0)
  *        toggleTrack()         → immutable enabled-flip (REQ-014)
  *        trimTrack()           → immutable span trim (SPEC-VID-002 REQ-103)
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
@@ -297,6 +301,19 @@ export function thumbAriaValue(currentTimeSec) {
 export const THUMB_PIN_EPSILON_S = 0.05;
 
 /**
+ * Hard deadline of the post-release thumb pin, ms (v1.9.0). v1.8.0 made the
+ * pin purely condition-based (`seeked` clears it, or the displayed time
+ * settles within THUMB_PIN_EPSILON_S) — an unreproducible field failure
+ * showed both conditions never passing on one machine (thumb frozen during
+ * playback while the timecode advanced), so the pin now ALSO expires
+ * unconditionally after this long: suppression ends at the deadline OR when
+ * the seek lands, whichever comes first. 350 ms covers real desktop seek
+ * latency while staying far below a user-noticeable "frozen thumb" window.
+ * @type {number}
+ */
+export const THUMB_PIN_MS = 350;
+
+/**
  * Has the post-release endpoint seek reached the pinned release point?
  * PURE (v1.8.0 seam, unit-tested) — updateThumb consults this to decide
  * whether a stale displayTime may move the thumb again.
@@ -309,6 +326,11 @@ export const THUMB_PIN_EPSILON_S = 0.05;
  * latency is tens-to-hundreds of ms; headless seeks are sub-frame and hid
  * it). While the release pin is set, updateThumb steps aside until EITHER
  * `seeked` fires OR this predicate reports the displayed time has caught up.
+ *
+ * v1.9.0: the runtime pin is TIME-BOXED (THUMB_PIN_MS deadline — see
+ * updateThumb); this predicate remains the settled-side of the "deadline OR
+ * settled, whichever first" rule and stays exported because tests (and any
+ * embedder reusing the pin) reference it.
  *
  * Non-finite input is "settled" — there is nothing meaningful to guard, and
  * a pin that can never be compared must never wedge the thumb.
@@ -933,13 +955,15 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  *     the host's own step math (source fps); without it the thumb falls back
  *     to a ±1/30 s seek.
  * @returns {{destroy: () => void, refresh: () => void,
- *            redraw: () => void}} `destroy` tears all listeners/frames down
- *     on step change; `refresh` re-renders chips + track list + playhead from
- *     getState() (main calls it on state change); `redraw` re-runs the
+ *            redraw: () => void, getGestureState: () => {dragging: boolean,
+ *            pinRemainingMs: number}}} `destroy` tears all listeners/frames
+ *     down on step change; `refresh` re-renders chips + track list + playhead
+ *     from getState() (main calls it on state change); `redraw` re-runs the
  *     preview draw + playhead at the CURRENT element layout — main calls it
  *     after fullscreen/zoom/viewport resizes (the per-frame loop only fires
  *     on presented frames, so a paused video needs this explicit kick to
- *     re-size the overlay canvas).
+ *     re-size the overlay canvas); `getGestureState` (v1.9.0) exposes the
+ *     live thumb drag + release-pin state for the host's ?debug=1 diag line.
  */
 export function mountEditor(els, hooks) {
   const video = (els && els.video) || null;
@@ -1112,20 +1136,28 @@ export function mountEditor(els, hooks) {
   /**
    * v1.7.0 scrub handle: position the thumb at the playhead and keep its ARIA
    * values honest (aria-valuemax = duration, aria-valuenow = seconds). Two
-   * states step aside so a stale displayTime can never fight the gesture
-   * (v1.8.0 desktop fix — see thumbPinSettled):
+   * states step aside so a stale displayTime can never fight the gesture:
    *   - while `thumbDrag` is live: a lagging seek (video.currentTime updates
    *     asynchronously) must never drag the thumb back off the pointer;
    *   - while the RELEASE PIN is set (endpoint seek still in flight after
    *     pointerup): the pre-seek position must never yank the thumb back off
-   *     the release point. Cleared by `seeked`, by the settled check here, or
-   *     by the next gesture/destroy.
+   *     the release point.
+   *
+   * v1.9.0 TIME-BOXED PIN: the pin clears at the EARLIER of the seek landing
+   * (`thumbPinSettled` / `seeked`) or the hard `THUMB_PIN_MS` deadline. The
+   * v1.8.0 condition-based pin could latch FOREVER when both `seeked` and the
+   * settled check never fired on one machine — the field report (thumb frozen
+   * during playback while the timecode advanced) — so the deadline is
+   * unconditional: no event, no condition, can hold it past THUMB_PIN_MS.
    */
   function updateThumb() {
     if (!thumb || thumbDrag) return;
     if (thumbPin !== null) {
-      if (!thumbPinSettled(thumbPin, displayTime())) return;
-      thumbPin = null;
+      if (Date.now() >= thumbPinUntil || thumbPinSettled(thumbPin, displayTime())) {
+        thumbPin = null;
+      } else {
+        return;
+      }
     }
     const d = duration();
     const t = displayTime();
@@ -1155,11 +1187,43 @@ export function mountEditor(els, hooks) {
     }
   }
 
+  /**
+   * v1.9.0 per-tick exception isolation: warn ONCE per editor mount (the
+   * console must never flood at frame rate) and bump the shared
+   * `__VR_DIAG.tickErr` counter on EVERY failure — the ?debug=1 diag line
+   * turns a silently-throwing tick into machine-readable evidence instead
+   * of an unreproducible field report.
+   * @param {unknown} err
+   */
+  let tickErrorLogged = false;
+  function noteTickFailure(err) {
+    if (!tickErrorLogged) {
+      tickErrorLogged = true;
+      console.warn('[editor-tick-error]', err);
+    }
+    if (globalThis.__VR_DIAG) {
+      globalThis.__VR_DIAG.tickErr = (globalThis.__VR_DIAG.tickErr || 0) + 1;
+    }
+  }
+
   function tick() {
     frameHandle = 0;
     if (usingVFC && globalThis.__VR_DIAG) globalThis.__VR_DIAG.vfc += 1; // v1.8.2 diag: rVFC DELIVERED this tick (rAF fallback never counts)
-    drawPreview(); // may throw on invariant violation → loop halts (fail-closed)
-    updatePlayhead();
+    // v1.9.0: a throwing seam must never stop the loop OR the other seam.
+    // drawPreview and updatePlayhead are isolated; scheduleFrame is
+    // unconditional. drawPreview's own fail-closed canvas clear still runs
+    // on an invariant throw (never an unredacted frame) — the loop now
+    // retries instead of halting, and each failure counts in __VR_DIAG.
+    try {
+      drawPreview();
+    } catch (err) {
+      noteTickFailure(err);
+    }
+    try {
+      updatePlayhead();
+    } catch (err) {
+      noteTickFailure(err);
+    }
     scheduleFrame();
   }
 
@@ -1190,7 +1254,17 @@ export function mountEditor(els, hooks) {
    * the draw loop ever halts fail-closed on an invariant throw.
    */
   function onTimeUpdate() {
-    updatePlayhead();
+    // v1.9.0 diag: the EDITOR-owned timeupdate path proves itself on the
+    // reporting machine — main.js's `tu` counter with `tued: 0` here would
+    // pin a dead editor listener instead of a dead media event.
+    if (globalThis.__VR_DIAG) {
+      globalThis.__VR_DIAG.tued = (globalThis.__VR_DIAG.tued || 0) + 1;
+    }
+    try {
+      updatePlayhead();
+    } catch (err) {
+      noteTickFailure(err); // v1.9.0: a bad position write never kills the fallback
+    }
   }
 
   // --- Timeline + track list DOM (chips, rows, playhead) -------------------
@@ -1591,19 +1665,27 @@ export function mountEditor(els, hooks) {
   /** Live thumb drag: the captured pointerId and the last throttled-seek stamp. */
   let thumbDrag = /** @type {{pointerId: number, lastSeekAt: number} | null} */ (null);
   /**
-   * v1.8.0 release pin: the endpoint time the thumb was left at on pointerup,
-   * guarded until the seek lands (`seeked` or thumbPinSettled). null = no pin.
-   * Without it the drag guard dropped BEFORE the endpoint seek completed and
-   * the frame loop yanked the thumb back to the stale pre-seek position —
-   * on desktop browsers/hardware with real seek latency that visibly reads as
-   * "dragging the scrub handle doesn't stick".
+   * Release pin (v1.8.0): the endpoint time the thumb was left at on
+   * pointerup, guarded until the seek lands. null = no pin. Without it the
+   * drag guard dropped BEFORE the endpoint seek completed and the frame loop
+   * yanked the thumb back to the stale pre-seek position — on desktop
+   * browsers/hardware with real seek latency that visibly reads as "dragging
+   * the scrub handle doesn't stick".
    * @type {number | null}
    */
   let thumbPin = null;
+  /**
+   * v1.9.0 hard deadline for the release pin, epoch ms (0 = no pin). The pin
+   * clears at the earlier of thumbPinSettled / `seeked` / this deadline —
+   * suppression can never latch forever (see updateThumb).
+   * @type {number}
+   */
+  let thumbPinUntil = 0;
 
   /** Drop the release pin (seek landed / gesture restarted / teardown). */
   function clearThumbPin() {
     thumbPin = null;
+    thumbPinUntil = 0;
   }
 
   /**
@@ -1671,6 +1753,42 @@ export function mountEditor(els, hooks) {
     thumb.style.left = `${thumbLeftPct(t, duration())}%`;
   }
 
+  /**
+   * End a live thumb drag on ANY path (v1.9.0 residue guarantee): releases
+   * the capture net, clears the pin and the drag flag. `thumbDrag` must
+   * never leak — updateThumb steps aside while it is set, so a leaked drag
+   * reads as "the thumb froze forever" (the exact field symptom).
+   * @param {number} [releasePointerId] Pointer id for releasePointerCapture.
+   */
+  function endThumbGesture(releasePointerId) {
+    if (!thumbDrag) return;
+    const pointerId = thumbDrag.pointerId;
+    thumbDrag = null;
+    disarmThumbNet();
+    clearThumbPin();
+    try {
+      thumb.releasePointerCapture(releasePointerId ?? pointerId);
+    } catch {
+      /* never captured or already released */
+    }
+  }
+
+  /** Window blur mid-drag (alt-tab, OS overlay, devtools): the pointerup that
+   * would end the gesture may never arrive, so the blur ends it instead
+   * (v1.9.0). Editor-lifetime listener — removed in destroy(). */
+  function onWindowBlur() {
+    if (thumbDrag) endThumbGesture();
+  }
+  /** Guarded for the node test environment (no window). */
+  function armBlurGuard() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    window.addEventListener('blur', onWindowBlur);
+  }
+  function disarmBlurGuard() {
+    if (typeof window === 'undefined' || typeof window.removeEventListener !== 'function') return;
+    window.removeEventListener('blur', onWindowBlur);
+  }
+
   function onThumbPointerDown(e) {
     if (e.button !== 0) return;
     // The strip gesture block must never see this press: no chip-edge trim
@@ -1700,10 +1818,11 @@ export function mountEditor(els, hooks) {
 
   function onThumbPointerUp(e) {
     if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
+    const pointerId = thumbDrag.pointerId;
     thumbDrag = null;
     disarmThumbNet();
     try {
-      thumb.releasePointerCapture(e.pointerId);
+      thumb.releasePointerCapture(pointerId);
     } catch {
       /* never captured or already released */
     }
@@ -1712,11 +1831,12 @@ export function mountEditor(els, hooks) {
     const t = thumbTimeAtClientX(e.clientX);
     if (t != null) {
       moveThumbToTime(t);
-      // v1.8.0 release pin: the drag guard is already gone, so pin the
-      // release point until the seek lands — otherwise the frame loop
-      // re-derives the thumb from the stale pre-seek currentTime and yanks
-      // it back (updateThumb consults the pin via thumbPinSettled).
+      // v1.8.0 release pin, v1.9.0 time-boxed: pin the release point until
+      // the seek lands OR THUMB_PIN_MS elapses (updateThumb clears at the
+      // earlier of settled / deadline) — the stale pre-seek currentTime must
+      // not yank the thumb back, and the pin must never hold forever.
       thumbPin = t;
+      thumbPinUntil = Date.now() + THUMB_PIN_MS;
       callSeek(t);
     }
   }
@@ -1724,14 +1844,19 @@ export function mountEditor(els, hooks) {
   function onThumbPointerCancel(e) {
     if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
     // Canceled gesture (palm rejection, …): no endpoint seek, no residue.
-    thumbDrag = null;
-    disarmThumbNet();
-    clearThumbPin();
-    try {
-      thumb.releasePointerCapture(e.pointerId);
-    } catch {
-      /* never captured */
-    }
+    endThumbGesture(e.pointerId);
+  }
+
+  /**
+   * v1.9.0: the pointer LEFT the thumb mid-gesture. With a healthy
+   * setPointerCapture this never fires during a drag (boundary events are
+   * retargeted to the capture element), so a leave during a live drag means
+   * capture was lost — end the gesture like a cancel instead of leaking the
+   * drag flag (which would freeze the thumb forever).
+   */
+  function onThumbPointerLeave(e) {
+    if (!thumbDrag || e.pointerId !== thumbDrag.pointerId) return;
+    endThumbGesture(e.pointerId);
   }
 
   /**
@@ -1906,7 +2031,11 @@ export function mountEditor(els, hooks) {
     thumb.addEventListener('pointermove', onThumbPointerMove);
     thumb.addEventListener('pointerup', onThumbPointerUp);
     thumb.addEventListener('pointercancel', onThumbPointerCancel);
+    // v1.9.0: a mid-drag pointerleave means pointer capture was lost — end
+    // the gesture instead of leaking the drag flag (frozen thumb forever).
+    thumb.addEventListener('pointerleave', onThumbPointerLeave);
     thumb.addEventListener('keydown', onThumbKeyDown);
+    armBlurGuard(); // v1.9.0: window blur mid-drag ends the gesture
   }
   if (trackList) {
     trackList.addEventListener('change', onListChange);
@@ -1950,6 +2079,7 @@ export function mountEditor(els, hooks) {
       thumb.removeEventListener('pointermove', onThumbPointerMove);
       thumb.removeEventListener('pointerup', onThumbPointerUp);
       thumb.removeEventListener('pointercancel', onThumbPointerCancel);
+      thumb.removeEventListener('pointerleave', onThumbPointerLeave); // v1.9.0
       thumb.removeEventListener('keydown', onThumbKeyDown);
     }
     if (trackList) {
@@ -1961,7 +2091,8 @@ export function mountEditor(els, hooks) {
     trimDrag = null;
     downPos = null;
     hoverChip = null;
-    thumbDrag = null;
+    disarmBlurGuard(); // v1.9.0: blur guard dies with the editor
+    thumbDrag = null; // v1.9.0 residue rule: endThumbGesture minus the capture release
     disarmThumbNet(); // v1.8.0: a drag torn down mid-gesture leaves no net
     clearThumbPin();
     pendingBox = null;
@@ -1970,5 +2101,20 @@ export function mountEditor(els, hooks) {
     }
   }
 
-  return { destroy, refresh: render, redraw };
+  /**
+   * v1.9.0 diagnostic seam for the host's ?debug=1 diag line (main.js reads
+   * it per tick): `dragging` is true while a thumb drag is live,
+   * `pinRemainingMs` is the time left before the release pin self-expires
+   * (0 when none) — a pinRemainingMs that never reaches 0 while the video is
+   * playing is the frozen-thumb signature, now machine-readable.
+   * @returns {{dragging: boolean, pinRemainingMs: number}}
+   */
+  function getGestureState() {
+    return {
+      dragging: thumbDrag != null,
+      pinRemainingMs: thumbPin === null ? 0 : Math.max(0, thumbPinUntil - Date.now()),
+    };
+  }
+
+  return { destroy, refresh: render, redraw, getGestureState };
 }

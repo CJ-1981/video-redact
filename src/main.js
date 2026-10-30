@@ -45,6 +45,11 @@
  *   parseDebugFlag(search)             ?debug=1 support-diagnostics flag (v1.8.2)
  *   formatDiagLine(snapshot)           diag snapshot → compact JSON line (v1.8.2)
  *   DIAG_KEY_ORDER                     canonical [diag] line key order (v1.8.2)
+ *   focusLabel(activeEl)               focused element → "TAG#id" (v1.9.0 diag)
+ *   mountEditorSafe(mount, els, hooks, onFail)
+ *                                      editor mount with the throw contained —
+ *                                      on failure: onFail(err) + null instead of
+ *                                      a dead app shell (v1.9.0 hardening)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -131,14 +136,33 @@ const BUILD_DATE = globalThis.__BUILD_DATE__ ?? '';
  * v1.8.2 shared diagnostics counters (`?debug=1` remote support): main.js's
  * `timeupdate` listener bumps `tu`, the editor's rVFC-DELIVERED tick bumps
  * `vfc` (see editor.js tick — the rAF fallback never counts); the `?debug=1`
- * log tick reads and RESETS both every 2 s. The object exists unconditionally
- * — one `++` per media/frame event is the entire always-on cost; without the
- * flag nothing ever reads or logs it. Shared via `globalThis.__VR_DIAG` so
- * editor.js (imported before this module body runs) can reach it at runtime
- * without an import cycle.
- * @type {{tu: number, vfc: number}}
+ * log tick reads and RESETS `tu`/`vfc` (and the v1.9.0 counters below) every
+ * 2 s. The object exists unconditionally — one `++` per media/frame event is
+ * the entire always-on cost; without the flag nothing ever reads or logs it.
+ * Shared via `globalThis.__VR_DIAG` so editor.js (imported before this module
+ * body runs) can reach it at runtime without an import cycle.
+ *
+ * v1.9.0 additions (the unreproducible field failure made every diag line
+ * inconclusive — these make the NEXT report conclusive):
+ *   tickErr — editor per-tick exceptions (editor.js noteTickFailure);
+ *   tued    — the EDITOR's own timeupdate listener firings; `tu > 0` with
+ *             `tued === 0` pins a dead editor listener (wiring), while both
+ *             at 0 pins a dead media event stream;
+ *   errs    — window 'error' + 'unhandledrejection' count SINCE THE LAST
+ *             diag line (always-on listeners in mountApp);
+ *   lastErr — first 80 chars of the most recent error message (sticky —
+ *             survives lines until a newer error replaces it).
+ * @type {{tu: number, vfc: number, tickErr: number, tued: number,
+ *         errs: number, lastErr: string | null}}
  */
-const VR_DIAG = (globalThis.__VR_DIAG = globalThis.__VR_DIAG ?? { tu: 0, vfc: 0 });
+const VR_DIAG = (globalThis.__VR_DIAG = globalThis.__VR_DIAG ?? {
+  tu: 0,
+  vfc: 0,
+  tickErr: 0,
+  tued: 0,
+  errs: 0,
+  lastErr: null,
+});
 
 // ---------------------------------------------------------------------------
 // Stepper state machine: gate → ready → analyzing → review → exporting → done
@@ -603,17 +627,24 @@ export function shortcutEnabledFor(focusEl, opts = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * Canonical key order of the `[diag]` console line (v1.8.2). formatDiagLine
- * emits keys in THIS order regardless of the snapshot's construction order,
- * so two diag lines — or two machines' lines — diff by eye. Identity first
- * (v/build: WHICH bundle is actually running), then transport state, then
- * the two signal counters (tu/vfc) that prove whether timeupdate / rVFC
- * fire at all on the reporting machine.
+ * Canonical key order of the `[diag]` console line (v1.8.2; v1.9.0 grows the
+ * evidence set). formatDiagLine emits keys in THIS order regardless of the
+ * snapshot's construction order, so two diag lines — or two machines' lines —
+ * diff by eye. Identity first (v/build: WHICH bundle is actually running),
+ * then transport state, then the signal counters that prove which listener
+ * paths fire on the reporting machine (`tu`/`vfc` media+frame, `tued` the
+ * editor's own timeupdate listener), then runtime health (`errs`/`lastErr`
+ * window error counters), then the editor gesture state (`drag`/`pin`/`pinMs`
+ * — v1.9.0: the release pin is now OBSERVABLE via getGestureState, no longer
+ * an always-null honest unknown), position (`thumbLeft`), where focus sits
+ * (`focus` — a held focus is the classic "Space is dead" cause), and the
+ * review facts (`tracks`/`webgpu`).
  * @type {string[]}
  */
 export const DIAG_KEY_ORDER = [
   'v', 'build', 'secure', 'step', 't', 'dur', 'paused', 'rate', 'muted',
-  'tu', 'vfc', 'pin', 'thumbLeft', 'tracks', 'webgpu',
+  'tu', 'vfc', 'tued', 'errs', 'lastErr', 'drag', 'pin', 'pinMs',
+  'thumbLeft', 'focus', 'tracks', 'webgpu',
 ];
 
 /**
@@ -630,6 +661,48 @@ export const DIAG_KEY_ORDER = [
 export function parseDebugFlag(search) {
   const value = new URLSearchParams(search).get('debug');
   return value === '1' || value === 'true';
+}
+
+/**
+ * Focused element → compact "TAG#id" label for the `[diag]` line (v1.9.0).
+ * PURE. A stale/stranded focus is the classic "Space is dead" cause, so each
+ * diag line carries WHERE focus sits; non-element input degrades to null
+ * (never throws, never an empty string).
+ *
+ * @param {Element | null | undefined} activeEl document.activeElement.
+ * @returns {string | null} e.g. "BUTTON#analyze-button", "BODY", or null.
+ */
+export function focusLabel(activeEl) {
+  const el = /** @type {{tagName?: unknown, id?: unknown} | null | undefined} */ (activeEl);
+  if (!el || typeof el.tagName !== 'string' || el.tagName.length === 0) return null;
+  const id = typeof el.id === 'string' && el.id.length > 0 ? `#${el.id}` : '';
+  return `${el.tagName}${id}`;
+}
+
+/**
+ * Editor mount with the throw contained (v1.9.0 hardening). PURE — mountApp
+ * runs its real seam through this; node tests run fakes. On success the
+ * editor handle passes through unchanged; on throw `onFail(err)` is invoked
+ * (toast + diag counters at the callsite) and null is returned — the app
+ * shell keeps mounting, the review step stays reachable, and the doc-level
+ * keyboard (wired BEFORE any editor mount in mountApp) stays live. This is
+ * the containment for the field-failure theory: one exception during editor
+ * mount must never take unrelated wiring down with it.
+ *
+ * @param {unknown} mountFn The mountEditor implementation to call.
+ * @param {object} els Editor DOM handles (passed straight through).
+ * @param {object} hooks Editor hooks (passed straight through).
+ * @param {(err: unknown) => void} [onFail] Called with the RAW error on throw.
+ * @returns {unknown} The editor handle, or null on failure / non-function seam.
+ */
+export function mountEditorSafe(mountFn, els, hooks, onFail) {
+  if (typeof mountFn !== 'function') return null;
+  try {
+    return mountFn(els, hooks);
+  } catch (err) {
+    if (typeof onFail === 'function') onFail(err);
+    return null;
+  }
 }
 
 /**
@@ -811,10 +884,27 @@ export function epLabel(ep) {
  * Wire the whole application. Insecure context (REQ-004): shows the serve
  * gate with copy-paste instructions and wires NOTHING else.
  *
+ * v1.9.0 ORDERING + ISOLATION CONTRACT (the unreproducible field failure —
+ * editor thumb + doc keyboard dead while the timecode advanced — fits one
+ * exception taking down every wiring step after the editor mount):
+ *   1. the doc-level keyboard handler is wired EARLY, before any code path
+ *      that can mount the editor, so an editor-mount failure can never kill
+ *      the shortcuts;
+ *   2. the editor mount itself runs through mountEditorSafe — a throw
+ *      becomes a readable toast + diag counters, never a dead review step;
+ *   3. window 'error'/'unhandledrejection' listeners are ALWAYS on, so the
+ *      next report carries the machine-readable evidence.
+ *
  * @param {Document | null} [doc] Defaults to the global document.
+ * @param {{mountEditor?: typeof mountEditor}} [deps] Injectable seams — the
+ *     node tests run mountApp with a throwing mountEditor to prove the
+ *     keyboard wiring survives an editor-mount failure.
  * @returns {Promise<null | void>} null when the serve gate blocked wiring.
  */
-export async function mountApp(doc = typeof document !== 'undefined' ? document : null) {
+export async function mountApp(
+  doc = typeof document !== 'undefined' ? document : null,
+  { mountEditor: mountEditorFn = mountEditor } = {},
+) {
   if (!doc || typeof doc.getElementById !== 'function') return null;
 
   const $ = (id) => doc.getElementById(id);
@@ -994,6 +1084,39 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     if (el && typeof el.blur === 'function') {
       el.addEventListener('change', () => el.blur());
     }
+  }
+
+  // --- v1.9.0 runtime-error capture (ALWAYS on, not gated on ?debug=1) -----
+  //
+  // The field failure was "errorless" because nothing LISTENED. A page
+  // exception now bumps the shared errs/lastErr counters even on a plain
+  // support URL; the next [diag] line (?debug=1 tick) carries them. Cheap:
+  // two listeners + one counter bump per actual error.
+
+  /**
+   * Record one runtime error into the shared diag counters (v1.9.0).
+   * @param {unknown} err Error, ErrorEvent message, or rejection reason.
+   */
+  function noteRuntimeError(err) {
+    VR_DIAG.errs = (VR_DIAG.errs || 0) + 1;
+    const message = err instanceof Error
+      ? err.message
+      : typeof err === 'string' && err.length > 0
+        ? err
+        : String(err ?? 'unknown error');
+    VR_DIAG.lastErr = message.slice(0, 80);
+  }
+
+  const bootView = doc.defaultView;
+  if (bootView && typeof bootView.addEventListener === 'function') {
+    bootView.addEventListener('error', (e) => {
+      const evt = /** @type {ErrorEvent} */ (/** @type {unknown} */ (e));
+      noteRuntimeError(evt?.message ?? evt?.error ?? 'window error');
+    });
+    bootView.addEventListener('unhandledrejection', (e) => {
+      const evt = /** @type {PromiseRejectionEvent} */ (/** @type {unknown} */ (e));
+      noteRuntimeError(evt?.reason ?? 'unhandled rejection');
+    });
   }
 
   function applyStepper() {
@@ -1470,6 +1593,44 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
   els.clearFile?.addEventListener('click', () => clearAll());
   blurAfterClick(els.clearFile);
 
+  // --- Keyboard (design-direction: space / ← / → / B in review states) ------
+  //
+  // v1.9.0 ORDERING CONTRACT: this handler is wired EARLY in mountApp —
+  // before any code path that can mount the editor (enterReview only runs
+  // after an analyze completes, and the editor mount itself is additionally
+  // isolated via mountEditorSafe). The field failure (thumb + keyboard dead
+  // while the transport timecode stayed alive) fits ONE exception killing
+  // every wiring step after the editor mount; registering the shortcuts
+  // FIRST makes that failure mode unable to take the keyboard down with it.
+  //
+  // v1.6.1 REG-2: exclusion is limited to the TYPING surfaces
+  // (shortcutEnabledFor — input/select/textarea/[contenteditable]; the
+  // track-row time inputs keep it). Buttons are no longer excluded: focus
+  // remaining on a clicked control used to make Space RE-ACTIVATE that
+  // button (re-step a frame, exit fullscreen) instead of toggling playback.
+  // The Space branch preventDefaults, so a button focused despite the
+  // blur-on-click wiring (keyboard users, native-fullscreen focus anchoring)
+  // toggles the video EXACTLY ONCE — the browser's key-activation click on
+  // the focused button is cancelled.
+
+  doc.addEventListener('keydown', (e) => {
+    const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
+    if (!shortcutEnabledFor(target)) return;
+    if (!(app.step === 'review' || app.step === 'done')) return;
+    if (!els.video) return; // togglePlay/stepFrame guard internally too
+    if (e.key === ' ') {
+      e.preventDefault();
+      togglePlay();
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      stepFrame(e.key === 'ArrowRight' ? 1 : -1);
+    } else if (e.key === 'b' || e.key === 'B') {
+      // Manual-box mode: the canvas drag is live (editor's interaction map);
+      // B just tells the user what to do next.
+      toast('Drag on the video to draw a manual redaction box — Escape cancels the drag.', { timeoutMs: 4000 });
+    }
+  });
+
   // --- Analyze pass (REQ-009 / AC-03) --------------------------------------------
 
   function startAnalyze() {
@@ -1577,7 +1738,14 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     updateButtons();
 
     editor?.destroy();
-    editor = mountEditor(
+    // v1.9.0: the mount runs through mountEditorSafe — a throw here used to
+    // propagate into the analyze .then chain and read as "Analysis failed"
+    // with the step already in review and a dead editor. Now: readable
+    // toast, error in the diag counters, state STAYS in review (it was set
+    // above, before the mount), the doc keyboard is already live (wired
+    // first), and the completion status below still renders.
+    editor = /** @type {ReturnType<typeof mountEditor> | null} */ (mountEditorSafe(
+      mountEditorFn,
       {
         video: els.video,
         overlayCanvas: els.overlayCanvas,
@@ -1627,7 +1795,19 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
         // SAME stepFrame math as the transport buttons (source fps via app.meta).
         onStepFrame: stepFrame,
       },
-    );
+      // v1.9.0 onFail: surface the mount failure three ways — readable toast
+      // (support can act on it), shared diag counters (errs/lastErr reach the
+      // next [diag] line), console stays clean (mountEditorSafe swallowed the
+      // throw; the toast text carries the message).
+      (err) => {
+        noteRuntimeError(err);
+        const message = err instanceof Error ? err.message : String(err);
+        toast(`Editor failed to start: ${message} — please report`, {
+          kind: 'error',
+          timeoutMs: 8000,
+        });
+      },
+    ));
     refreshTrackUi();
 
     // AC-17: surface the ACTIVE provider (createDetectors' effective EP —
@@ -2029,25 +2209,40 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
     VR_DIAG.tu += 1;
   });
 
-  // --- v1.8.2 ?debug=1 runtime diagnostics (remote support) -------------------
+  // --- ?debug=1 runtime diagnostics (remote support; v1.8.2 + v1.9.0) --------
   //
   // Field problem: on a remote report we cannot see WHICH dist bundle the
   // browser cached, nor whether its timeupdate / rVFC signals fire at all
-  // (the v1.8.1 thumb-freeze condition). With `?debug=1` in the URL, mountApp
-  // logs ONE compact JSON line to the console every 2 s (10-minute lifetime
-  // cap — a support session must never flood the log). Each line carries:
-  //   v/build — the RUNNING bundle identity (same stamps as the footer
-  //             badge; a stale cached bundle is immediately identifiable),
-  //   tu      — timeupdate events since the previous line (listener above),
-  //   vfc     — rVFC-DELIVERED frame ticks since the previous line (counted
-  //             in editor.js's tick ONLY — the rAF fallback never counts).
-  //             Playing with `vfc: 0` while `tu > 0` proves frame
-  //             presentation is dead on that machine and timeupdate is
-  //             carrying — exactly the split v1.8.1 fixed.
-  //   plus    secure/step/t/dur/paused/rate/muted/pin/thumbLeft/tracks/webgpu.
-  //   `pin` is always null from here: the editor's thumb release pin is
-  //   closure-private and not observable from main.js (honest unknown).
-  // Without the flag: no interval, no logging — zero overhead.
+  // (the v1.8.1 thumb-freeze condition) — nor, after v1.9.0's unreproducible
+  // "thumb + keyboard dead" report, whether ANY page exception or editor
+  // gesture ever happened. With `?debug=1` in the URL, mountApp logs ONE
+  // compact JSON line to the console every 2 s (10-minute lifetime cap — a
+  // support session must never flood the log). Each line carries:
+  //   v/build  — the RUNNING bundle identity (same stamps as the footer
+  //              badge; a stale cached bundle is immediately identifiable),
+  //   tu       — timeupdate events since the previous line (main.js listener),
+  //   vfc      — rVFC-DELIVERED frame ticks since the previous line (counted
+  //              in editor.js's tick ONLY — the rAF fallback never counts).
+  //              Playing with `vfc: 0` while `tu > 0` proves frame
+  //              presentation is dead on that machine and timeupdate is
+  //              carrying — exactly the split v1.8.1 fixed.
+  //   tued     — the EDITOR's own timeupdate listener firings (v1.9.0):
+  //              `tu > 0, tued: 0` pins a dead editor listener (wiring),
+  //              both 0 pins a dead media event stream.
+  //   errs     — window 'error' + 'unhandledrejection' since the previous
+  //              line; `lastErr` — first 80 chars of the last message
+  //              (sticky). v1.9.0: ALWAYS-ON listeners, so even a plain
+  //              URL without the flag records errors for the next line.
+  //   drag     — thumb drag live (editor getGestureState, v1.9.0),
+  //   pin      — release pin currently holding (v1.8.2 carried null: the pin
+  //              was closure-private; v1.9.0 makes it observable),
+  //   pinMs    — ms left before the pin self-expires (frozen-thumb
+  //              signature: a pinMs that never reaches 0 while playing).
+  //   plus     secure/step/t/dur/paused/rate/muted/thumbLeft/focus/tracks/
+  //              webgpu (`focus` = document.activeElement "TAG#id" — a held
+  //              focus is the classic "Space is dead" cause).
+  // Without the flag: no interval, no logging — zero overhead (the error
+  // listeners above stay on: two counters per actual error).
   // (Runs only past the secure-context gate: a gated page wires nothing.)
 
   /** Log cadence + lifetime cap for the [diag] line (v1.8.2). */
@@ -2063,8 +2258,17 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       : null;
     const tu = VR_DIAG.tu;
     const vfc = VR_DIAG.vfc;
+    const tued = VR_DIAG.tued || 0;
+    const errs = VR_DIAG.errs || 0;
     VR_DIAG.tu = 0;
     VR_DIAG.vfc = 0;
+    VR_DIAG.tued = 0;
+    VR_DIAG.errs = 0;
+    // Gesture state: observable only while an editor is actually mounted
+    // (mountEditorSafe may have failed — drag/pin/pinMs stay honest nulls).
+    const gesture = editor && typeof editor.getGestureState === 'function'
+      ? editor.getGestureState()
+      : null;
     console.info('[diag]', formatDiagLine({
       v: APP_VERSION,
       build: BUILD_DATE || null,
@@ -2077,8 +2281,14 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       muted: v ? v.muted === true : null,
       tu,
       vfc,
-      pin: null,
+      tued,
+      errs,
+      lastErr: VR_DIAG.lastErr ?? null, // sticky until a newer error replaces it
+      drag: gesture ? gesture.dragging : null,
+      pin: gesture ? gesture.pinRemainingMs > 0 : null,
+      pinMs: gesture ? gesture.pinRemainingMs : null,
       thumbLeft: thumb && thumb.style ? thumb.style.left : null,
+      focus: focusLabel(doc.activeElement),
       tracks: app.tracks.length,
       webgpu: view ? 'gpu' in view.navigator : null,
     }));
@@ -2351,36 +2561,6 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
       applyStageHeight(nextStageHeight(stageHeight, step, stageViewportH(), stageReservedHeight()));
     });
   }
-
-  // --- Keyboard (design-direction: space / ← / → / B in review states) ------
-  //
-  // v1.6.1 REG-2: exclusion is limited to the TYPING surfaces
-  // (shortcutEnabledFor — input/select/textarea/[contenteditable]; the
-  // track-row time inputs keep it). Buttons are no longer excluded: focus
-  // remaining on a clicked control used to make Space RE-ACTIVATE that
-  // button (re-step a frame, exit fullscreen) instead of toggling playback.
-  // The Space branch preventDefaults, so a button focused despite the
-  // blur-on-click wiring (keyboard users, native-fullscreen focus anchoring)
-  // toggles the video EXACTLY ONCE — the browser's key-activation click on
-  // the focused button is cancelled.
-
-  doc.addEventListener('keydown', (e) => {
-    const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
-    if (!shortcutEnabledFor(target)) return;
-    if (!(app.step === 'review' || app.step === 'done')) return;
-    if (!els.video) return; // togglePlay/stepFrame guard internally too
-    if (e.key === ' ') {
-      e.preventDefault();
-      togglePlay();
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      e.preventDefault();
-      stepFrame(e.key === 'ArrowRight' ? 1 : -1);
-    } else if (e.key === 'b' || e.key === 'B') {
-      // Manual-box mode: the canvas drag is live (editor's interaction map);
-      // B just tells the user what to do next.
-      toast('Drag on the video to draw a manual redaction box — Escape cancels the drag.', { timeoutMs: 4000 });
-    }
-  });
 
   return null;
 }

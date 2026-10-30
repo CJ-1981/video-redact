@@ -6,6 +6,20 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-10-30
+
+The scrub thumb follows playback again on browsers where the frame loop never fires.
+
+### Fixed
+
+- Scrub thumb froze at 0% during normal playback (field evidence: transport timecode `0:11.1 / 0:11.1` live while the thumb sat at its CSS-default 0% for the whole clip; thumb only ever moved on explicit seeks/drags). Root cause: playback position updates rode EXCLUSIVELY on the preview frame loop — `requestVideoFrameCallback` (rAF fallback) fires only when the compositor PRESENTS a frame, and on browsers/GPU/window states that never present during playback the loop registered but never fired, so `tick()` → `updatePlayhead()` → `updateThumb()` (editor.js) never ran. Seeks stayed live because `seeked` is media-event-driven and drags are DOM-only — exactly the observed split — and the transport readout stayed live because main.js drives it from its own `timeupdate` listener. Fix: `timeupdate` now drives the same `updatePlayhead` path from the live `video.currentTime`/`video.duration` (position only — the canvas draw stays frame-loop-owned; drag and release-pin guards still step aside inside `updateThumb`), and `duration()` falls back to the host meta duration (`getState().duration`, wired from `app.meta`) ONLY when `video.duration` is NaN/≤0. The fallback also keeps the playhead/thumb honest if the draw loop ever halts fail-closed.
+
+### Verification
+
+- Unit: 507 → 510 tests, all passing (14 files; new `mountEditor playback following` tests in `timeline.test.js`: thumb 0%→50%→100% via `timeupdate` with a starved frame loop — verified failing on the pre-fix wiring — plus the delivered-rVFC path and the meta-duration fallback).
+- Probe: `node tools/debug-touch-timeline.mjs` — new T-play (untouched `video.play()` → thumb advanced ≥15% of the strip and thumb x ≈ currentTime/duration ±5%, with an rVFC-delivery counter distinguishing "loop healthy" from "loop starved, timeupdate carried it"); T1/T2/T2c/T3/T-thumb/T4 unchanged and passing.
+- Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
 ## [1.8.0] — 2026-10-30
 
 Desktop-mouse reliability for the timeline scrub handle, plus an audio mute button on both control bars.

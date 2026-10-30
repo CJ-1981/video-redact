@@ -1509,7 +1509,14 @@ export async function mountApp(doc = typeof document !== 'undefined' ? document 
         trackList: els.trackList,
       },
       {
-        getState: () => ({ tracks: app.tracks, currentTime: els.video?.currentTime ?? 0 }),
+        // v1.8.1: `duration` is the editor's fallback when video.duration is
+        // NaN/≤0 (late metadata) — the meta value is set once at load and
+        // never a stale playback capture.
+        getState: () => ({
+          tracks: app.tracks,
+          currentTime: els.video?.currentTime ?? 0,
+          duration: app.meta?.duration,
+        }),
         onToggle: (trackId, enabled) => {
           app.tracks = toggleTrack(app.tracks, trackId, enabled);
           refreshTrackUi();

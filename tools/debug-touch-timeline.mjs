@@ -29,6 +29,14 @@
  *       (touchStart on the disc, touchMove to the axis's 50%, touchEnd) →
  *       |t − 0.5·dur| < 0.15 s after release AND currentTime followed the
  *       move (mid-drag sample: t past the 25% grab point, thumb x advanced).
+ *   T-play v1.8.1 scrub-thumb playback following: with NO interaction after
+ *       video.play(), the thumb must track the playhead — moved ≥ 15% of the
+ *       strip width from its start AND thumb x ≈ currentTime/duration ±5%.
+ *       (Field defect: rVFC starved on some desktops → thumb frozen at its
+ *       CSS-default 0% for a whole clip; reports the rVFC frame count so a
+ *       pass reads either "loop healthy" or "loop starved, timeupdate carried
+ *       it". Phase B emulates the playback event stream ONLY when the browser
+ *       has a dead media clock — play() fulfills but time never advances.)
  *   T4  Clear button is styled alert red (text rgb(229,72,77), alert-tinted
  *       border, white-on-red :hover rule in the CSSOM) AND remains
  *       functional: clicking it returns the stepper to the gate step.
@@ -334,6 +342,115 @@ try {
     Math.abs(tThumb - 0.5 * dur) < 0.15 && !!followedOk,
     `t=${tThumb.toFixed(3)} expected ${(0.5 * dur).toFixed(3)} ` +
       `mid={t=${midSample ? midSample.t.toFixed(3) : 'n/a'}, thumbCx=${midSample ? midSample.thumbCx.toFixed(0) : 'n/a'}}`,
+  );
+
+  // ======================================================================
+  // T-play — v1.8.1: the thumb FOLLOWS PLAYBACK with no interaction at all.
+  // Field defect: the editor's position updates rode solely on the rVFC/rAF
+  // frame loop; when rVFC never fires during playback (compositor starved),
+  // the thumb sat at its CSS-default 0% while the transport timecode
+  // (timeupdate-driven) stayed live. The v1.8.1 fix adds a timeupdate
+  // fallback in editor.js; this check plays the video untouched and reads
+  // the thumb, plus counts delivered rVFC frames for the evidence trail.
+  // Phase A is a real video.play(); SOME CI/headless Chromium builds have a
+  // dead media clock (play() fulfills, `playing` fires, currentTime never
+  // advances — observed on this machine in headless AND headful). There,
+  // Phase B emulates exactly the media-event stream real playback emits
+  // (currentTime advances + `timeupdate`) and asserts the same contract.
+  // ======================================================================
+  console.log('--- T-play: thumb follows playback (no interaction) ---');
+  // Wrap rVFC with a passive counter (editor.js looks the method up per call,
+  // so the wrapper is transparent to it) and reset for the play window.
+  await page.evaluate(() => {
+    if (!window.__vfcWrapped) {
+      window.__vfcWrapped = true;
+      const orig = HTMLVideoElement.prototype.requestVideoFrameCallback;
+      HTMLVideoElement.prototype.requestVideoFrameCallback = function (cb) {
+        return orig.call(this, (...args) => {
+          window.__vfcCount = (window.__vfcCount || 0) + 1;
+          return cb(...args);
+        });
+      };
+    }
+    window.__vfcCount = 0;
+  });
+  const readThumbState = () =>
+    page.evaluate(() => {
+      const v = document.getElementById('preview-video');
+      const b = document.getElementById('timeline-track').getBoundingClientRect();
+      const tb = document.getElementById('timeline-thumb').getBoundingClientRect();
+      return {
+        t: v.currentTime,
+        thumbCx: tb.left + tb.width / 2,
+        axisLeft: b.left,
+        axisW: b.width,
+        vfc: window.__vfcCount || 0,
+      };
+    });
+  await toZero();
+  await page.waitForTimeout(250);
+  const thumbStart = await readThumbState();
+  // Long enough for ≥15% of the strip on ANY fixture, 1.2 s minimum.
+  const playMs = Math.min(3000, Math.max(1200, Math.ceil(0.18 * dur * 1000)));
+  const playOk = await page.evaluate(() => {
+    const v = document.getElementById('preview-video');
+    v.currentTime = 0;
+    return v.play().then(
+      () => true,
+      (err) => {
+        console.warn('play() rejected:', String(err));
+        return false;
+      },
+    );
+  });
+  await page.waitForTimeout(playMs);
+  let playSample = await page.evaluate(() => {
+    const v = document.getElementById('preview-video');
+    const st = { t: v.currentTime, playing: !v.paused, vfc: window.__vfcCount || 0 };
+    v.pause();
+    return st;
+  });
+  let mode = 'real playback';
+  // Phase B — only when the real media clock is dead (t never advanced).
+  if (playSample.t < 0.15) {
+    mode = 'timeupdate emulation (media clock stalled in this browser)';
+    console.log(`--- T-play: media clock stalled (t=${playSample.t.toFixed(3)} after ${playMs}ms, playing=${playSample.playing}) — emulating the playback event stream ---`);
+    await toZero();
+    await page.waitForTimeout(250);
+    await page.evaluate(
+      (steps) => {
+        const v = document.getElementById('preview-video');
+        let i = 0;
+        const step = () => {
+          if (i >= steps.length) return;
+          v.currentTime = steps[i];
+          i += 1;
+          v.dispatchEvent(new Event('timeupdate')); // the media event playback emits
+          setTimeout(step, 150);
+        };
+        step();
+      },
+      [0, dur * 0.125, dur * 0.25, dur * 0.375, dur * 0.5],
+    );
+    await page.waitForTimeout(150 * 6);
+    playSample = await readThumbState();
+  } else {
+    playSample = { ...playSample, ...(await readThumbState()) };
+  }
+  const expectedX = playSample.axisLeft + (playSample.t / dur) * playSample.axisW;
+  const movedPct = ((playSample.thumbCx - thumbStart.thumbCx) / playSample.axisW) * 100;
+  check(
+    'T-playa thumb advanced ≥15% of the strip during untouched playback',
+    playOk && movedPct >= 15,
+    `moved=${movedPct.toFixed(1)}% of strip (thumbCx ${thumbStart.thumbCx.toFixed(0)} → ${
+      playSample.thumbCx.toFixed(0)
+    }, axisW=${playSample.axisW.toFixed(0)}, mode=${mode}) ` +
+      `[rVFC frames delivered=${playSample.vfc}${playSample.vfc === 0 && mode === 'real playback' ? ' — LOOP STARVED, timeupdate carried it' : ''}]`,
+  );
+  check(
+    'T-playb thumb x ≈ currentTime/duration ±5% after playback',
+    Math.abs(playSample.thumbCx - expectedX) <= 0.05 * playSample.axisW,
+    `t=${playSample.t.toFixed(3)}s dur=${dur.toFixed(2)} thumbCx=${playSample.thumbCx.toFixed(1)} expectedX=${expectedX.toFixed(1)} (±${(0.05 * playSample.axisW).toFixed(0)}px) mode=${mode}`,
   );
 
   // ======================================================================

@@ -129,6 +129,12 @@
  *     disabled dashed "visible"), then move the playhead. Scrub → 'seeked'
  *     event redraws once; handle.redraw() re-sizes/re-draws after layout
  *     changes (fullscreen/zoom/viewport resize — wired by main.js).
+ *     v1.8.1: a `timeupdate` listener drives updatePlayhead (position only —
+ *     never the canvas draw) as a media-event fallback, because rVFC fires
+ *     ONLY when the compositor presents frames and some browser/GPU/window
+ *     states never present during playback → playhead + thumb froze at 0%
+ *     for a whole clip (field report) while the transport readout — driven
+ *     by main.js's own `timeupdate` listener — stayed live.
  *
  * IMPORT-TIME SAFETY: no DOM access at import time (vitest imports this file
  * in the node environment). Every DOM access inside the adapters is guarded —
@@ -920,7 +926,9 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  * @param {object} hooks Callbacks into main.js:
  *     `{ onToggle(trackId, enabled), onSeek(t), onManualBox(box, t),
  *        onTrimTrack(trackId, start, end), onSetStyle(trackId, style),
- *        onStepFrame(dir)?, getState() → { tracks, currentTime } }`.
+ *        onStepFrame(dir)?, getState() → { tracks, currentTime,
+ *        duration? } }`. `duration` (v1.8.1) is the host's meta duration —
+ *     consulted ONLY when video.duration is NaN/≤0 (see duration()).
  *     `onStepFrame` (v1.7.0, optional) is the thumb's ±1-frame keyboard path —
  *     the host's own step math (source fps); without it the thumb falls back
  *     to a ±1/30 s seek.
@@ -981,10 +989,16 @@ export function mountEditor(els, hooks) {
 
   const doc = typeof document !== 'undefined' ? document : null;
 
-  /** Video duration in seconds; 0 until finite metadata exists. */
+  /** Video duration in seconds; 0 until finite metadata exists. v1.8.1:
+   * when video.duration is not usable (NaN/≤0 — e.g. a browser that reports
+   * duration late), fall back to the host state's meta duration — never to a
+   * value captured at mount, so the thumb/playhead scale can never degenerate
+   * to 0% for lack of a denominator while a usable duration exists. */
   const duration = () => {
     const d = video ? video.duration : NaN;
-    return Number.isFinite(d) && d > 0 ? d : 0;
+    if (Number.isFinite(d) && d > 0) return d;
+    const meta = getState().duration;
+    return Number.isFinite(meta) && meta > 0 ? meta : 0;
   };
   /** Displayed-frame time (video.currentTime), falling back to state. */
   const displayTime = () => {
@@ -1153,6 +1167,28 @@ export function mountEditor(els, hooks) {
   function onSeeked() {
     clearThumbPin();
     drawPreview();
+    updatePlayhead();
+  }
+
+  /**
+   * v1.8.1 playback-following fallback: keep the playhead AND the scrub thumb
+   * on the video's live time even when the frame loop never delivers. rVFC
+   * fires only when the compositor PRESENTS a frame — on browsers/GPUs/window
+   * states where playback presents nothing, the loop registered but never
+   * fired: the thumb sat at its CSS-default 0% for the whole clip (field
+   * report: transport timecode `0:11.1 / 0:11.1` live, thumb pinned left,
+   * both moved fine on explicit seeks — `seeked` is media-event-driven and
+   * drags are DOM-only, which is exactly the observed split). `timeupdate`
+   * fires 4–66 Hz during playback and after every seek, from the same media
+   * event source main.js's transport readout uses, so it now drives the SAME
+   * updatePlayhead path (live video.currentTime + duration — thumbDrag and
+   * the v1.8.0 release pin still step aside inside updateThumb). Position
+   * ONLY: the preview canvas draw stays frame-loop-owned (a 4 Hz full redraw
+   * here would stutter it, and drawPreview already tracks every presented
+   * frame where frames actually arrive). This also keeps position honest if
+   * the draw loop ever halts fail-closed on an invariant throw.
+   */
+  function onTimeUpdate() {
     updatePlayhead();
   }
 
@@ -1846,6 +1882,7 @@ export function mountEditor(els, hooks) {
   if (video) {
     video.addEventListener('seeked', onSeeked);
     video.addEventListener('loadedmetadata', render);
+    video.addEventListener('timeupdate', onTimeUpdate); // v1.8.1 playback-following fallback
   }
   if (timeline) {
     timeline.addEventListener('dblclick', onTimelineDblClick);
@@ -1897,6 +1934,7 @@ export function mountEditor(els, hooks) {
     if (video) {
       video.removeEventListener('seeked', onSeeked);
       video.removeEventListener('loadedmetadata', render);
+      video.removeEventListener('timeupdate', onTimeUpdate); // v1.8.1
     }
     if (timeline) {
       timeline.removeEventListener('dblclick', onTimelineDblClick);

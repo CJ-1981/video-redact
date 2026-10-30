@@ -1114,3 +1114,140 @@ describe('mountEditor wires the scrub thumb (v1.7.0; guarded node fakes)', () =>
     expect(thumb.__listeners.size).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Playback following (v1.8.1 regression): the thumb froze at 0% during
+// playback. Root cause: position updates rode EXCLUSIVELY on the rVFC/rAF
+// frame loop — rVFC fires only when the compositor presents frames, and on
+// browsers/GPU/window states that never present during playback the loop
+// registered but never fired, so tick() → updatePlayhead() → updateThumb()
+// never ran. The transport readout stayed live because main.js drives it from
+// `timeupdate`; seeks/drags worked because `seeked` and the pointer handlers
+// are event/DOM-driven. Fix: `timeupdate` now drives updatePlayhead too.
+// ---------------------------------------------------------------------------
+
+describe('mountEditor playback following (v1.8.1 thumb-froze regression)', () => {
+  /** Minimal DOM-element fake (same shape as the harness above). */
+  function makeFakeEl() {
+    const listeners = new Map();
+    return {
+      style: {},
+      attrs: {},
+      addEventListener(type, fn) {
+        listeners.set(type, fn);
+      },
+      removeEventListener(type, fn) {
+        if (listeners.get(type) === fn) listeners.delete(type);
+      },
+      setAttribute(k, v) {
+        this.attrs[k] = v;
+      },
+      __listeners: listeners,
+    };
+  }
+
+  /**
+   * Fake <video> whose requestVideoFrameCallback REGISTERS but never
+   * auto-fires — the exact field condition: the loop is armed, the
+   * compositor presents nothing, so no frame callback ever runs. Playback is
+   * simulated by mutating currentTime and dispatching media events.
+   */
+  function makeFakeVideo({ duration = 11.1, currentTime = 0 } = {}) {
+    const listeners = new Map();
+    const vfc = { next: 0, pending: new Map() };
+    return {
+      currentTime,
+      duration,
+      addEventListener(type, fn) {
+        listeners.set(type, fn);
+      },
+      removeEventListener(type, fn) {
+        if (listeners.get(type) === fn) listeners.delete(type);
+      },
+      requestVideoFrameCallback(cb) {
+        vfc.next += 1;
+        vfc.pending.set(vfc.next, cb);
+        return vfc.next;
+      },
+      cancelVideoFrameCallback(h) {
+        vfc.pending.delete(h);
+      },
+      dispatch(type) {
+        listeners.get(type)?.();
+      },
+      fireFrame() {
+        for (const cb of [...vfc.pending.values()]) cb();
+      },
+      __listeners: listeners,
+      __vfc: vfc,
+    };
+  }
+
+  /** Mount with a truthy 2d ctx so scheduleFrame arms rVFC (never fires). */
+  function mountStarved(video) {
+    const timeline = makeFakeEl();
+    const thumb = makeFakeEl();
+    timeline.querySelector = () => thumb;
+    const canvas = { getContext: () => ({}) };
+    const handle = mountEditor(
+      { video, overlayCanvas: canvas, timeline, chipsContainer: null, playhead: null, trackList: null },
+      {},
+    );
+    return { handle, thumb };
+  }
+
+  it('REGRESSION: thumb follows playback 0% → 50% → 100% via timeupdate when the frame loop never fires', () => {
+    const video = makeFakeVideo({ duration: 11.1, currentTime: 0 });
+    const { handle, thumb } = mountStarved(video);
+    // The field condition: loop armed, zero frames ever presented.
+    expect(video.__vfc.pending.size).toBe(1);
+    handle.redraw(); // initial paint — the field screenshot state (parked left)
+    expect(thumb.style.left).toBe('0%');
+
+    // Playback with rVFC starved: only `timeupdate` fires (the transport's
+    // source — the thing that worked per the field report).
+    video.currentTime = 5.55;
+    video.dispatch('timeupdate');
+    expect(parseFloat(thumb.style.left)).toBeCloseTo(50, 5);
+    expect(thumb.attrs['aria-valuenow']).toBe('5.55');
+    expect(thumb.attrs['aria-valuemax']).toBe('11.1');
+
+    video.currentTime = 11.1;
+    video.dispatch('timeupdate');
+    expect(parseFloat(thumb.style.left)).toBeCloseTo(100, 5);
+
+    handle.destroy();
+    expect(video.__listeners.size).toBe(0); // timeupdate detached with the rest
+  });
+
+  it('primary loop intact: a delivered rVFC frame still moves the thumb', () => {
+    const video = makeFakeVideo({ duration: 11.1, currentTime: 2.775 });
+    const { handle, thumb } = mountStarved(video);
+    video.fireFrame(); // one presented frame → tick() → updatePlayhead
+    expect(parseFloat(thumb.style.left)).toBeCloseTo(25, 5);
+    handle.destroy();
+  });
+
+  it('duration falls back to getState().duration only when video.duration is unusable', () => {
+    const video = makeFakeVideo({ duration: Number.NaN, currentTime: 5.55 });
+    const timeline = makeFakeEl();
+    const thumb = makeFakeEl();
+    timeline.querySelector = () => thumb;
+    const handle = mountEditor(
+      { video, overlayCanvas: null, timeline, chipsContainer: null, playhead: null, trackList: null },
+      { getState: () => ({ tracks: [], currentTime: video.currentTime, duration: 11.1 }) },
+    );
+    handle.redraw();
+    // NaN video.duration → meta 11.1 → 5.55/11.1 = 50% (pre-v1.8.1: 0%).
+    video.dispatch('timeupdate');
+    expect(parseFloat(thumb.style.left)).toBeCloseTo(50, 5);
+    // And without any usable duration it degrades to 0% (never NaN).
+    const bare = makeFakeVideo({ duration: Number.NaN, currentTime: 5.55 });
+    const { handle: h2, thumb: t2 } = mountStarved(bare);
+    h2.redraw();
+    bare.dispatch('timeupdate');
+    expect(t2.style.left).toBe('0%');
+    handle.destroy();
+    h2.destroy();
+  });
+});

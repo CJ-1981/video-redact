@@ -6,6 +6,16 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-10-31
+
+### Fixed
+- Export resolution + audio removal selections now actually reach the exporter (v1.16.0 regression: missing element refs silently fell back to full resolution + audio).
+
+### Added
+- Threshold comparison honors dashcam mode, minimum object size, and detection detail — panels show what a real analyze would find at each threshold.
+- Pixelation strength control (Fine ×1 / Normal ×2 / Coarse ×3 / Max ×4 block multiplier; Normal default doubles the old block size) — same strength in preview and export.
+- Project save/load: 💾 Save project downloads a .vrproj with settings, trims, tracks, and video identity (no video bytes); 📂 Load project restores them with typed error handling and video re-association warnings.
+
 ## [1.16.0] — 2026-10-31
 
 ### Added

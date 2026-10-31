@@ -565,6 +565,9 @@
       cursor: pointer;
     }
     .threshold-panel:hover { border-color: var(--accent); }
+    /* v1.11.0: the clicked level stays visually selected until another wins. */
+    .threshold-panel.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+    .threshold-panel.selected .caption::after { content: ' ✓'; color: var(--accent); font-weight: 700; }
     .threshold-panel canvas { display: block; border-radius: 4px; }
     .threshold-panel .caption {
       font-family: var(--font-num);
@@ -785,6 +788,7 @@
                any pointer/touch activity on the stage re-shows the bar.
                Distinct ov-* IDs keep the #transport-bar E2E selectors intact. -->
           <div class="stage-overlay-controls" role="group" aria-label="Enlarged preview controls">
+            <button id="ov-jump" type="button" title="Jump to start" aria-label="Jump to start">⏮</button>
             <button id="ov-back" type="button" title="Step one frame back" aria-label="Frame back">⏪</button>
             <button id="ov-play" type="button" title="Play (space)" aria-label="Play">▶</button>
             <button id="ov-fwd" type="button" title="Step one frame forward" aria-label="Frame forward">⏩</button>
@@ -875,6 +879,9 @@
             <label class="slider-row" for="compare-time">
               <span class="slider-name">Frame&nbsp;time&nbsp;(s)</span>
               <input type="number" id="compare-time" class="num" min="0" max="0" step="0.1" value="0" />
+              <!-- v1.11.0: one-click sync from the preview playhead — no manual
+                   read-off of the transport timecode. -->
+              <button id="compare-use-preview" type="button" title="Set frame time to the preview's current position">Use preview time</button>
             </label>
             <button id="compare-button" type="button">Compare thresholds</button>
             <p id="compare-status" class="stat-line" role="status"></p>

@@ -6,6 +6,13 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-10-31
+
+### Added
+- Jump-to-start (⏮) button in the fullscreen/enlarged overlay control bar (mirrors the transport bar).
+- Selected state on threshold-compare panels: the clicked level stays visually highlighted (accent ring + ✓, aria-pressed) until another level wins or the panels clear.
+- "Use preview time" button next to the compare frame-time field — one click sets the field to the preview's current position instead of reading the timecode by hand.
+
 ## [1.10.1] — 2026-10-30
 
 ### Fixed

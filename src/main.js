@@ -999,6 +999,7 @@ export async function mountApp(
     transportTime: $('transport-time'),
     // v1.8.0: audio mute on BOTH bars (transport + fullscreen overlay).
     muteButton: /** @type {HTMLButtonElement | null} */ ($('mute-button')),
+    ovJump: /** @type {HTMLButtonElement | null} */ ($('ov-jump')),
     ovBack: /** @type {HTMLButtonElement | null} */ ($('ov-back')),
     ovPlay: /** @type {HTMLButtonElement | null} */ ($('ov-play')),
     ovFwd: /** @type {HTMLButtonElement | null} */ ($('ov-fwd')),
@@ -1027,6 +1028,7 @@ export async function mountApp(
     confPlate: /** @type {HTMLInputElement | null} */ ($('conf-plate')),
     confPlateOut: /** @type {HTMLOutputElement | null} */ ($('conf-plate-out')),
     compareTime: /** @type {HTMLInputElement | null} */ ($('compare-time')),
+    compareUsePreview: /** @type {HTMLButtonElement | null} */ ($('compare-use-preview')),
     compareButton: /** @type {HTMLButtonElement | null} */ ($('compare-button')),
     compareStatus: $('compare-status'),
     thresholdPanels: $('threshold-panels'),
@@ -1443,6 +1445,7 @@ export async function mountApp(
         els.compareTime.value = String(Math.round(dur * 0.1 * 10) / 10);
       }
       if (els.thresholdPanels) els.thresholdPanels.replaceChildren();
+      selectedCompareLevel = null; // v1.11.0: cleared panels clear the selection
       if (els.compareStatus) els.compareStatus.textContent = '';
 
       // Blob preview source (media-src blob: is CSP-allowed; bytes stay local).
@@ -1647,6 +1650,7 @@ export async function mountApp(
     renderCapReport(null, null); // hides + empties the capability report
     renderGuidance({ messages: [] }, null); // hides + empties the guidance
     if (els.thresholdPanels) els.thresholdPanels.replaceChildren();
+    selectedCompareLevel = null; // v1.11.0: cleared panels clear the selection
     if (els.compareStatus) els.compareStatus.textContent = '';
     if (els.compareTime) {
       els.compareTime.max = '0';
@@ -2020,13 +2024,24 @@ export async function mountApp(
       }
       const item = doc.createElement('button');
       item.type = 'button';
-      item.className = 'threshold-panel';
+      item.className = 'threshold-panel' + (vm.level === selectedCompareLevel ? ' selected' : '');
       item.title = `Use ≥${vm.level.toFixed(2)} for both sensitivity sliders`;
+      item.setAttribute('aria-pressed', String(vm.level === selectedCompareLevel));
       const cap = doc.createElement('span');
       cap.className = 'caption';
       cap.textContent = formatThresholdCaption(vm);
       item.append(canvas, cap);
-      item.addEventListener('click', () => applyLevelToSliders(vm.level));
+      item.addEventListener('click', () => {
+        // v1.11.0: the clicked level stays visually selected (aria-pressed +
+        // .selected class) until another level wins or the panels re-render.
+        selectedCompareLevel = vm.level;
+        for (const el of els.thresholdPanels?.children ?? []) {
+          const isSel = el === item;
+          el.classList.toggle('selected', isSel);
+          if (el instanceof doc.defaultView.HTMLButtonElement) el.setAttribute('aria-pressed', String(isSel));
+        }
+        applyLevelToSliders(vm.level);
+      });
       // v1.6.1 REG-2: the panel is a <button> — release focus after the click
       // so the doc-level transport shortcuts keep working.
       item.addEventListener('click', () => item.blur());
@@ -2035,6 +2050,10 @@ export async function mountApp(
     els.thresholdPanels.replaceChildren(frag);
   }
 
+  // v1.11.0: the compare level the user last clicked — drives the .selected
+  // visual state on the panels. Reset on file change and Clear (wherever the
+  // panels themselves are cleared).
+  let selectedCompareLevel = /** @type {number | null} */ (null);
   let comparing = false;
 
   /**
@@ -2094,6 +2113,18 @@ export async function mountApp(
   }
   els.compareButton?.addEventListener('click', () => void runThresholdCompare());
   blurAfterClick(els.compareButton);
+  // v1.11.0: one-click sync from the preview playhead — the field takes the
+  // video's current position (1 decimal, same step as the input), clamped to
+  // the loaded duration. No-op before a file is loaded (max=0).
+  els.compareUsePreview?.addEventListener('click', () => {
+    const v = els.video;
+    const input = els.compareTime;
+    if (!v || !input) return;
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+    const t = Math.min(Math.max(0, v.currentTime), dur);
+    input.value = String(Math.round(t * 10) / 10);
+  });
+  blurAfterClick(els.compareUsePreview);
 
   // --- Export (REQ-017/018/019/021) -----------------------------------------------
 
@@ -2278,6 +2309,13 @@ export async function mountApp(
     const v = els.video;
     if (v) v.currentTime = 0;
   });
+  blurAfterClick(els.transportStart);
+  // v1.11.0: the fullscreen overlay carries the same jump-to-start control.
+  els.ovJump?.addEventListener('click', () => {
+    const v = els.video;
+    if (v) v.currentTime = 0;
+  });
+  blurAfterClick(els.ovJump);
   els.transportBack?.addEventListener('click', () => stepFrame(-1));
   els.transportFwd?.addEventListener('click', () => stepFrame(1));
   els.transportPlay?.addEventListener('click', () => togglePlay());

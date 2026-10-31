@@ -92,3 +92,8 @@ v1.1.0 iterates the review experience of SPEC-VID-001: a solid-black redaction s
 - **REQ-122** — Keyboard: ←/→ jump ±5 s; Shift+←/→ frame-step; F toggles fullscreen/enlarged preview; M toggles mute (Space/B unchanged); shortcuts active whenever the preview is visible.
 - **REQ-123** — The Models/attribution panel shall render under the capability report (left column), out of the right rail.
 - **REQ-124** — A light theme shall be available via a toggle (dark default, choice persisted in localStorage), implemented as a CSS custom-property set swap with no component changes.
+
+## Amendments — v1.15.0 (2026-10-31, field feedback round 6)
+
+- **REQ-125 (Trim UI)** — The user shall be able to mark video regions for deletion ("trims") on the timeline: a ✂ trim toggle activates trim mode; dragging on the timeline creates a trim region; each region renders as a greyed-out overlay spanning its span with scissors (✂) marks at its edges; region edges are draggable to adjust; regions can be removed (double-click or a per-region ✕); MULTIPLE trim regions are supported. While the playhead is inside a trim region, the preview frame renders with a grey veil.
+- **REQ-126 (Trim export)** — Export shall exclude all trimmed regions: the output contains only the kept segments, concatenated in order with continuous timestamps and intact A/V sync. Implementation: one native mediabunny `trim` Conversion per kept segment (pixelation burn-in applies per segment; audio packet-copied per segment), then the segments' encoded packets are concatenated into a single output with timestamp offsets (no re-encode of already-encoded segments). When no trims exist, the existing single-pass export path is used unchanged.

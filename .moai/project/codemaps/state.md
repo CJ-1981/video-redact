@@ -39,7 +39,9 @@ ANY step ──CLEAR──▶ gate        (v1.6.0: the header ✕ Clear button �
 
 Cancellation convention: analyze cancel is the `ANALYZE_FINISH` success event carrying a cancelled flag (partial tracks kept, AC-03); export cancel surfaces as `EXPORT_FAIL` with a cancelled marker at the callsite. `CLEAR` is independent of both — it aborts them first and lands on `gate`.
 
-Keyboard gating over states (v1.9.0/1.10.0): the doc-level keyboard handler is wired FIRST (before any editor mount, preserved through v1.10.0); `Space` toggles playback at `ready` (a live editor exists) and in review/done; `←`/`→` frame-step is review/done-gated; `EXPORT_START` is rejected at `ready`/`gate`/`analyzing` (`deriveStep` → null), so nothing can ship pre-analysis. A mount failure at any state surfaces a readable toast while the keyboard stays live (`mountEditorSafe`).
+Keyboard gating over states (v1.9.0/1.10.0, map extended v1.12.0): the doc-level keyboard handler is wired FIRST (before any editor mount, preserved through v1.10.0); `Space` toggles playback at `ready` (a live editor exists) and in review/done, `B` draws a manual box; since v1.12.0 `←`/`→` jump ±5 s (`SEEK_STEP_S`) and `Shift+←/→` frame-step ±1 (review/done-gated), `F` toggles fullscreen/enlarge and `M` mute (REQ-122); `EXPORT_START` is rejected at `ready`/`gate`/`analyzing` (`deriveStep` → null), so nothing can ship pre-analysis. A mount failure at any state surfaces a readable toast while the keyboard stays live (`mountEditorSafe`).
+
+Export settings flow (v1.16.0–v1.17.1, REQ-127): the export panel's resolution select and "Include audio" checkbox are read live at export click (`startExport` reads `els.exportResolution` / `els.exportAudio` / `app.settings.pixelStrength` / `app.trims`). `resetExportChoices()` (resolution → 'full', audio → checked) runs ONLY on file load and Clear — v1.17.1 removed the pre-read reset that made every export run with defaults. Pixel strength lives in `app.settings.pixelStrength` (preview and export share it).
 
 ## Data shapes (`AppState`, src/types.js)
 
@@ -60,8 +62,19 @@ Keyboard gating over states (v1.9.0/1.10.0): the doc-level keyboard handler is w
               confFace?: number, confPlate?: number }   // REQ-113 (v1.5.0): detection confidence
                                  // thresholds from the Analyze-panel sensitivity sliders
                                  // (defaults 0.6 / 0.25 — detector DEFAULT_CONF_FACE/PLATE when omitted);
-                                 // reset from DEFAULT_SETTINGS() on mount and on CLEAR (v1.6.0)
+                                 // reset from DEFAULT_SETTINGS() on mount and on CLEAR (v1.6.0).
+                                 // A SECOND settings record on the mountApp app object holds the
+                                 // analyze-pass knobs (v1.12.0/v1.17.0): { minSizePx: 0, downscale: 'full',
+                                 // pixelStrength: 'normal' } (REQ-117/120/129) — reset per file load + Clear.
+  trims: Array<{id, start, end}>,  // v1.15.0 REQ-125: sorted, non-overlapping trim regions
+                                 // (min span 0.1 s via normalizeTrims/addTrim/moveTrimEdge/
+                                 // removeTrim); trimsAt(t) gates the preview veil, keptSegments
+                                 // (REQ-126) drives the export exclusion, inTrims skips analyze
+                                 // frames; nextTrimId + trimMode (✂ toggle) ride alongside; reset
+                                 // on file load + Clear; persisted in .vrproj (REQ-130)
 }
 ```
+
+Project pending-state (v1.17.0 REQ-130): a parsed `.vrproj` awaiting its video (`pendingProject`) is set by the 📂 Load project handler, applied the moment a video is open (tracks adopted via `adoptTracks` + `clampTracksToDuration`, settings/trims restored), and cleared by Clear and after applying.
 
 Privacy invariant carried by state: `Track.keyframes` is dense over `[start, end]` after `tracker.finalize()`, so `redact.tracksAt(tracks, t)` resolves a box for every instant of every enabled span — preview and export both ask only `tracksAt(t)` and never re-derive. Manual tracks (REQ-103) satisfy the same invariant with ONE constant keyframe (`keyframes: Map([[0, box]])`) over a full-duration span — `tracksAt`'s nearest-keyframe clamp keeps the box constant at every instant.

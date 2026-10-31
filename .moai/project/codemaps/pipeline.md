@@ -19,10 +19,14 @@ All boxes/coordinates are display-oriented native pixels after ingest (ADR-9). S
  │   order; reusable canvas; faces every frame, plates every 2nd;    │
  │   settings.confFace / confPlate gate EVERY detect call            │
  │   (REQ-113; defaults detector.DEFAULT_CONF_FACE 0.6 /             │
- │   DEFAULT_CONF_PLATE 0.25); dashcam mode adds a tiled pass —      │
- │   tileGrid splits along the DOMINANT axis (columns for landscape/ │
- │   square, stacked rows for portrait, REQ-107) → mergeTiles keeps  │
- │   ONE display coordinate space (ADR-9)                            │
+ │   DEFAULT_CONF_PLATE 0.25); min-size filter (REQ-120) + optional  │
+ │   downscale (REQ-117, scaleFactorFor → detections rescaled to     │
+ │   native display coords before tracking); frames inside trim      │
+ │   regions are SKIPPED (v1.15.2, inTrims — no draw/inference/      │
+ │   tracking, skipped count reported); dashcam mode adds a tiled    │
+ │   pass — tileGrid splits along the DOMINANT axis (columns for     │
+ │   landscape/square, stacked rows for portrait, REQ-107) →         │
+ │   mergeTiles keeps ONE display coordinate space (ADR-9)           │
  │   ┌──────────────┐   ┌───────────────┐   ┌────────────┐           │
  │   │ detector.js  │   │ detector.js   │   │ tracker.js │           │
  │   │ detectFace   │──▶│ detectPlate   │──▶│ Tracker    │           │
@@ -75,14 +79,30 @@ All boxes/coordinates are display-oriented native pixels after ingest (ADR-9). S
  │ exporter.js  runExport: mediabunny Conversion.init({ video:        │
  │   { process } }) — process(sample) = draw + redact.pixelateFrame   │
  │   for tracksAt(t) → BURNED-IN pixels (forces video transcode)      │
- │   audio: no config → packet-copied (AAC→MP4, Opus/Vorbis→WebM)     │
+ │   block size scaled by pixelStrengthMultiplier (v1.17.0 REQ-129 —  │
+ │   the SAME strength the preview used, shared seam)                 │
+ │   exportGeometry(resolution, w, h) → {sf, outW, outH} (v1.16.0):   │
+ │   locked-size burn-in canvas + scaleTracks(tracks, sf) rescale     │
+ │   every keyframe box; encoder hints follow (REQ-127)               │
+ │   audio: no config → packet-copied (AAC→MP4, Opus/Vorbis→WebM);    │
+ │   "Include audio" OFF → audio track discarded (v1.16.0)            │
+ │   TRIM EXCLUSION (v1.15.0 REQ-126): with trims, ONE native         │
+ │   mediabunny trim Conversion per kept segment (burn-in per         │
+ │   segment, audio packet-copied), then the segments' encoded        │
+ │   packets are concatenated into one file with continuous           │
+ │   timestamps (no re-encode) — keptSegments drives the plan;        │
+ │   no trims → the single-pass path is byte-for-byte unchanged       │
  │   ladder: avc hw → avc software → vp9/WebM (probe + runtime retry) │
  │   output: StreamTarget(chunked) → OPFS staging → save picker /     │
  │   Blob download → temp cleanup (discardExportTemp crash sweep;     │
- │   the same sweep runs on an explicit CLEAR, v1.6.0)                │
+ │   the same sweep runs on an explicit CLEAR, v1.6.0; all segment    │
+ │   temps removed after delivery)                                    │
  └──────────┬─────────────────────────────────────────────────────────┘
             ▼
-     Redacted MP4/WebM file (redaction burned in, original audio)
+     Redacted MP4/WebM file (redaction burned in, original or no audio,
+     chosen resolution, trim regions excluded)
 ```
 
-Shared seams: `redact.pixelateFrame` is used by BOTH the review preview and the export process callback (pixel-truthful preview, AC-04) — one implementation dispatching per-track `pixelate`/`solid` styles (REQ-101/102). `models.ensureModel` feeds ORT sessions; after first run all weights come from IndexedDB (zero network). The threshold compare reuses the analyze loop's decode seam (`sampleFrameAt`) and the detector decode functions, so panel detections behave exactly like analyze-pass detections at the same level.
+Shared seams: `redact.pixelateFrame` is used by BOTH the review preview and the export process callback (pixel-truthful preview, AC-04) — one implementation dispatching per-track `pixelate`/`solid` styles (REQ-101/102) and the same pixel-strength multiplier (REQ-129). `models.ensureModel` feeds ORT sessions; after first run all weights come from IndexedDB (zero network). The threshold compare reuses the analyze loop's decode seam (`sampleFrameAt`) and the detector decode functions, so panel detections behave exactly like analyze-pass detections at the same level — and since v1.17.0 the compare also applies dashcam mode, the minimum-object-size filter and the detection downscale (REQ-128), so panels show what a real analyze would find.
+
+Project side-flow (v1.17.0 REQ-130): 💾 Save project → `project.serializeProject` → `.vrproj` download (settings, trims, tracks, video identity — no video bytes); 📂 Load project → `parseProject` (typed errors) → tracks adopted via `main.adoptTracks`/`clampTracksToDuration` when the video is (re-)opened; `validateVideoMatch` compares name/size/date and warns on mismatch.

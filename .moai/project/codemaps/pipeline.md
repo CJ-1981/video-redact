@@ -83,7 +83,9 @@ All boxes/coordinates are display-oriented native pixels after ingest (ADR-9). S
  │   the SAME strength the preview used, shared seam)                 │
  │   exportGeometry(resolution, w, h) → {sf, outW, outH} (v1.16.0):   │
  │   locked-size burn-in canvas + scaleTracks(tracks, sf) rescale     │
- │   every keyframe box; encoder hints follow (REQ-127)               │
+ │   every keyframe box; encoder hints follow (REQ-127); resolution   │
+ │   Full/1080p/720p/480p (480p = long edge 854, v1.18.0 — the same   │
+ │   long-edge rule as the other presets, one code path)              │
  │   audio: no config → packet-copied (AAC→MP4, Opus/Vorbis→WebM);    │
  │   "Include audio" OFF → audio track discarded (v1.16.0)            │
  │   TRIM EXCLUSION (v1.15.0 REQ-126): with trims, ONE native         │

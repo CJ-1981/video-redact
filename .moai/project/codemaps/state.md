@@ -43,6 +43,8 @@ Keyboard gating over states (v1.9.0/1.10.0, map extended v1.12.0): the doc-level
 
 Export settings flow (v1.16.0–v1.17.1, REQ-127): the export panel's resolution select and "Include audio" checkbox are read live at export click (`startExport` reads `els.exportResolution` / `els.exportAudio` / `app.settings.pixelStrength` / `app.trims`). `resetExportChoices()` (resolution → 'full', audio → checked) runs ONLY on file load and Clear — v1.17.1 removed the pre-read reset that made every export run with defaults. Pixel strength lives in `app.settings.pixelStrength` (preview and export share it).
 
+Layout state note (v1.18.0–v1.18.1): the review workspace's `#below-timeline` section (Tracks panel, then Compare-thresholds) is a child of `#stage-column` directly after `#timeline` — not a workspace-grid child — so the panels follow the preview-column width and hold a constant 28px gap (16px margin + 12px column gap) under the timeline no matter how tall the right rail is. Pure DOM/CSS contract, pinned by `tests/unit/mobile-ui.test.js`; no state-machine impact.
+
 ## Data shapes (`AppState`, src/types.js)
 
 ```ts

@@ -3289,9 +3289,21 @@ export async function mountApp(
    * Single rail-width mutation path: clamp → apply `--rail-w` on #workspace
    * (index.html sizes the side panel with it).
    */
+  let lastResizeRedrawAt = 0;
+  /** v1.14.1: a width change re-flows the preview stage — the editor must
+   * re-fit its canvas or the stale bitmap duplicates/stretches over the new
+   * layout. Throttled during drags (the final drag-end call is exact). */
+  function redrawAfterResize(force = false) {
+    const now = Date.now();
+    if (!force && now - lastResizeRedrawAt < 120) return;
+    lastResizeRedrawAt = now;
+    editor?.redraw();
+  }
+
   function applyRailWidth(px) {
     railWidth = clampRailWidth(px);
     if (els.workspace) els.workspace.style.setProperty('--rail-w', `${railWidth}px`);
+    redrawAfterResize();
   }
 
   const railHandle = els.railResize;
@@ -3324,6 +3336,7 @@ export async function mountApp(
         /* never captured or already released */
       }
       applyRailWidth(railWidth); // drag end: final clamp
+      redrawAfterResize(true);
     };
     railHandle.addEventListener('pointerup', endRailDrag);
     railHandle.addEventListener('pointercancel', endRailDrag);
@@ -3361,6 +3374,7 @@ export async function mountApp(
     /** Clamp + set --intake-w on #app-main (consumed by #intake-panel). */
     function applyIntakeWidth(px) {
       intakeW = clampRailWidth(px);
+      redrawAfterResize();
       // Defensive guards: fake elements in tests (and detached nodes) may
       // lack parentElement/style.setProperty/setAttribute.
       const host = els.intakePanel?.parentElement ?? doc.body;
@@ -3397,6 +3411,7 @@ export async function mountApp(
         /* never captured or already released */
       }
       applyIntakeWidth(intakeW); // drag end: final clamp
+      redrawAfterResize(true);
     };
     intakeHandle.addEventListener('pointerup', endIntakeDrag);
     intakeHandle.addEventListener('pointercancel', endIntakeDrag);

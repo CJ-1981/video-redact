@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.14.1] — 2026-10-31
+
+### Fixed
+- Preview image duplicated/stretched along the right edge after dragging a width handle: the preview IS the editor canvas, and on machines where rVFC never presents frames the frame loop never re-drew it after a layout change — the stale bitmap stayed stretched over the new layout beside the live <video>. Width handles now kick a (throttled) editor redraw live during the drag + an exact one on drag end, and the timeupdate fallback re-draws the canvas (~4 Hz) so rVFC-dead machines keep a correct preview during playback too.
+
 ## [1.14.0] — 2026-10-31
 
 ### Added

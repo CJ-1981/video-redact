@@ -1253,6 +1253,10 @@ export function mountEditor(els, hooks) {
    * frame where frames actually arrive). This also keeps position honest if
    * the draw loop ever halts fail-closed on an invariant throw.
    */
+  /** v1.14.1: timeupdate-driven canvas redraw throttle (rVFC-dead machines). */
+  const TU_DRAW_THROTTLE_MS = 250;
+  let lastTuDrawAt = 0;
+
   function onTimeUpdate() {
     // v1.9.0 diag: the EDITOR-owned timeupdate path proves itself on the
     // reporting machine — main.js's `tu` counter with `tued: 0` here would
@@ -1262,6 +1266,16 @@ export function mountEditor(els, hooks) {
     }
     try {
       updatePlayhead();
+      // v1.14.1: on machines where rVFC never presents frames (the reported
+      // Chrome/Win11), the frame loop is dead and the preview canvas keeps a
+      // stale bitmap forever — stretched/duplicated after any layout change.
+      // The media event stream is the reliable fallback: redraw the canvas
+      // here, throttled (timeupdate fires ~4 Hz).
+      const now = Date.now();
+      if (now - lastTuDrawAt >= TU_DRAW_THROTTLE_MS) {
+        lastTuDrawAt = now;
+        drawPreview();
+      }
     } catch (err) {
       noteTickFailure(err); // v1.9.0: a bad position write never kills the fallback
     }

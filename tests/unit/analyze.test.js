@@ -54,7 +54,9 @@ vi.mock('../../src/detector.js', async (importOriginal) => {
   };
 });
 
-const { runAnalyze, sampleFrameAt } = await import('../../src/analyze.js');
+const { runAnalyze, sampleFrameAt, scaleFactorFor, filterByMinSize } = await import(
+  '../../src/analyze.js'
+);
 const { VideoSampleSink } = await import('mediabunny');
 const { tileGrid } = await import('../../src/detector.js');
 
@@ -591,5 +593,236 @@ describe('loop mechanics — one canvas, per-frame yield (P-5)', () => {
       runAnalyze(baseOpts({ input: { getPrimaryVideoTrack: vi.fn(async () => null) } })),
     ).rejects.toThrow('runAnalyze: input has no primary video track.');
     expect(detState.detectorClosed).toBe(1);
+  });
+});
+
+describe('scaleFactorFor (REQ-117 — analysis downscale factor)', () => {
+  it("'full' (and undefined) → 1 — no downscale", () => {
+    expect(scaleFactorFor('full', 3840, 2160)).toBe(1);
+    expect(scaleFactorFor(undefined, 3840, 2160)).toBe(1);
+  });
+
+  it("'1080p' caps the LONG edge at 1920 (3840×2160 → 0.5)", () => {
+    expect(scaleFactorFor('1080p', 3840, 2160)).toBe(0.5);
+  });
+
+  it("'720p' caps the LONG edge at 1280 (3840×2160 → 1280/3840)", () => {
+    expect(scaleFactorFor('720p', 3840, 2160)).toBe(1280 / 3840);
+  });
+
+  it('portrait frames use the LONG edge (2160×3840 → 0.5 at 1080p)', () => {
+    expect(scaleFactorFor('1080p', 2160, 3840)).toBe(0.5);
+  });
+
+  it('never upscales a frame already at or under the cap', () => {
+    expect(scaleFactorFor('720p', 1280, 720)).toBe(1);
+    expect(scaleFactorFor('1080p', 1920, 1080)).toBe(1);
+    expect(scaleFactorFor('720p', 640, 480)).toBe(1);
+  });
+
+  it('unknown/invalid presets and non-finite dims → 1 (fail closed to native)', () => {
+    expect(scaleFactorFor('4k', 3840, 2160)).toBe(1);
+    expect(scaleFactorFor('constructor', 3840, 2160)).toBe(1);
+    expect(scaleFactorFor('', 3840, 2160)).toBe(1);
+    expect(scaleFactorFor('720p', NaN, 2160)).toBe(1);
+    expect(scaleFactorFor('720p', 3840, undefined)).toBe(1);
+  });
+});
+
+describe('filterByMinSize (REQ-120 — minimum display-size filter)', () => {
+  const dets = () => [
+    { t: 0, box: { x: 0, y: 0, w: 10, h: 10 }, cls: 'face', conf: 0.9, pass: 'full' },
+    { t: 0, box: { x: 5, y: 5, w: 100, h: 24 }, cls: 'face', conf: 0.8, pass: 'full' },
+    { t: 0, box: { x: 9, y: 9, w: 48, h: 96 }, cls: 'plate', conf: 0.7, pass: 'full' },
+  ];
+
+  it('drops detections whose min(w, h) is below the threshold, keeps >=', () => {
+    const kept = filterByMinSize(dets(), 24);
+    expect(kept).toHaveLength(2);
+    expect(kept.map((d) => Math.min(d.box.w, d.box.h))).toEqual([24, 48]);
+  });
+
+  it('minPx 0 → identity (everything kept, NEW array)', () => {
+    const src = dets();
+    const kept = filterByMinSize(src, 0);
+    expect(kept).not.toBe(src);
+    expect(kept).toEqual(src);
+  });
+
+  it('does not mutate the input array', () => {
+    const src = dets();
+    const kept = filterByMinSize(src, 48);
+    expect(src).toHaveLength(3);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].box).toEqual({ x: 9, y: 9, w: 48, h: 96 });
+  });
+
+  it('non-finite minPx (NaN / undefined) → no filter', () => {
+    const src = dets();
+    expect(filterByMinSize(src, NaN)).toEqual(src);
+    expect(filterByMinSize(src, undefined)).toEqual(src);
+  });
+
+  it('negative minPx → no filter (contract: minPx <= 0 disables)', () => {
+    expect(filterByMinSize(dets(), -5)).toHaveLength(3);
+  });
+});
+
+describe('processing downscale (REQ-117) — scaled canvas, display-space detections', () => {
+  it("downscale '720p' on 3840×2160 sizes the canvas 1280×720 and scales draw/grab", async () => {
+    const samples = installSink([0]);
+    const canvas = installCanvas();
+
+    await runAnalyze(
+      baseOpts({
+        meta: makeMeta({ displayWidth: 3840, displayHeight: 2160 }),
+        canvasFactory: canvas,
+        settings: { downscale: '720p' },
+      }),
+    );
+
+    expect(canvas).toHaveBeenCalledTimes(1);
+    expect(canvas.mock.calls[0]).toEqual([1280, 720]);
+    expect(samples[0].draw.mock.calls[0].slice(1)).toEqual([0, 0, 1280, 720]);
+    expect(canvas.ctx.getImageData).toHaveBeenCalledWith(0, 0, 1280, 720);
+    // The detector raster is the SCALED frame, not the 4K display frame.
+    expect(detState.detectFace.mock.calls[0][0].width).toBe(1280);
+    expect(detState.detectFace.mock.calls[0][0].height).toBe(720);
+  });
+
+  it("downscale '1080p' → 1920×1080 canvas", async () => {
+    installSink([0]);
+    const canvas = installCanvas();
+
+    await runAnalyze(
+      baseOpts({
+        meta: makeMeta({ displayWidth: 3840, displayHeight: 2160 }),
+        canvasFactory: canvas,
+        settings: { downscale: '1080p' },
+      }),
+    );
+
+    expect(canvas.mock.calls[0]).toEqual([1920, 1080]);
+  });
+
+  it("'full'/omitted keeps the native canvas at 4K (sf=1 fast path, zero rescale)", async () => {
+    installSink([0]);
+    const canvas = installCanvas();
+
+    await runAnalyze(
+      baseOpts({
+        meta: makeMeta({ displayWidth: 3840, displayHeight: 2160 }),
+        canvasFactory: canvas,
+      }),
+    );
+
+    expect(canvas.mock.calls[0]).toEqual([3840, 2160]);
+    expect(canvas.ctx.getImageData).toHaveBeenCalledWith(0, 0, 3840, 2160);
+  });
+
+  it('rescales detections from scaled space to display space before tracking', async () => {
+    installSink([0, 0.1, 0.2, 0.3]);
+    // Detector boxes come back in the SCALED 1280×720 space (sf = 1/3);
+    // the tracker must receive display-space boxes (60/3 → 180, etc.).
+    detState.detectFace.mockImplementation(async () => [
+      { t: 0, box: { x: 60, y: 30, w: 20, h: 20 }, cls: 'face', conf: 0.9, pass: 'full' },
+    ]);
+    detState.detectPlate.mockImplementation(async () => []);
+
+    const result = await runAnalyze(
+      baseOpts({
+        meta: makeMeta({ displayWidth: 3840, displayHeight: 2160 }),
+        settings: { downscale: '720p' },
+      }),
+    );
+
+    expect(result.tracks).toHaveLength(1);
+    const kf = result.tracks[0].keyframes.get(0);
+    expect(kf.x).toBeCloseTo(180, 6);
+    expect(kf.y).toBeCloseTo(90, 6);
+    expect(kf.w).toBeCloseTo(60, 6);
+    expect(kf.h).toBeCloseTo(60, 6);
+  });
+
+  it('dashcam + downscale: tile geometry on the SCALED frame, merge-back then rescale', async () => {
+    installSink([0, 0.1, 0.2]);
+    const canvas = installCanvas();
+    detState.detectFace.mockImplementation(async (frame) =>
+      frame.width === 1280
+        ? [{ t: 0, box: { x: 100, y: 100, w: 60, h: 60 }, cls: 'face', conf: 0.9, pass: 'full' }]
+        : [{ t: 0, box: { x: 5, y: 5, w: 30, h: 30 }, cls: 'face', conf: 0.7, pass: 'tile' }],
+    );
+    detState.detectPlate.mockImplementation(async () => []);
+
+    const result = await runAnalyze(
+      baseOpts({
+        meta: makeMeta({ displayWidth: 3840, displayHeight: 2160 }),
+        settings: { dashcamMode: true, downscale: '720p' },
+        canvasFactory: canvas,
+      }),
+    );
+
+    // Scaled 1280×720 → the same 4-tile horizontal geometry as native 720p.
+    const grabs = canvas.ctx.getImageData.mock.calls;
+    expect(grabs[0]).toEqual([0, 0, 1280, 720]);
+    expect(grabs.slice(1, 5)).toEqual([
+      [0, 0, 320, 720],
+      [320, 0, 320, 720],
+      [640, 0, 320, 720],
+      [960, 0, 320, 720],
+    ]);
+    expect(grabs).toHaveLength(15); // 3 frames × (1 full + 4 tiles)
+
+    // Tile-local boxes merged into SCALED full-frame coords (5/325/645/965),
+    // then rescaled to display (×3): 15/975/1935/2895; full face 100 → 300.
+    const faceTracks = result.tracks.filter((tr) => tr.cls === 'face');
+    expect(faceTracks).toHaveLength(5);
+    const xs = faceTracks.map((tr) => [...tr.keyframes.values()][0].x).sort((a, b) => a - b);
+    [15, 300, 975, 1935, 2895].forEach((v, i) => expect(xs[i]).toBeCloseTo(v, 6));
+  });
+});
+
+describe('minimum-size filter (REQ-120) — applied BEFORE the tracker', () => {
+  it('a persistently small detection never becomes a track; without the filter it does', async () => {
+    // 30×30 face on EVERY frame: 3 hits → normally a track.
+    detState.detectFace.mockImplementation(async () => [
+      { t: 0, box: { x: 10, y: 10, w: 30, h: 30 }, cls: 'face', conf: 0.9, pass: 'full' },
+    ]);
+    detState.detectPlate.mockImplementation(async () => []);
+
+    installSink([0, 0.1, 0.2]);
+    const filtered = await runAnalyze(baseOpts({ settings: { minSizePx: 48 } }));
+    expect(filtered.tracks).toHaveLength(0);
+
+    installSink([0, 0.1, 0.2]);
+    const unfiltered = await runAnalyze(baseOpts({}));
+    expect(unfiltered.tracks).toHaveLength(1);
+  });
+
+  it('filters in DISPLAY space after downscale rescale (24px scaled ≠ 24px display)', async () => {
+    installSink([0, 0.1]); // 2 hits → the surviving detection forms a track
+    // sf = 1/3: a 10×10 scaled box is 30×30 in display space — kept at 24,
+    // dropped at 48. Proves the filter runs AFTER the rescale.
+    detState.detectFace.mockImplementation(async () => [
+      { t: 0, box: { x: 50, y: 50, w: 10, h: 10 }, cls: 'face', conf: 0.9, pass: 'full' },
+    ]);
+    detState.detectPlate.mockImplementation(async () => []);
+
+    const kept = await runAnalyze(
+      baseOpts({
+        meta: makeMeta({ displayWidth: 3840, displayHeight: 2160 }),
+        settings: { downscale: '720p', minSizePx: 24 },
+      }),
+    );
+    expect(kept.tracks).toHaveLength(1);
+
+    installSink([0, 0.1]);
+    const dropped = await runAnalyze(
+      baseOpts({
+        meta: makeMeta({ displayWidth: 3840, displayHeight: 2160 }),
+        settings: { downscale: '720p', minSizePx: 48 },
+      }),
+    );
+    expect(dropped.tracks).toHaveLength(0);
   });
 });

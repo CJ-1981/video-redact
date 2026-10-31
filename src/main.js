@@ -56,6 +56,20 @@
  *                                      the fresh auto tracks; colliding auto
  *                                      ids are re-assigned past every existing
  *                                      id; returns {tracks, manualNextId}
+ *   RAIL_MIN_WIDTH_PX / RAIL_MAX_WIDTH_PX / DEFAULT_RAIL_WIDTH_PX /
+ *   RAIL_WIDTH_STEP_PX / clampRailWidth(px) / nextRailWidth(px, delta) /
+ *   dragRailWidth(startX, clientX, startW)
+ *                                      rail-split handle model (v1.12.0 REQ-118)
+ *   THEME_STORAGE_KEY / loadTheme(storage) / saveTheme(storage, theme) /
+ *   nextTheme(current) / themeGlyph(theme)
+ *                                      light-theme toggle model (v1.12.0 REQ-124)
+ *   fileInfoRows(file, meta) / formatFileDate(ms)
+ *                                      #file-info view model (v1.12.0 REQ-119)
+ *   SIZE_FILTER_VALUES / sizeFilterState(current, clicked) /
+ *   sizeFilterPressed(selected)        min-size filter model (v1.12.0 REQ-120)
+ *   DOWNSCALE_VALUES / normalizeDownscale(value)
+ *                                      processing-downscale model (v1.12.0 REQ-117)
+ *   SEEK_STEP_S                        keyboard seek step ±5 s (v1.12.0 REQ-122)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -423,6 +437,242 @@ export function dragStageHeight(startY, clientY, startH) {
 }
 
 // ---------------------------------------------------------------------------
+// Rail-split width model (pure; v1.12.0 REQ-118)
+// ---------------------------------------------------------------------------
+
+/** Lower clamp bound for the side-rail width, CSS px (REQ-118). */
+export const RAIL_MIN_WIDTH_PX = 240;
+/** Upper clamp bound for the side-rail width, CSS px (REQ-118). */
+export const RAIL_MAX_WIDTH_PX = 480;
+/** Default / double-click-reset rail width, CSS px (REQ-118). */
+export const DEFAULT_RAIL_WIDTH_PX = 320;
+/** Keyboard step (ArrowLeft / ArrowRight on the focused rail handle), CSS px. */
+export const RAIL_WIDTH_STEP_PX = 24;
+
+/**
+ * Clamp a desired side-rail width to the REQ-118 bounds as an integer. PURE.
+ * A non-finite `px` degrades to the default width (320) before clamping —
+ * the same degradation shape as clampStageHeight.
+ *
+ * @param {number} px Desired rail width, CSS px.
+ * @returns {number} Clamped integer rail width (240–480).
+ */
+export function clampRailWidth(px) {
+  if (!Number.isFinite(px)) return DEFAULT_RAIL_WIDTH_PX;
+  return Math.min(RAIL_MAX_WIDTH_PX, Math.max(RAIL_MIN_WIDTH_PX, Math.round(px)));
+}
+
+/**
+ * One rail-width step (REQ-118 keyboard parity: ArrowLeft/ArrowRight ±24 px)
+ * — `px` moved by `deltaPx`, then clamped by clampRailWidth. PURE.
+ *
+ * @param {number} px Current rail width, CSS px.
+ * @param {number} deltaPx Signed step (+ = wider rail), CSS px.
+ * @returns {number} New clamped integer rail width.
+ */
+export function nextRailWidth(px, deltaPx) {
+  const step = Number.isFinite(deltaPx) ? deltaPx : 0;
+  const from = Number.isFinite(px) ? px : DEFAULT_RAIL_WIDTH_PX;
+  return clampRailWidth(from + step);
+}
+
+/**
+ * Pointer-drag rail width (v1.12.0 REQ-118): the handle is the rail's LEFT
+ * edge, so it follows the pointer — moving the pointer RIGHT (clientX >
+ * startX) widens the rail. PURE; the caller clamps via the apply path.
+ *
+ * @param {number} startX Pointer X at drag start (CSS px).
+ * @param {number} clientX Current pointer X (CSS px).
+ * @param {number} startW Rail width at drag start (CSS px).
+ * @returns {number} Unclamped new rail width.
+ */
+export function dragRailWidth(startX, clientX, startW) {
+  const dx = Number.isFinite(clientX) && Number.isFinite(startX) ? clientX - startX : 0;
+  const from = Number.isFinite(startW) ? startW : DEFAULT_RAIL_WIDTH_PX;
+  return from + dx;
+}
+
+// ---------------------------------------------------------------------------
+// Light-theme toggle model (pure; v1.12.0 REQ-124)
+// ---------------------------------------------------------------------------
+
+/**
+ * localStorage key the theme choice persists under (REQ-124; Agent-HTML
+ * contract). 'light' | 'dark', dark is the default when absent/invalid.
+ * @type {string}
+ */
+export const THEME_STORAGE_KEY = 'video-redact-theme';
+
+/**
+ * Read the persisted theme choice. PURE against the injected `storage`
+ * (localStorage-like: getItem may throw — private-mode Safari, disabled
+ * storage, node); anything but a stored 'light'/'dark' degrades to null and
+ * the caller keeps the default theme.
+ *
+ * @param {{getItem?: (k: string) => string | null} | null | undefined} storage
+ * @returns {'light' | 'dark' | null}
+ */
+export function loadTheme(storage) {
+  try {
+    const raw = storage?.getItem?.(THEME_STORAGE_KEY);
+    return raw === 'light' || raw === 'dark' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the theme choice. PURE against the injected `storage`; every
+ * failure (quota, disabled storage, missing setItem) degrades to false —
+ * the toggle still applies for the session.
+ *
+ * @param {{setItem?: (k: string, v: string) => void} | null | undefined} storage
+ * @param {'light' | 'dark' | null | undefined} theme
+ * @returns {boolean} True when the write succeeded.
+ */
+export function saveTheme(storage, theme) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false;
+    storage.setItem(THEME_STORAGE_KEY, theme === 'light' ? 'light' : 'dark');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Theme toggle (REQ-124): dark ↔ light. Anything non-'light' counts as dark
+ * (the default), so an unknown current state still toggles INTO light.
+ * PURE.
+ *
+ * @param {'light' | 'dark' | null | undefined} current
+ * @returns {'light' | 'dark'}
+ */
+export function nextTheme(current) {
+  return current === 'light' ? 'dark' : 'light';
+}
+
+/**
+ * Toggle-button glyph showing the CURRENT theme's icon (REQ-124 wiring
+ * contract): '☀️' while dark (clicking switches to light), '🌙' while light.
+ * PURE.
+ *
+ * @param {'light' | 'dark' | null | undefined} theme
+ * @returns {'☀️'|'🌙'}
+ */
+export function themeGlyph(theme) {
+  return theme === 'light' ? '🌙' : '☀️';
+}
+
+// ---------------------------------------------------------------------------
+// File-information view model (pure; v1.12.0 REQ-119)
+// ---------------------------------------------------------------------------
+
+/**
+ * File last-modified timestamp → "date time" in the user's locale. PURE.
+ * A missing/invalid timestamp (0, negative, NaN, out-of-range) degrades to
+ * null — the row is omitted rather than shown as an invented date.
+ *
+ * @param {number | undefined} ms File.lastModified (ms since epoch).
+ * @returns {string | null}
+ */
+export function formatFileDate(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+}
+
+/**
+ * File object (+ optional MediaMeta) → the #file-info rows (REQ-119: name,
+ * size, last-modified date, type). PURE; node-safe against plain objects
+ * (no File instance required — only name/size/lastModified/type are read).
+ * Returns null for a missing file (the block stays hidden). The type row
+ * prefers the File MIME type and falls back to the container from meta.
+ *
+ * @param {{name?: unknown, size?: unknown, lastModified?: unknown,
+ *          type?: unknown} | null | undefined} file
+ * @param {import('./types.js').MediaMeta | null | undefined} meta
+ * @returns {Array<{label: string, value: string}> | null}
+ */
+export function fileInfoRows(file, meta) {
+  if (!file || typeof file !== 'object') return null;
+  const name = typeof file.name === 'string' && file.name.length > 0 ? file.name : 'unknown';
+  const rows = [
+    { label: 'Name', value: name },
+    { label: 'Size', value: formatBytes(Number(file.size)) },
+  ];
+  const modified = formatFileDate(/** @type {number} */ (file.lastModified));
+  if (modified) rows.push({ label: 'Modified', value: modified });
+  const mime = typeof file.type === 'string' && file.type.length > 0 ? file.type : '';
+  const container = meta?.container != null ? String(meta.container) : '';
+  rows.push({ label: 'Type', value: mime || container || 'unknown' });
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Detection min-size filter + processing downscale (pure; v1.12.0 REQ-120/117)
+// ---------------------------------------------------------------------------
+
+/**
+ * The REQ-120 button-group values, in button order (Any / ≥24px / ≥48px /
+ * ≥96px — minimum box dimension in display px). @type {number[]}
+ */
+export const SIZE_FILTER_VALUES = [0, 24, 48, 96];
+
+/**
+ * Size-filter click resolution (REQ-120). PURE: a clicked `data-size` that is
+ * one of SIZE_FILTER_VALUES wins; an invalid click keeps the current value
+ * (itself falling back to 0 = Any when also invalid) — the group can never
+ * enter an undefined state.
+ *
+ * @param {number | null | undefined} current Currently selected min px.
+ * @param {number | null | undefined} clicked The clicked button's data-size.
+ * @returns {number} The new selected min-px value.
+ */
+export function sizeFilterState(current, clicked) {
+  const cur = Number(current);
+  const click = Number(clicked);
+  if (SIZE_FILTER_VALUES.includes(click)) return click;
+  if (SIZE_FILTER_VALUES.includes(cur)) return cur;
+  return 0;
+}
+
+/**
+ * Selected min-px → the aria-pressed booleans for the button group, aligned
+ * with SIZE_FILTER_VALUES (REQ-120: exactly one button pressed). PURE; an
+ * invalid selection presses nothing (the wiring never produces one).
+ *
+ * @param {number | null | undefined} selected Currently selected min px.
+ * @returns {boolean[]}
+ */
+export function sizeFilterPressed(selected) {
+  const v = Number(selected);
+  return SIZE_FILTER_VALUES.map((value) => value === v);
+}
+
+/**
+ * The REQ-117 processing-downscale options. @type {string[]}
+ */
+export const DOWNSCALE_VALUES = ['full', '1080p', '720p'];
+
+/**
+ * Normalize a #downscale-select value to a legal REQ-117 option. PURE;
+ * anything unknown (missing select, hand-edited DOM) degrades to 'full' —
+ * no downscale is the safe default.
+ *
+ * @param {unknown} value Raw select value.
+ * @returns {'full' | '1080p' | '720p'}
+ */
+export function normalizeDownscale(value) {
+  const v = String(value ?? '');
+  return /** @type {'full' | '1080p' | '720p'} */ (
+    DOWNSCALE_VALUES.includes(v) ? v : 'full'
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Overlay control-bar view model (pure; v1.4.0 REQ-111)
 // ---------------------------------------------------------------------------
 
@@ -433,6 +683,13 @@ export function dragStageHeight(startY, clientY, startH) {
  * @type {number}
  */
 export const OVERLAY_HIDE_MS = 3000;
+
+/**
+ * Keyboard seek step in seconds (v1.12.0 REQ-122): ←/→ jump ±5 s;
+ * Shift+←/→ keeps the ±1-frame step.
+ * @type {number}
+ */
+export const SEEK_STEP_S = 5;
 
 /**
  * Play/pause glyph for a paused state — '▶' when paused, '⏸' while playing.
@@ -646,14 +903,15 @@ export function shortcutEnabledFor(focusEl, opts = {}) {
  * window error counters), then the editor gesture state (`drag`/`pin`/`pinMs`
  * — v1.9.0: the release pin is now OBSERVABLE via getGestureState, no longer
  * an always-null honest unknown), position (`thumbLeft`), where focus sits
- * (`focus` — a held focus is the classic "Space is dead" cause), and the
- * review facts (`tracks`/`webgpu`).
+ * (`focus` — a held focus is the classic "Space is dead" cause), the review
+ * facts (`tracks`/`webgpu`), and the active theme (`theme` — v1.12.0 REQ-124;
+ * a "dark styles on light theme" report needs the running theme in the line).
  * @type {string[]}
  */
 export const DIAG_KEY_ORDER = [
   'v', 'build', 'secure', 'step', 't', 'dur', 'paused', 'rate', 'muted',
   'tu', 'vfc', 'tued', 'errs', 'lastErr', 'drag', 'pin', 'pinMs',
-  'thumbLeft', 'focus', 'tracks', 'webgpu',
+  'thumbLeft', 'focus', 'tracks', 'webgpu', 'theme',
 ];
 
 /**
@@ -1042,6 +1300,14 @@ export async function mountApp(
     changeFile: /** @type {HTMLButtonElement | null} */ ($('change-file')),
     clearFile: /** @type {HTMLButtonElement | null} */ ($('clear-file')),
     appVersion: $('app-version'),
+    // v1.12.0 wiring (REQ-117/118/119/120/124). Every ref is null-guarded at
+    // its use — the markup may not carry the element (Agent-HTML lands
+    // separately) and the wiring must degrade to a no-op.
+    railResize: /** @type {HTMLElement | null} */ ($('rail-resize')),
+    themeToggle: /** @type {HTMLButtonElement | null} */ ($('theme-toggle')),
+    fileInfo: $('file-info'),
+    sizeFilter: $('size-filter'),
+    downscaleSelect: /** @type {HTMLSelectElement | null} */ ($('downscale-select')),
   };
 
   // --- REQ-004 secure-context gate: block everything, wire nothing --------
@@ -1063,7 +1329,8 @@ export async function mountApp(
    *          input: object | null, meta: import('./types.js').MediaMeta | null,
    *          caps: import('./types.js').CapabilityReport | null,
    *          tracks: import('./types.js').Track[], gen: number,
-   *          manualNextId: number, objectUrl: string | null}} */
+   *          manualNextId: number, objectUrl: string | null,
+   *          settings: {minSizePx: number, downscale: 'full' | '1080p' | '720p'}}} */
   const app = {
     step: 'gate',
     file: null,
@@ -1074,6 +1341,10 @@ export async function mountApp(
     gen: 0, // generation counter — stale async completions are dropped
     manualNextId: 1,
     objectUrl: null,
+    // v1.12.0: the analyze-pass settings driven by the #size-filter button
+    // group (REQ-120) and #downscale-select (REQ-117); reset per file load
+    // and Clear (resetSizeFilter / resetDownscale).
+    settings: { minSizePx: 0, downscale: 'full' },
   };
   let editor = /** @type {ReturnType<typeof mountEditor> | null} */ (null);
   let analyzeCtl = /** @type {AbortController | null} */ (null);
@@ -1208,7 +1479,15 @@ export async function mountApp(
         deriveStep(app.step, 'ANALYZE_START') == null;
       els.analyzeButton.textContent = app.step === 'gate' || app.step === 'ready' ? 'Analyze' : 'Re-analyze';
     }
-    if (els.analyzeCancel) els.analyzeCancel.hidden = !analyzing;
+    // v1.12.0 REQ-115 wiring: while analyzing the abort control is live and
+    // reads "Stop analysis"; otherwise it is hidden (and disabled, so it can
+    // never be tabbed into between updateButtons calls). The danger/large
+    // STYLING is Agent-HTML's (index.html); main.js owns only the state.
+    if (els.analyzeCancel) {
+      els.analyzeCancel.hidden = !analyzing;
+      els.analyzeCancel.disabled = !analyzing;
+      if (analyzing) els.analyzeCancel.textContent = 'Stop analysis';
+    }
     if (els.exportButton) {
       els.exportButton.disabled =
         exporting || deriveStep(app.step, 'EXPORT_START') == null;
@@ -1270,6 +1549,45 @@ export async function mountApp(
     }
   }
 
+  // --- v1.12.0 REQ-124: light theme (dark default, choice persisted) ---------
+  //
+  // Init at mount: read localStorage (guarded — private mode / disabled
+  // storage / node must never throw), apply documentElement[data-theme] +
+  // the toggle glyph, and persist on every click. The CSS custom-property
+  // swap itself is Agent-HTML's; main.js owns only the state + attributes.
+
+  /** localStorage seam; null when unavailable (never throws). */
+  function themeStorage() {
+    try {
+      const s = globalThis.localStorage;
+      return s && typeof s.getItem === 'function' ? s : null;
+    } catch {
+      return null;
+    }
+  }
+
+  let currentTheme = loadTheme(themeStorage()) ?? 'dark';
+
+  /** Apply the theme: documentElement dataset + the toggle glyph/aria state. */
+  function applyTheme(theme) {
+    const root = doc.documentElement;
+    if (root && root.dataset) root.dataset.theme = theme;
+    if (els.themeToggle) {
+      els.themeToggle.textContent = themeGlyph(theme);
+      // The markup ships aria-pressed on the toggle — keep it honest
+      // (pressed = the non-default light theme is active).
+      els.themeToggle.setAttribute('aria-pressed', String(theme === 'light'));
+    }
+  }
+
+  applyTheme(currentTheme);
+  els.themeToggle?.addEventListener('click', () => {
+    currentTheme = nextTheme(currentTheme);
+    applyTheme(currentTheme);
+    saveTheme(themeStorage(), currentTheme);
+  });
+  blurAfterClick(els.themeToggle);
+
   // --- Startup renders --------------------------------------------------------
 
   renderAttribution();
@@ -1279,6 +1597,12 @@ export async function mountApp(
   // v1.6.0: the analyze-panel controls start from the SAME factory clearAll
   // restores them with — one source of truth for the default settings.
   applySettings(DEFAULT_SETTINGS());
+  // v1.12.0: the REQ-117/120 controls start from their defaults too (and
+  // app.settings with them); the REQ-119 file-info block stays hidden until
+  // a file actually loads.
+  resetSizeFilter();
+  resetDownscale();
+  hideFileInfo();
   showIntake();
   void sweepExportTemps();
 
@@ -1395,6 +1719,41 @@ export async function mountApp(
     els.capGuidance.textContent = lines.join('\n');
   }
 
+  // --- v1.12.0 REQ-119: file-information block (#file-info) --------------------
+
+  /** Hide + empty the #file-info block (Clear / failed open / new file). */
+  function hideFileInfo() {
+    if (!els.fileInfo) return;
+    els.fileInfo.hidden = true;
+    els.fileInfo.replaceChildren();
+  }
+
+  /**
+   * Render the REQ-119 rows (name, size, last-modified date, type) from the
+   * loaded File (+ the meta container as the type fallback) and show the
+   * block. Label/value spans land FLAT in #file-info — the block is a
+   * two-column grid (index.html: #file-info .label / .value), no row wrapper.
+   */
+  function renderFileInfo(file, meta) {
+    if (!els.fileInfo) return;
+    els.fileInfo.replaceChildren();
+    const rows = fileInfoRows(file, meta);
+    if (!rows) {
+      els.fileInfo.hidden = true;
+      return;
+    }
+    for (const row of rows) {
+      const label = doc.createElement('span');
+      label.className = 'label';
+      label.textContent = row.label;
+      const value = doc.createElement('span');
+      value.className = 'value';
+      value.textContent = row.value;
+      els.fileInfo.append(label, value);
+    }
+    els.fileInfo.hidden = false;
+  }
+
   // --- File intake (REQ-001; fresh AppState per file) ---------------------------
 
   async function handleFile(file) {
@@ -1426,6 +1785,12 @@ export async function mountApp(
     resetAnalyzeUi();
     resetExportUi();
     refreshTrackUi();
+    // v1.12.0: the REQ-117/120 analyze settings reset per file (consistent
+    // with the other analyze-panel controls), and the REQ-119 file-info
+    // block hides until THIS file's metadata lands.
+    resetSizeFilter();
+    resetDownscale();
+    hideFileInfo();
 
     if (!els.fileInput) return;
     try {
@@ -1456,6 +1821,7 @@ export async function mountApp(
       }
 
       renderCapReport(meta, caps);
+      renderFileInfo(file, meta); // v1.12.0 REQ-119
       const g = guidance(caps);
       renderGuidance(g, caps);
 
@@ -1483,6 +1849,7 @@ export async function mountApp(
       app.meta = null;
       app.caps = null;
       renderCapReport(null, null);
+      hideFileInfo(); // v1.12.0: nothing to describe — the block goes away
       renderGuidance({ messages: [message] }, null);
       toast(message, { kind: 'error', timeoutMs: 8000 });
       // Previous state was already cleared — fall back to the intake gate.
@@ -1641,6 +2008,9 @@ export async function mountApp(
     applyStepper();
     updateButtons();
     applySettings(DEFAULT_SETTINGS());
+    resetSizeFilter(); // v1.12.0 REQ-120: back to Any
+    resetDownscale(); // v1.12.0 REQ-117: back to Full
+    hideFileInfo(); // v1.12.0 REQ-119: the file-info block goes away
     resetAnalyzeUi();
     resetExportUi();
     if (els.trackList) els.trackList.textContent = '';
@@ -1693,9 +2063,15 @@ export async function mountApp(
   // v1.10.0: the editor is live from READY (mounted at file-open), so Space
   // toggles playback and the B hint fire whenever the preview is visible —
   // the user expectation pre-analyze, where the workspace already shows.
-  // ←/→ frame-step keeps its review/done gating (at ready the transport
-  // buttons and the focused scrub thumb step frames; the doc shortcut stays
-  // a review-state semantic).
+  //
+  // v1.12.0 REQ-122: the shortcuts are active whenever the preview is
+  // visible (ready/review/done — the same states Space already ran in) and
+  // grow to the full transport set:
+  //   ←/→            seek ∓/±5 s (clamped to 0..duration) — no shift
+  //   Shift+←/→      frame-step ±1 (the old ←/→ semantics, now shifted)
+  //   F              toggle fullscreen / enlarged preview (same path as ⛶)
+  //   M              toggle mute
+  //   Space / B      unchanged (play-pause / manual-box hint)
 
   doc.addEventListener('keydown', (e) => {
     const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
@@ -1707,9 +2083,17 @@ export async function mountApp(
     if (e.key === ' ') {
       e.preventDefault();
       togglePlay();
-    } else if (reviewGated && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
-      stepFrame(e.key === 'ArrowRight' ? 1 : -1);
+      const forward = e.key === 'ArrowRight';
+      if (e.shiftKey) stepFrame(forward ? 1 : -1);
+      else seekBySeconds(forward ? SEEK_STEP_S : -SEEK_STEP_S);
+    } else if (e.key === 'f' || e.key === 'F') {
+      e.preventDefault();
+      togglePreviewEnlarge();
+    } else if (e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      toggleMute();
     } else if (e.key === 'b' || e.key === 'B') {
       // Manual-box mode: the canvas drag is live (editor's interaction map,
       // from ready since v1.10.0); B just tells the user what to do next.
@@ -1830,6 +2214,11 @@ export async function mountApp(
     const confPlate = Number(els.confPlate?.value);
     if (Number.isFinite(confFace)) settings.confFace = confFace;
     if (Number.isFinite(confPlate)) settings.confPlate = confPlate;
+    // v1.12.0 (REQ-117/120): the processing downscale + min-size filter ride
+    // along on every pass. Always passed — analyze.js owns the defaults and
+    // rescales detections to display coordinates before tracking.
+    settings.minSizePx = Number(app.settings.minSizePx) || 0;
+    settings.downscale = normalizeDownscale(app.settings.downscale);
     // epPolicy seam (ADR-5): force ['wasm'] when the capability report says
     // so (WebKit); otherwise OMIT so detector.js keeps its full webgpu→wasm
     // ladder (AC-17) instead of a single-entry override.
@@ -1961,6 +2350,62 @@ export async function mountApp(
   els.confFace?.addEventListener('input', syncThresholdReadouts);
   els.confPlate?.addEventListener('input', syncThresholdReadouts);
   syncThresholdReadouts();
+
+  // --- v1.12.0 REQ-120: detection min-size filter button group ----------------
+  //
+  // #size-filter holds .size-btn buttons (data-size "0"|"24"|"48"|"96");
+  // exactly one is aria-pressed at a time. The click maps the string
+  // data-size onto app.settings.minSizePx (number, display px) via the pure
+  // sizeFilterState/sizeFilterPressed pair; analyze.js filters detections
+  // with min(box.w, box.h) ≥ minSizePx BEFORE tracking.
+
+  /** Set the selection (normalized) + sync the group's aria-pressed states. */
+  function applySizeFilter(selectedPx) {
+    app.settings.minSizePx = sizeFilterState(app.settings.minSizePx, selectedPx);
+    const pressed = sizeFilterPressed(app.settings.minSizePx);
+    if (!els.sizeFilter) return;
+    let index = 0;
+    for (const btn of els.sizeFilter.querySelectorAll('.size-btn')) {
+      btn.setAttribute('aria-pressed', String(pressed[index] === true));
+      index += 1;
+    }
+  }
+
+  /** Back to Any (0) — file load + Clear (per-file setting by design). */
+  function resetSizeFilter() {
+    applySizeFilter(0);
+  }
+
+  if (els.sizeFilter) {
+    for (const btn of els.sizeFilter.querySelectorAll('.size-btn')) {
+      btn.addEventListener('click', () => {
+        // getAttribute (not .dataset): the buttons arrive typed as Element.
+        applySizeFilter(Number(btn.getAttribute?.('data-size')));
+      });
+      blurAfterClick(btn);
+    }
+  }
+
+  // --- v1.12.0 REQ-117: processing-downscale select ---------------------------
+  //
+  // #downscale-select ("full"|"1080p"|"720p") caps the analyze frame size;
+  // analyze.js rescales detections back to native display coordinates before
+  // tracking (ADR-9 space unchanged downstream). Reset per file load + Clear.
+
+  function applyDownscale(value) {
+    app.settings.downscale = normalizeDownscale(value);
+    if (els.downscaleSelect) els.downscaleSelect.value = app.settings.downscale;
+  }
+
+  /** Back to Full — file load + Clear (consistent with the size filter). */
+  function resetDownscale() {
+    applyDownscale('full');
+  }
+
+  els.downscaleSelect?.addEventListener('change', () => {
+    applyDownscale(els.downscaleSelect?.value);
+  });
+  blurAfterChange(els.downscaleSelect);
 
   /**
    * Apply a clicked panel's level to BOTH sliders (REQ-114), readouts
@@ -2286,7 +2731,7 @@ export async function mountApp(
     v.muted = !v.muted;
   }
 
-  /** Frame-step ±1 source frame (same semantics as the ← / → shortcuts). */
+  /** Frame-step ±1 source frame (same semantics as the Shift+← / → shortcuts). */
   function stepFrame(direction) {
     const v = els.video;
     if (!v) return;
@@ -2295,6 +2740,20 @@ export async function mountApp(
     const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
     v.pause();
     v.currentTime = Math.min(Math.max(0, v.currentTime + dt), dur);
+  }
+
+  /**
+   * Seek by `delta` seconds, clamped to 0..duration (v1.12.0 REQ-122 ←/→).
+   * Unlike stepFrame this does NOT pause — a seek while playing keeps
+   * playing, matching player conventions.
+   */
+  function seekBySeconds(delta) {
+    const v = els.video;
+    if (!v) return;
+    const cur = Number.isFinite(v.currentTime) ? v.currentTime : 0;
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
+    const d = Number.isFinite(delta) ? delta : 0;
+    v.currentTime = Math.min(Math.max(0, cur + d), dur);
   }
 
   /** Shared speed set — both selectors route here and re-sync together. */
@@ -2440,6 +2899,7 @@ export async function mountApp(
       focus: focusLabel(doc.activeElement),
       tracks: app.tracks.length,
       webgpu: view ? 'gpu' in view.navigator : null,
+      theme: currentTheme, // v1.12.0 REQ-124: the active theme rides the line
     }));
   }
 
@@ -2544,7 +3004,12 @@ export async function mountApp(
     els.previewStage?.addEventListener(ev, showOverlayControls);
   }
 
-  els.fullscreenButton?.addEventListener('click', () => {
+  /**
+   * Toggle fullscreen / enlarged preview (v1.12.0 REQ-122 KeyF + the ⛶
+   * button share this exact path): active → exit, else request native
+   * fullscreen with the in-page zoom fallback on rejection/unavailability.
+   */
+  function togglePreviewEnlarge() {
     if (isNativeFullscreen() || isZoomFallback()) {
       exitPreview();
       return;
@@ -2556,6 +3021,10 @@ export async function mountApp(
     } else {
       enterZoomFallback();
     }
+  }
+
+  els.fullscreenButton?.addEventListener('click', () => {
+    togglePreviewEnlarge();
   });
   // v1.6.1 REG-2: do NOT blur here unconditionally — inside NATIVE fullscreen,
   // focus must stay within the fullscreen element (blurring to <body> is
@@ -2709,6 +3178,84 @@ export async function mountApp(
       e.stopPropagation();
       applyStageHeight(nextStageHeight(stageHeight, step, stageViewportH(), stageReservedHeight()));
     });
+  }
+
+  // --- Rail-split resize (v1.12.0 REQ-118 #rail-resize) -------------------------
+  //
+  // Same pattern as the stage-height handle above: pointer capture drag,
+  // double-click reset, ArrowLeft/ArrowRight ±24 px on the focused handle.
+  // The split is persisted per SESSION only (the `--rail-w` custom property
+  // on #workspace — no localStorage; Clear and reloads reset it).
+
+  let railWidth = DEFAULT_RAIL_WIDTH_PX;
+
+  /**
+   * Single rail-width mutation path: clamp → apply `--rail-w` on #workspace
+   * (index.html sizes the side panel with it).
+   */
+  function applyRailWidth(px) {
+    railWidth = clampRailWidth(px);
+    if (els.workspace) els.workspace.style.setProperty('--rail-w', `${railWidth}px`);
+  }
+
+  const railHandle = els.railResize;
+  if (railHandle) {
+    /** Live pointer drag: pointerdown anchor + rail width at anchor. */
+    let railDrag = /** @type {{startX: number, startW: number} | null} */ (null);
+
+    railHandle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      railDrag = { startX: e.clientX, startW: railWidth };
+      try {
+        railHandle.setPointerCapture(e.pointerId);
+      } catch {
+        /* detached handle — capture is best-effort */
+      }
+      e.preventDefault();
+    });
+    railHandle.addEventListener('pointermove', (e) => {
+      if (!railDrag) return;
+      // The handle is the rail's LEFT edge: drag RIGHT = wider rail
+      // (dragRailWidth is direction-pinned by unit test).
+      applyRailWidth(dragRailWidth(railDrag.startX, e.clientX, railDrag.startW));
+    });
+    const endRailDrag = (e) => {
+      if (!railDrag) return;
+      railDrag = null;
+      try {
+        railHandle.releasePointerCapture(e.pointerId);
+      } catch {
+        /* never captured or already released */
+      }
+      applyRailWidth(railWidth); // drag end: final clamp
+    };
+    railHandle.addEventListener('pointerup', endRailDrag);
+    railHandle.addEventListener('pointercancel', endRailDrag);
+    // v1.6.1 REG-2 pattern: after a POINTER drag, release focus so the
+    // doc-level transport shortcuts keep working.
+    railHandle.addEventListener('pointerup', () => {
+      if (railHandle.blur) railHandle.blur();
+    });
+    railHandle.addEventListener('dblclick', () => {
+      applyRailWidth(DEFAULT_RAIL_WIDTH_PX);
+    });
+    railHandle.addEventListener('keydown', (e) => {
+      const step =
+        e.key === 'ArrowRight'
+          ? RAIL_WIDTH_STEP_PX
+          : e.key === 'ArrowLeft'
+            ? -RAIL_WIDTH_STEP_PX
+            : 0;
+      if (step === 0) return;
+      e.preventDefault();
+      // Stop the doc-level shortcuts: the rail handle's ←/→ must NOT also
+      // seek the video (the handle is not a button).
+      e.stopPropagation();
+      applyRailWidth(nextRailWidth(railWidth, step));
+    });
+    // Initial application so the CSS var exists even before the first drag
+    // (a no-op when index.html already carries the same default).
+    applyRailWidth(railWidth);
   }
 
   return null;

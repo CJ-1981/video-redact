@@ -610,20 +610,20 @@ describe('main-wiring: ?debug=1 runtime diagnostics (v1.8.2)', () => {
 
   it('formatDiagLine serializes a full support snapshot compactly (round-trip)', () => {
     const line = main.formatDiagLine({
-      v: '1.9.0', build: '2026-10-30', secure: true, step: 'review',
+      v: '1.12.0', build: '2026-10-30', secure: true, step: 'review',
       t: 3.14159, dur: NaN, paused: false, rate: 1, muted: false,
       tu: 12, vfc: 0, tued: 12, errs: 1, lastErr: 'probe-boom',
       drag: false, pin: false, pinMs: 0, thumbLeft: '12.5%',
-      focus: 'BODY', tracks: 2, webgpu: true,
+      focus: 'BODY', tracks: 2, webgpu: true, theme: 'dark',
     });
     const parsed = JSON.parse(line);
     expect(parsed).toEqual({
-      v: '1.9.0', build: '2026-10-30', secure: true, step: 'review',
+      v: '1.12.0', build: '2026-10-30', secure: true, step: 'review',
       // no rounding here — the snapshot's toFixed(2) owns that, this only finite-guards
       t: 3.14159, dur: null, paused: false, rate: 1, muted: false,
       tu: 12, vfc: 0, tued: 12, errs: 1, lastErr: 'probe-boom',
       drag: false, pin: false, pinMs: 0, thumbLeft: '12.5%',
-      focus: 'BODY', tracks: 2, webgpu: true,
+      focus: 'BODY', tracks: 2, webgpu: true, theme: 'dark',
     });
     expect(Object.keys(parsed)).toEqual(main.DIAG_KEY_ORDER);
     expect(line).not.toContain(' '); // compact — stays one console line
@@ -633,10 +633,11 @@ describe('main-wiring: ?debug=1 runtime diagnostics (v1.8.2)', () => {
     // The v1.9.0 additions — the unreproducible field failure demanded a
     // conclusive line: page exceptions (errs/lastErr), the editor's own
     // timeupdate path (tued), and the editor gesture state (drag/pin/pinMs).
+    // v1.12.0 appends `theme` (REQ-124) after the review facts.
     expect(main.DIAG_KEY_ORDER).toEqual([
       'v', 'build', 'secure', 'step', 't', 'dur', 'paused', 'rate', 'muted',
       'tu', 'vfc', 'tued', 'errs', 'lastErr', 'drag', 'pin', 'pinMs',
-      'thumbLeft', 'focus', 'tracks', 'webgpu',
+      'thumbLeft', 'focus', 'tracks', 'webgpu', 'theme',
     ]);
     const line = main.formatDiagLine({
       tu: 1, vfc: 2, tued: 3, errs: 4, lastErr: 'e', drag: true,
@@ -771,12 +772,23 @@ describe('mountEditorSafe (v1.9.0 editor-mount exception isolation)', () => {
 // must be ALWAYS on (no ?debug=1) and feed errs/lastErr.
 // ---------------------------------------------------------------------------
 
+/** CSSStyleDeclaration-ish fake: plain properties + setProperty/getPropertyValue. */
+function makeFakeStyle() {
+  const s = {};
+  s.setProperty = (k, v) => {
+    s[k] = String(v);
+  };
+  s.getPropertyValue = (k) => (k in s ? String(s[k]) : '');
+  return s;
+}
+
 /** Minimal DOM-element fake good enough for mountApp's guarded wiring. */
 function makeFakeEl(tag = 'DIV') {
   const listeners = new Map();
+  const classes = new Set();
   const el = {
     tagName: tag,
-    style: {},
+    style: makeFakeStyle(),
     dataset: {},
     attrs: {},
     children: [],
@@ -821,7 +833,23 @@ function makeFakeEl(tag = 'DIV') {
     querySelectorAll() {
       return [];
     },
-    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    // v1.12.0: functional class list — the F-key zoom-toggle test asserts the
+    // .preview-zoom class actually lands on #preview-stage.
+    classList: {
+      add(...names) {
+        for (const n of names) classes.add(n);
+      },
+      remove(...names) {
+        for (const n of names) classes.delete(n);
+      },
+      toggle(name, force) {
+        const on = force === undefined ? !classes.has(name) : force;
+        if (on) classes.add(name);
+        else classes.delete(name);
+        return on;
+      },
+      contains: (n) => classes.has(n),
+    },
     getBoundingClientRect() {
       return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
     },
@@ -1211,7 +1239,7 @@ describe('mountApp (v1.10.0): the editor mounts at READY — analysis merges, ne
     }
   });
 
-  it('Space toggles playback at ready; ←/→ frame-step stays review-gated', async () => {
+  it('v1.12.0 REQ-122: Space toggles playback at ready; ←/→ seek ±5 s, Shift+←/→ frame-step', async () => {
     const { fakeDoc, fakeView } = makeFakeEnv();
     armGlobals(fakeView);
     try {
@@ -1231,7 +1259,8 @@ describe('mountApp (v1.10.0): the editor mounts at READY — analysis merges, ne
       expect(video.playsPlayed).toBe(1);
       expect(video.paused).toBe(false);
 
-      // ←/→ remain a review-state semantic: no frame-step at ready.
+      // ←/→ are now a ±5 s SEEK (REQ-122), legal wherever Space is — at
+      // ready too. The fake video's duration is NaN → the cap is open-ended.
       video.currentTime = 2;
       const arrowPrevented = [];
       fakeDoc.__dispatch('keydown', {
@@ -1239,8 +1268,60 @@ describe('mountApp (v1.10.0): the editor mounts at READY — analysis merges, ne
         target: null,
         preventDefault: () => arrowPrevented.push('arrow'),
       });
-      expect(arrowPrevented).toEqual([]);
-      expect(video.currentTime).toBe(2);
+      expect(arrowPrevented).toEqual(['arrow']);
+      expect(video.currentTime).toBe(7); // 2 + 5
+
+      // Shift+←/→ carry the OLD ±1-frame semantics (fps 30 from FAKE_META).
+      fakeDoc.__dispatch('keydown', {
+        key: 'ArrowRight',
+        shiftKey: true,
+        target: null,
+        preventDefault: () => {},
+      });
+      expect(video.currentTime).toBeCloseTo(7 + 1 / 30, 10);
+      fakeDoc.__dispatch('keydown', {
+        key: 'ArrowLeft',
+        shiftKey: true,
+        target: null,
+        preventDefault: () => {},
+      });
+      expect(video.currentTime).toBeCloseTo(7, 10);
+
+      // ← seeks back 5 s; a seek never pauses (unlike the frame step).
+      fakeDoc.__dispatch('keydown', {
+        key: 'ArrowLeft',
+        target: null,
+        preventDefault: () => {},
+      });
+      expect(video.currentTime).toBeCloseTo(2, 10);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('v1.12.0 REQ-122: F toggles the enlarged preview, M toggles mute (at ready)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      const video = fakeDoc.getElementById('preview-video');
+      const stage = fakeDoc.getElementById('preview-stage');
+
+      // M toggles video.muted (the glyph sync rides volumechange — not fired
+      // by the fake, the muted STATE is the contract here).
+      video.muted = false;
+      fakeDoc.__dispatch('keydown', { key: 'm', target: null, preventDefault: () => {} });
+      expect(video.muted).toBe(true);
+      fakeDoc.__dispatch('keydown', { key: 'M', target: null, preventDefault: () => {} });
+      expect(video.muted).toBe(false);
+
+      // F enters the in-page zoom fallback (the fake stage has no
+      // requestFullscreen) and F again leaves it — the SAME path as ⛶.
+      fakeDoc.__dispatch('keydown', { key: 'f', target: null, preventDefault: () => {} });
+      expect(stage.classList.contains('preview-zoom')).toBe(true);
+      fakeDoc.__dispatch('keydown', { key: 'F', target: null, preventDefault: () => {} });
+      expect(stage.classList.contains('preview-zoom')).toBe(false);
     } finally {
       restoreGlobals();
     }
@@ -1295,6 +1376,347 @@ describe('mountApp (v1.10.0): the editor mounts at READY — analysis merges, ne
         source: 'manual',
         label: 'Manual #4',
       });
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.12.0 — pure models for the new controls (REQ-117/118/119/120/124)
+// ---------------------------------------------------------------------------
+
+describe('main-wiring: rail width model (v1.12.0 REQ-118)', () => {
+  it('clampRailWidth bounds the split to 240–480 and rounds', () => {
+    expect(main.clampRailWidth(320)).toBe(320);
+    expect(main.clampRailWidth(200)).toBe(240);
+    expect(main.clampRailWidth(-5)).toBe(240);
+    expect(main.clampRailWidth(1000)).toBe(480);
+    expect(main.clampRailWidth(300.7)).toBe(301);
+  });
+
+  it('clampRailWidth degrades non-finite input to the default 320', () => {
+    expect(main.clampRailWidth(NaN)).toBe(320);
+    expect(main.clampRailWidth(Infinity)).toBe(320);
+    expect(main.clampRailWidth(-Infinity)).toBe(320);
+    expect(main.clampRailWidth(undefined)).toBe(320);
+  });
+
+  it('nextRailWidth steps ±24 px inside the clamp', () => {
+    expect(main.nextRailWidth(320, 24)).toBe(344);
+    expect(main.nextRailWidth(320, -24)).toBe(296);
+    expect(main.nextRailWidth(480, 24)).toBe(480); // upper bound holds
+    expect(main.nextRailWidth(240, -24)).toBe(240); // lower bound holds
+    expect(main.nextRailWidth(NaN, 24)).toBe(344); // default 320 + step
+    expect(main.nextRailWidth(320, NaN)).toBe(320); // dead step
+  });
+
+  it('dragRailWidth pins the direction: pointer RIGHT widens the rail', () => {
+    expect(main.dragRailWidth(300, 420, 320)).toBe(440);
+    expect(main.dragRailWidth(300, 250, 320)).toBe(270); // left = narrower
+    // Degradations: non-finite pointer coords → no movement; bad start → default.
+    expect(main.dragRailWidth(NaN, 420, 320)).toBe(320);
+    expect(main.dragRailWidth(300, NaN, 320)).toBe(320);
+    expect(main.dragRailWidth(300, 420, NaN)).toBe(440); // default 320 + 120
+  });
+});
+
+describe('main-wiring: theme model (v1.12.0 REQ-124)', () => {
+  it('themeGlyph shows the CURRENT theme icon: ☀️ dark, 🌙 light', () => {
+    expect(main.themeGlyph('dark')).toBe('☀️');
+    expect(main.themeGlyph('light')).toBe('🌙');
+    // Unknown/absent = dark default.
+    expect(main.themeGlyph(null)).toBe('☀️');
+    expect(main.themeGlyph(undefined)).toBe('☀️');
+  });
+
+  it('nextTheme toggles dark ↔ light (unknown degrades to dark → light)', () => {
+    expect(main.nextTheme('dark')).toBe('light');
+    expect(main.nextTheme('light')).toBe('dark');
+    expect(main.nextTheme(null)).toBe('light');
+    expect(main.nextTheme('bogus')).toBe('light');
+  });
+
+  it('loadTheme accepts only stored light/dark and never throws', () => {
+    expect(main.loadTheme({ getItem: () => 'light' })).toBe('light');
+    expect(main.loadTheme({ getItem: () => 'dark' })).toBe('dark');
+    expect(main.loadTheme({ getItem: () => 'blue' })).toBeNull();
+    expect(main.loadTheme({ getItem: () => null })).toBeNull();
+    expect(main.loadTheme({ getItem: () => { throw new Error('denied'); } })).toBeNull();
+    expect(main.loadTheme(null)).toBeNull();
+    expect(main.loadTheme({})).toBeNull(); // no getItem
+  });
+
+  it('saveTheme persists under the canonical key and reports failures', () => {
+    const writes = [];
+    expect(main.saveTheme({ setItem: (k, v) => writes.push([k, v]) }, 'light')).toBe(true);
+    expect(writes).toEqual([['video-redact-theme', 'light']]);
+    expect(main.saveTheme({ setItem: (k, v) => writes.push([k, v]) }, 'dark')).toBe(true);
+    expect(writes[1]).toEqual(['video-redact-theme', 'dark']);
+    expect(writes[1][0]).toBe(main.THEME_STORAGE_KEY);
+    // Failures degrade to false — never throw.
+    expect(main.saveTheme({ setItem: () => { throw new Error('quota'); } }, 'light')).toBe(false);
+    expect(main.saveTheme(null, 'light')).toBe(false);
+    expect(main.saveTheme({}, 'light')).toBe(false);
+  });
+});
+
+describe('main-wiring: file-info view model (v1.12.0 REQ-119)', () => {
+  it('formatFileDate renders a locale string and nulls invalid timestamps', () => {
+    const shown = main.formatFileDate(Date.UTC(2026, 0, 15, 12, 0, 0));
+    expect(typeof shown).toBe('string');
+    expect(shown.length).toBeGreaterThan(0);
+    expect(main.formatFileDate(0)).toBeNull();
+    expect(main.formatFileDate(-5)).toBeNull();
+    expect(main.formatFileDate(NaN)).toBeNull();
+    expect(main.formatFileDate(undefined)).toBeNull();
+  });
+
+  it('fileInfoRows renders name/size/modified/type with the container fallback', () => {
+    const lastModified = Date.UTC(2026, 0, 15, 12, 0, 0);
+    const rows = main.fileInfoRows(
+      { name: 'clip.mp4', size: 2048, lastModified, type: 'video/mp4' },
+      { container: 'mp4' },
+    );
+    expect(rows.map((r) => r.label)).toEqual(['Name', 'Size', 'Modified', 'Type']);
+    expect(rows[0].value).toBe('clip.mp4');
+    expect(rows[1].value).toBe('2.0 KB');
+    expect(rows[2].value).toBe(main.formatFileDate(lastModified));
+    expect(rows[3].value).toBe('video/mp4');
+
+    // No MIME type → the meta container answers the Type row.
+    const fallback = main.fileInfoRows({ name: 'x.mkv', size: 1 }, { container: 'mkv' });
+    expect(fallback.find((r) => r.label === 'Type').value).toBe('mkv');
+    // Missing lastModified → the row is omitted, never an invented date.
+    const noDate = main.fileInfoRows({ name: 'x.mp4', size: 1 }, null);
+    expect(noDate.map((r) => r.label)).toEqual(['Name', 'Size', 'Type']);
+    expect(noDate.find((r) => r.label === 'Type').value).toBe('unknown');
+  });
+
+  it('fileInfoRows returns null for a missing file (block stays hidden)', () => {
+    expect(main.fileInfoRows(null, null)).toBeNull();
+    expect(main.fileInfoRows(undefined, { container: 'mp4' })).toBeNull();
+    expect(main.fileInfoRows('not-an-object', null)).toBeNull();
+  });
+});
+
+describe('main-wiring: size filter + downscale models (v1.12.0 REQ-120/117)', () => {
+  it('sizeFilterState: a valid data-size click wins; invalid keeps current; both invalid → 0', () => {
+    expect(main.sizeFilterState(0, 48)).toBe(48);
+    expect(main.sizeFilterState(24, 96)).toBe(96);
+    expect(main.sizeFilterState(24, 99)).toBe(24); // not a group value
+    expect(main.sizeFilterState(24, NaN)).toBe(24);
+    expect(main.sizeFilterState(NaN, NaN)).toBe(0); // full degrade → Any
+    expect(main.sizeFilterState(undefined, 96)).toBe(96);
+  });
+
+  it('sizeFilterPressed maps the selection onto exactly one pressed button', () => {
+    expect(main.sizeFilterPressed(0)).toEqual([true, false, false, false]);
+    expect(main.sizeFilterPressed(24)).toEqual([false, true, false, false]);
+    expect(main.sizeFilterPressed(48)).toEqual([false, false, true, false]);
+    expect(main.sizeFilterPressed(96)).toEqual([false, false, false, true]);
+    expect(main.sizeFilterPressed(NaN)).toEqual([false, false, false, false]);
+    expect(main.sizeFilterPressed(99)).toEqual([false, false, false, false]);
+  });
+
+  it('SIZE_FILTER_VALUES match the REQ-120 button order and data-size strings', () => {
+    expect(main.SIZE_FILTER_VALUES).toEqual([0, 24, 48, 96]);
+  });
+
+  it('normalizeDownscale passes the legal options through and degrades to full', () => {
+    expect(main.normalizeDownscale('full')).toBe('full');
+    expect(main.normalizeDownscale('1080p')).toBe('1080p');
+    expect(main.normalizeDownscale('720p')).toBe('720p');
+    expect(main.normalizeDownscale('4k')).toBe('full');
+    expect(main.normalizeDownscale('')).toBe('full');
+    expect(main.normalizeDownscale(undefined)).toBe('full');
+    expect(main.normalizeDownscale(null)).toBe('full');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.12.0 — wiring integration through the REAL mountApp (fake DOM)
+// ---------------------------------------------------------------------------
+
+describe('mountApp (v1.12.0): theme, rail, size filter, cancel, file-info', () => {
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  it('REQ-124: the toggle glyph follows the theme and swaps on click', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      const toggle = fakeDoc.getElementById('theme-toggle');
+      expect(toggle.textContent).toBe('☀️'); // dark default
+      expect(toggle.attrs['aria-pressed']).toBe('false');
+      toggle.dispatch('click');
+      expect(toggle.textContent).toBe('🌙');
+      expect(toggle.attrs['aria-pressed']).toBe('true');
+      toggle.dispatch('click');
+      expect(toggle.textContent).toBe('☀️');
+      expect(toggle.attrs['aria-pressed']).toBe('false');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('REQ-118: pointer drag / dblclick / Arrow keys drive --rail-w on #workspace', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      const handle = fakeDoc.getElementById('rail-resize');
+      const workspace = fakeDoc.getElementById('workspace');
+      // Initial application: the CSS var exists before any interaction.
+      expect(workspace.style['--rail-w']).toBe('320px');
+
+      handle.dispatch('pointerdown', {
+        button: 0, clientX: 300, pointerId: 1, preventDefault: () => {},
+      });
+      handle.dispatch('pointermove', { clientX: 420, pointerId: 1 });
+      expect(workspace.style['--rail-w']).toBe('440px'); // drag right = wider
+      handle.dispatch('pointermove', { clientX: 900, pointerId: 1 });
+      expect(workspace.style['--rail-w']).toBe('480px'); // clamped
+      handle.dispatch('pointerup', { pointerId: 1 });
+      expect(workspace.style['--rail-w']).toBe('480px'); // final clamp holds
+
+      handle.dispatch('dblclick');
+      expect(workspace.style['--rail-w']).toBe('320px'); // reset
+
+      handle.dispatch('keydown', {
+        key: 'ArrowRight', preventDefault: () => {}, stopPropagation: () => {},
+      });
+      expect(workspace.style['--rail-w']).toBe('344px');
+      handle.dispatch('keydown', {
+        key: 'ArrowLeft', preventDefault: () => {}, stopPropagation: () => {},
+      });
+      expect(workspace.style['--rail-w']).toBe('320px');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('REQ-120/117: a size-filter click sets aria-pressed + minSizePx, and the analyze pass carries minSizePx + downscale', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      // Pre-seed the button group + select before mountApp wires them.
+      const filter = makeFakeEl('DIV');
+      const buttons = ['0', '24', '48', '96'].map((size) => {
+        const btn = makeFakeEl('BUTTON');
+        btn.setAttribute('data-size', size);
+        return btn;
+      });
+      filter.querySelectorAll = () => buttons;
+      elsById.set('size-filter', filter);
+      const select = makeFakeEl('SELECT');
+      elsById.set('downscale-select', select);
+
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      // Defaults applied at mount: Any pressed, select shows 'full'.
+      expect(buttons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['true', 'false', 'false', 'false'],
+      );
+      expect(select.value).toBe('full');
+
+      select.value = '1080p';
+      select.dispatch('change');
+      buttons[2].dispatch('click'); // data-size "48"
+      expect(buttons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['false', 'false', 'true', 'false'],
+      );
+
+      await openFile(fakeDoc);
+      // Per-file reset: back to Any / Full (consistent with the panel).
+      expect(buttons[2].attrs['aria-pressed']).toBe('false');
+      expect(buttons[0].attrs['aria-pressed']).toBe('true');
+      expect(select.value).toBe('full');
+
+      // Re-apply, then run the pass: settings must carry both values.
+      select.value = '720p';
+      select.dispatch('change');
+      buttons[1].dispatch('click'); // data-size "24"
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      const call = runAnalyzeMock.mock.calls.at(-1)?.[0];
+      expect(call.settings.minSizePx).toBe(24);
+      expect(call.settings.downscale).toBe('720p');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('REQ-115: the cancel control reads "Stop analysis", enabled while analyzing', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      const cancel = fakeDoc.getElementById('analyze-cancel');
+      // Not analyzing: hidden and disabled.
+      expect(cancel.hidden).toBe(true);
+      expect(cancel.disabled).toBe(true);
+
+      runAnalyzeMock.mockReturnValueOnce(new Promise(() => {})); // pending pass
+      await openFile(fakeDoc);
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      expect(cancel.hidden).toBe(false);
+      expect(cancel.disabled).toBe(false);
+      expect(cancel.textContent).toBe('Stop analysis');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('REQ-119: #file-info renders from the File on open and hides on Clear', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      const info = fakeDoc.getElementById('file-info');
+      expect(info.hidden).toBe(true);
+
+      await openFile(fakeDoc);
+      expect(info.hidden).toBe(false);
+      // The fake File is a 3-byte mp4 Blob named clip.mp4 (no lastModified —
+      // the Modified row is omitted, never an invented date). Label/value
+      // spans land FLAT in the two-column grid (index.html contract).
+      const byLabel = {};
+      for (let i = 0; i + 1 < info.children.length; i += 2) {
+        byLabel[info.children[i].textContent] = info.children[i + 1].textContent;
+      }
+      expect(byLabel.Name).toBe('clip.mp4');
+      expect(byLabel.Size).toBe('3 B');
+      expect(byLabel.Type).toBe('video/mp4');
+
+      fakeDoc.getElementById('clear-file').dispatch('click');
+      expect(info.hidden).toBe(true);
+      expect(info.children).toHaveLength(0);
     } finally {
       restoreGlobals();
     }

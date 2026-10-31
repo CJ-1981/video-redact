@@ -110,8 +110,15 @@ export {};
  * @property {Track[]} tracks                       Current review state.
  * @property {{dashcamMode: boolean, padSeconds: number,
  *             quality: 'high'|'balanced',
- *             confFace?: number, confPlate?: number}} settings
+ *             confFace?: number, confPlate?: number,
+ *             downscale?: 'full'|'1080p'|'720p', minSizePx?: number}} settings
  *     `confFace`/`confPlate` (v1.5.0 REQ-113): detection confidence
  *     thresholds from the Analyze-panel sensitivity sliders (face default
  *     0.6, plate 0.25); undefined → detector defaults.
+ *     `downscale` (v1.12.0 REQ-117): analysis-canvas LONG-edge cap —
+ *     'full' (default, native px) | '1080p' (cap 1920) | '720p' (cap 1280);
+ *     detections are rescaled to display space before tracking.
+ *     `minSizePx` (v1.12.0 REQ-120): minimum detection box dimension
+ *     min(w, h) in display px (0 = no filter); smaller detections are
+ *     dropped before the tracker.
  */

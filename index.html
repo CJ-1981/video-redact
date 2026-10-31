@@ -53,6 +53,19 @@
       --font-num: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
+    /* ── Light theme (v1.12.0 REQ-124): a pure custom-property swap — dark is
+       the default (no attribute); main.js sets data-theme='light' on <html>
+       and persists the choice. Accent / safe / alert / track palette are
+       unchanged: the signal colors read correctly on both surfaces. ── */
+    :root[data-theme='light'] {
+      --bg-base: #f5f6f8;        /* paper canvas                        */
+      --bg-panel: #ffffff;       /* panels                              */
+      --bg-inset: #eef0f3;       /* wells: timeline track, progress rail */
+      --line: #d9dee5;           /* hairline borders                    */
+      --ink-hi: #1a1f26;         /* primary text                        */
+      --ink: #5a6472;            /* neutral secondary — never for state */
+    }
+
     * { box-sizing: border-box; }
     /* v1.6.1 REG-3: body is a MIN-height flex column, not a fixed-height one.
        With `height: 100%` the footer stayed pinned at the viewport bottom
@@ -62,7 +75,10 @@
        BELOW the workspace in flow; the stage-height clamp in main.js
        (viewportH − reserved) is what normally keeps everything inside the
        viewport without scrolling in the first place. */
-    html { height: 100%; }
+    /* v1.12.0 REQ-124: color-scheme follows the theme so form controls,
+       scrollbars and UA widgets render natively in the active scheme. */
+    html { height: 100%; color-scheme: dark; }
+    html[data-theme='light'] { color-scheme: light; }
     body {
       margin: 0;
       min-height: 100%;
@@ -176,6 +192,8 @@
     }
     #clear-file:hover { background: #E5484D; color: #fff; }
     #clear-file:focus-visible { outline: 2px solid var(--alert); outline-offset: 2px; }
+    /* v1.12.0 REQ-124: light-theme toggle (glyph ☀️/🌙 managed by main.js). */
+    #theme-toggle { font-size: 15px; line-height: 1.2; padding: 6px 10px; }
     #stepper {
       display: flex;
       gap: 4px;
@@ -213,11 +231,33 @@
       flex: 1;
       min-width: 0;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 320px;
+      /* v1.12.0 REQ-118: the rail width is drag-adjustable — main.js sets
+         --rail-w (clamped 240–480 px, matching #rail-resize's aria bounds)
+         and this grid track follows. The middle track owns the 10 px
+         separator column. */
+      grid-template-columns: minmax(0, 1fr) 10px var(--rail-w, 320px);
       gap: 16px;
       align-items: start;
     }
     #stage-column { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+
+    /* ── Rail resize handle (v1.12.0 REQ-118): draggable vertical separator
+       between the preview column and the side panel. Drag ↔ / ArrowLeft /
+       ArrowRight adjust --rail-w; double-click resets (wired by main.js). ── */
+    #rail-resize {
+      align-self: stretch;
+      width: 10px;
+      border-radius: 5px;
+      cursor: col-resize;
+      touch-action: none;
+      user-select: none;
+      background: transparent;
+    }
+    #rail-resize:hover { background: var(--line); }
+    #rail-resize:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
 
     /* ── Drop zone + capability report ── */
     #drop-zone {
@@ -240,6 +280,22 @@
     }
     .drop-title { margin: 0; font-size: 17px; font-weight: 600; }
     .drop-hint { margin: 0; color: var(--ink); font-size: 13px; }
+
+    /* v1.12.0 REQ-119: file-information block (name, size, last-modified,
+       type) rendered above the capability report; main.js fills it and
+       removes [hidden]. Label/value pairs flow into a two-column grid. */
+    #file-info {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 14px;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      font-size: 13px;
+    }
+    #file-info .label { color: var(--ink); }
+    #file-info .value { color: var(--ink-hi); font-family: var(--font-num); overflow-wrap: anywhere; }
 
     #cap-report {
       background: var(--bg-panel);
@@ -468,6 +524,26 @@
       outline-offset: 2px;
     }
 
+    /* ── Below-timeline flow (v1.12.0 REQ-116): the threshold-compare section
+       and the track list move OUT of the right rail into a full-width row
+       under the timeline — compare left, tracks right on wide screens,
+       stacked single-column on mobile. ── */
+    #below-timeline {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+      min-width: 0;
+    }
+    #below-timeline > * {
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      min-width: 0;
+    }
+
     /* ── Right rail ── */
     #right-rail {
       display: flex;
@@ -536,6 +612,49 @@
       font-size: 12.5px;
       color: var(--ink-hi);
     }
+    /* v1.12.0 REQ-120: minimum object size — a segmented control of 4 joined
+       buttons (Any / ≥24px / ≥48px / ≥96px). The selected segment gets the
+       accent fill + dark text via [aria-pressed='true'] (main.js owns the
+       pressed state); -1px margins collapse the shared borders. */
+    #size-filter {
+      display: flex;
+      margin-top: 8px;
+      max-width: 320px;
+    }
+    .size-btn {
+      flex: 1 1 0;
+      min-width: 0;
+      margin-left: -1px;
+      border-radius: 0;
+      padding: 6px 4px;
+      font-size: 12.5px;
+      min-height: 32px;
+    }
+    .size-btn:first-child { margin-left: 0; border-radius: 8px 0 0 8px; }
+    .size-btn:last-child { border-radius: 0 8px 8px 0; }
+    .size-btn[aria-pressed='true'] {
+      position: relative;
+      z-index: 1; /* selected border stays visible over the collapsed neighbors */
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #14100A;
+      font-weight: 600;
+    }
+    .size-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; z-index: 2; }
+
+    /* v1.12.0 REQ-115: the analysis-abort control is prominent — danger
+       styling mirroring #clear-file, full panel width, ≥ 40px tall. */
+    #analyze-cancel {
+      width: 100%;
+      margin-top: 10px;
+      min-height: 40px;
+      color: var(--alert);
+      border-color: var(--alert);
+      background: transparent;
+      font-weight: 600;
+    }
+    #analyze-cancel:hover { background: var(--alert); color: #fff; }
+    #analyze-cancel:focus-visible { outline: 2px solid var(--alert); outline-offset: 2px; }
     .slider-row input[type='number'] {
       flex: 1;
       min-width: 0;
@@ -547,14 +666,29 @@
       padding: 4px 6px;
       font-size: 12.5px;
     }
+    /* v1.12.0 REQ-121: the compare frame-time input lives in the wider
+       below-timeline location now — give it room to show its full value
+       (no 9ch cap, grows/shrinks with the row, never truncates). */
+    #compare-time {
+      flex: 1 1 90px;
+      min-width: 0;
+      max-width: none;
+      font-size: 13px;
+    }
     #compare-button { width: 100%; margin-top: 6px; }
+    /* v1.12.0 REQ-116: horizontal scrollable strip — panels keep a fixed
+       240px width and the container scrolls sideways instead of growing the
+       page vertically. */
     #threshold-panels {
       display: flex;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 8px;
       align-items: flex-start;
+      overflow-x: auto;
+      padding-bottom: 4px;
     }
     .threshold-panel {
+      flex: 0 0 240px;
       display: flex;
       flex-direction: column;
       gap: 3px;
@@ -694,10 +828,11 @@
     [hidden] { display: none !important; }
 
     /* ── Mobile layout (v1.4.0 REQ-112): at ≤ 820 px the app collapses to a
-       single column — the right rail (tracks, export, attribution) stacks
-       below the timeline, controls get ≥ 40 px touch targets, the stage
-       defaults to 48vh (the resize handle still overrides via its inline
-       --stage-h), and nothing overflows horizontally at 390 px. ── */
+       single column — the right rail (analyze, export) and the below-timeline
+       row (threshold compare, tracks) stack under the timeline, controls get
+       ≥ 40 px touch targets, the stage defaults to 48vh (the resize handle
+       still overrides via its inline --stage-h), and nothing overflows
+       horizontally at 390 px. ── */
     @media (max-width: 820px) {
       /* #app-main is a row on desktop with the intake/capability panel pinned
          at 320 px via an inline flex set by main.js — switching the axis to
@@ -705,6 +840,8 @@
          full width without fighting the runtime style. */
       #app-main { flex-direction: column; padding: 12px; }
       #workspace { grid-template-columns: 1fr; }
+      #rail-resize { display: none; } /* no draggable split on one column */
+      #below-timeline { grid-template-columns: 1fr; } /* REQ-116: stacked */
       #app-header { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
       #stepper { flex-wrap: wrap; }
       #stepper li { padding: 6px 8px; }
@@ -743,6 +880,10 @@
       <div class="tagline">Faces &amp; plates pixelated locally — nothing leaves this device</div>
     </div>
     <div id="header-actions">
+      <!-- v1.12.0 REQ-124: light/dark theme toggle. Dark is the default, so
+           the resting glyph offers the sun (switch to light); main.js flips
+           html[data-theme], swaps the glyph, and persists the choice. -->
+      <button id="theme-toggle" type="button" title="Toggle light theme" aria-label="Toggle light theme" aria-pressed="false">☀️</button>
       <!-- v1.6.0: full unload & reset — aborts in-flight passes, frees the
            decoder + blob URL, sweeps export temps, resets every panel back to
            the landing view. Hidden at the gate step (nothing to clear);
@@ -767,10 +908,25 @@
         <input id="file-input" type="file" accept="video/*,.mp4,.mov,.m4v,.webm" hidden />
       </div>
 
+      <!-- v1.12.0 REQ-119: file-information block — name, size, last-modified
+           date, type. Filled + unhidden by main.js once a file is loaded;
+           label/value pairs land in the two-column grid from the CSS. -->
+      <div id="file-info" hidden></div>
+
       <section id="cap-report" hidden aria-live="polite">
         <h2>Capability report</h2>
         <table id="cap-report-body"></table>
         <p id="cap-guidance" hidden></p>
+      </section>
+
+      <!-- v1.12.0 REQ-123: Models/attribution moved out of the right rail
+           into the left column, immediately after the capability report. -->
+      <section id="model-attribution" aria-label="Model attribution">
+        <h2>Models</h2>
+        <ul>
+          <li>YuNet face detection (2023mar, 232 KB) — MIT — huggingface.co/opencv/face_detection_yunet</li>
+          <li>YOLOv9-t license plates (640 end-to-end, 7.8 MB) — MIT — github.com/ankandrew/open-image-models</li>
+        </ul>
       </section>
     </section>
 
@@ -839,6 +995,13 @@
         </section>
       </section>
 
+      <!-- v1.12.0 REQ-118: draggable vertical separator between the preview
+           column and the side panel. main.js owns the pointer/keyboard drag
+           (--rail-w, clamped 240–480 px, persisted per session); the aria
+           bounds below mirror that clamp. Sits between the two columns so
+           grid auto-placement lands each sibling in its own track. -->
+      <div id="rail-resize" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Adjust panel width" aria-valuemin="240" aria-valuemax="480" aria-valuenow="320" title="Drag to adjust panel width — double-click resets"></div>
+
       <aside id="right-rail">
         <section id="analyze-panel" aria-label="Analyze pass">
           <h2>Analyze</h2>
@@ -869,32 +1032,32 @@
               <input type="range" id="conf-plate" min="0.05" max="0.90" step="0.05" value="0.25" />
               <output id="conf-plate-out" for="conf-plate">0.25</output>
             </label>
+
+            <!-- REQ-120 (v1.12.0): detection minimum-size filter — segmented
+                 button group. data-size is the min box dimension in display
+                 px (0 = Any); main.js owns aria-pressed and the setting. -->
+            <h3>Minimum object size</h3>
+            <div id="size-filter" role="group" aria-label="Minimum object size">
+              <button type="button" class="size-btn" data-size="0" aria-pressed="true">Any</button>
+              <button type="button" class="size-btn" data-size="24" aria-pressed="false">&ge;24px</button>
+              <button type="button" class="size-btn" data-size="48" aria-pressed="false">&ge;48px</button>
+              <button type="button" class="size-btn" data-size="96" aria-pressed="false">&ge;96px</button>
+            </div>
+            <!-- REQ-117 (v1.12.0): optional processing downscale — caps the
+                 frame size used during analyze (detections are rescaled to
+                 native display coordinates before tracking). -->
+            <h3>Processing resolution</h3>
+            <select id="downscale-select" aria-label="Processing resolution">
+              <option value="full" selected>Full (slowest, most detail)</option>
+              <option value="1080p">Downscale to 1080p</option>
+              <option value="720p">Downscale to 720p (fastest)</option>
+            </select>
           </div>
 
-          <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
-               decode + one inference per model, five fixed-level panels.
-               Clicking a panel applies that level to BOTH sliders above. -->
-          <div id="threshold-compare" role="group" aria-label="Single-frame threshold comparison">
-            <h3>Compare thresholds</h3>
-            <label class="slider-row" for="compare-time">
-              <span class="slider-name">Frame&nbsp;time&nbsp;(s)</span>
-              <input type="number" id="compare-time" class="num" min="0" max="0" step="0.1" value="0" />
-              <!-- v1.11.0: one-click sync from the preview playhead — no manual
-                   read-off of the transport timecode. -->
-              <button id="compare-use-preview" type="button" title="Set frame time to the preview's current position">Use preview time</button>
-            </label>
-            <button id="compare-button" type="button">Compare thresholds</button>
-            <p id="compare-status" class="stat-line" role="status"></p>
-            <div id="threshold-panels"></div>
-          </div>
+          <!-- REQ-114 (v1.5.0) / REQ-116 (v1.12.0): the threshold-compare
+               section moved to #below-timeline under the timeline. -->
 
           <button id="analyze-cancel" type="button" hidden>Cancel analysis</button>
-        </section>
-
-        <section id="tracks-panel" aria-label="Detected tracks">
-          <h2>Tracks</h2>
-          <ul id="track-list"></ul>
-          <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
         </section>
 
         <section id="export-panel" aria-label="Export settings">
@@ -912,20 +1075,42 @@
           <button id="export-cancel" type="button" hidden style="width:100%">Cancel export</button>
           <p id="export-status" class="num" role="status"></p>
         </section>
-
-        <section id="model-attribution" aria-label="Model attribution">
-          <h2>Models</h2>
-          <ul>
-            <li>YuNet face detection (2023mar, 232 KB) — MIT — huggingface.co/opencv/face_detection_yunet</li>
-            <li>YOLOv9-t license plates (640 end-to-end, 7.8 MB) — MIT — github.com/ankandrew/open-image-models</li>
-          </ul>
-        </section>
       </aside>
+
+      <!-- v1.12.0 REQ-116: bottom flow under the timeline — threshold
+           compare (left) + track list (right) on wide screens, stacked on
+           mobile. Both moved out of the right rail with every inner id
+           intact. -->
+      <section id="below-timeline" aria-label="Threshold comparison and detected tracks">
+        <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
+             decode + one inference per model, five fixed-level panels.
+             Clicking a panel applies that level to BOTH sensitivity sliders. -->
+        <div id="threshold-compare" role="group" aria-label="Single-frame threshold comparison">
+          <h3>Compare thresholds</h3>
+          <label class="slider-row" for="compare-time">
+            <span class="slider-name">Frame&nbsp;time&nbsp;(s)</span>
+            <input type="number" id="compare-time" class="num" min="0" max="0" step="0.1" value="0" />
+            <!-- v1.11.0: one-click sync from the preview playhead — no manual
+                 read-off of the transport timecode. -->
+            <button id="compare-use-preview" type="button" title="Set frame time to the preview's current position">Use preview time</button>
+          </label>
+          <button id="compare-button" type="button">Compare thresholds</button>
+          <p id="compare-status" class="stat-line" role="status"></p>
+          <div id="threshold-panels"></div>
+        </div>
+
+        <section id="tracks-panel" aria-label="Detected tracks">
+          <h2>Tracks</h2>
+          <ul id="track-list"></ul>
+          <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
+        </section>
+      </section>
     </div>
   </main>
 
   <footer id="keyboard-hints">
-    <span class="hints"><kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>←</kbd>/<kbd>→</kbd> frame step&ensp;·&ensp;<kbd>B</kbd> draw manual box&ensp;·&ensp;click a timeline chip to scrub &amp; toggle&ensp;·&ensp;drag a chip edge to trim</span>
+    <!-- v1.12.0 REQ-122: updated shortcut set (behavior wired by main.js). -->
+    <span class="hints"><kbd>←</kbd>/<kbd>→</kbd> jump 5s&ensp;·&ensp;<kbd>shift+←</kbd>/<kbd>shift+→</kbd> frame step&ensp;·&ensp;<kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>F</kbd> fullscreen&ensp;·&ensp;<kbd>M</kbd> mute&ensp;·&ensp;<kbd>B</kbd> draw box</span>
     <span id="app-version" class="num"></span>
   </footer>
 

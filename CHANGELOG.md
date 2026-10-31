@@ -6,6 +6,20 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-31
+
+### Added
+- Layout: threshold-compare and track list moved below the preview timeline (compare panels in a horizontal scrollable strip); Models panel moved under the capability report; draggable vertical handle between the preview column and the side panel (240–480px, keyboard + double-click reset).
+- File information block (name, size, modified date, type) above the capability report.
+- Detection minimum-size filter as a button group (Any / ≥24px / ≥48px / ≥96px) — smaller detections are skipped before tracking.
+- Optional processing downscale (Full / 1080p / 720p) for faster 4K analysis; detections are rescaled to native display coordinates before tracking.
+- Keyboard: ←/→ jump ±5s, Shift+←/→ frame-step, F toggles enlarged preview, M toggles mute.
+- Light theme via a header toggle (choice persisted).
+
+### Changed
+- Analysis cancel button is state-driven ("Stop analysis", danger-styled) while a pass is running.
+- Compare frame-time field no longer truncates (wider bottom-section layout).
+
 ## [1.11.0] — 2026-10-31
 
 ### Added

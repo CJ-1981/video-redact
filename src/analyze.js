@@ -27,6 +27,19 @@
  * gate EVERY detect call (full-frame and tile passes), and `sampleFrameAt()`
  * decodes ONE sample at a requested time through the same seams — the
  * single-frame threshold comparison's decode step.
+ *
+ * v1.12.0 (SPEC-VID-002 REQ-117/120): `settings.downscale` ('full'|'1080p'|
+ * '720p') caps the analysis canvas LONG edge (`scaleFactorFor`), shrinking the
+ * per-frame draw + getImageData cost at 4K; detections come back in SCALED
+ * space and are rescaled to display space before stamping/tracking, so the
+ * tracker, editor, and exporter stay in the one display coordinate space
+ * (ADR-9 unchanged downstream). Note: detector inference input is always 640²
+ * letterboxed regardless of canvas size, so the downscale win is the
+ * pre-processing cost (draw + getImageData) and tile-count stability — the
+ * dashcam tileGrid is computed on the SCALED frame, which keeps tile geometry
+ * sane for 4K portrait. `settings.minSizePx` (0 = off) drops detections whose
+ * display-space min(w, h) is below the threshold BEFORE the tracker
+ * (`filterByMinSize`), so tiny false positives never become tracks.
  */
 import { VideoSampleSink } from 'mediabunny';
 import { createDetectors, mergeTiles, tileGrid } from './detector.js';
@@ -38,6 +51,60 @@ const FPS_WINDOW = 30;
 
 /** Default plate stride: plate detector runs every 2nd analyzed frame. */
 const DEFAULT_PLATE_STRIDE = 2;
+
+/**
+ * REQ-117 downscale presets → LONG-edge cap (native px) of the analysis
+ * canvas. A Map (not an object literal) so arbitrary strings like
+ * 'constructor' can never hit prototype members.
+ */
+const DOWNSCALE_CAPS = new Map([
+  ['1080p', 1920],
+  ['720p', 1280],
+]);
+
+/**
+ * REQ-117 pure helper — analysis-canvas scale factor for a downscale preset.
+ * The factor caps the LONG edge of the frame: '1080p' → 1920, '720p' → 1280;
+ * 'full' (and any unknown/invalid preset) → 1. Frames already at or under
+ * the cap are never upscaled (result clamped to ≤ 1).
+ *
+ * @param {'full'|'1080p'|'720p'|undefined} downscale Downscale preset.
+ * @param {number} displayW Display frame width, native px.
+ * @param {number} displayH Display frame height, native px.
+ * @returns {number} Scale factor ∈ (0, 1] to apply to BOTH axes.
+ */
+export function scaleFactorFor(downscale, displayW, displayH) {
+  const cap = DOWNSCALE_CAPS.get(downscale);
+  if (!cap) return 1;
+  if (
+    !Number.isFinite(displayW) ||
+    !Number.isFinite(displayH) ||
+    displayW <= 0 ||
+    displayH <= 0
+  ) {
+    return 1;
+  }
+  return Math.min(1, cap / Math.max(displayW, displayH));
+}
+
+/**
+ * REQ-120 pure helper — minimum-size filter. Keeps detections whose
+ * DISPLAY-space box has min(w, h) >= `minPx`; `minPx <= 0` (the default) and
+ * non-finite `minPx` disable the filter entirely. Non-mutating: always
+ * returns a NEW array, never the input.
+ *
+ * @param {import('./types.js').Detection[]} detections Detections in display space.
+ * @param {number} minPx Minimum min(w, h) in display px (0 = no filter).
+ * @returns {import('./types.js').Detection[]} New filtered array.
+ */
+export function filterByMinSize(detections, minPx) {
+  if (!Array.isArray(detections)) return [];
+  if (!Number.isFinite(minPx) || minPx <= 0) return [...detections];
+  return detections.filter((d) => {
+    const box = d?.box;
+    return Number.isFinite(Math.min(box?.w, box?.h)) && Math.min(box.w, box.h) >= minPx;
+  });
+}
 
 /**
  * Default canvas factory: one OffscreenCanvas (document canvas fallback for
@@ -80,13 +147,20 @@ function defaultYieldNow() {
  * @param {object} [opts.input] Mediabunny `Input` from ingest.openInput().
  * @param {import('./types.js').MediaMeta} [opts.meta] Display size / fps / duration.
  * @param {{dashcamMode?: boolean, plateStride?: number, padSeconds?: number,
- *          confFace?: number, confPlate?: number, epPolicy?: string[]}} [opts.settings]
+ *          confFace?: number, confPlate?: number, epPolicy?: string[],
+ *          downscale?: 'full'|'1080p'|'720p', minSizePx?: number}} [opts.settings]
  *     Analysis settings. `plateStride` (default 2) is the full-pass plate
  *     cadence; `padSeconds` overrides the finalize padding (default 5/fps,
  *     REQ-007); `confFace` / `confPlate` (REQ-113, defaults 0.6 / 0.25 —
  *     the detector's DEFAULT_CONF_FACE / DEFAULT_CONF_PLATE) gate the face /
  *     plate decode on EVERY detect call, full-frame AND dashcam tile passes;
- *     `epPolicy` overrides the ORT execution-provider ladder (ADR-5).
+ *     `epPolicy` overrides the ORT execution-provider ladder (ADR-5);
+ *     `downscale` (REQ-117, default 'full') caps the analysis-canvas LONG
+ *     edge ('1080p' → 1920, '720p' → 1280) — detections are rescaled back to
+ *     display space before tracking, so everything downstream stays in
+ *     native coordinates (ADR-9); `minSizePx` (REQ-120, default 0 = off)
+ *     drops detections whose display-space min(w, h) is below the threshold
+ *     BEFORE the tracker.
  * @param {(progress: {phase: 'models', model: string, fraction: number} |
  *                {phase: 'analyze', frameCount: number,
  *                 totalFrames: number|null, analyzeFps: number|null,
@@ -142,6 +216,16 @@ export async function runAnalyze({
       ? Math.max(0, Math.round(meta.duration * fps))
       : null;
 
+  // REQ-117: optional analysis downscale. The canvas (and thus draw +
+  // getImageData) runs at the SCALED size; detections come back in scaled
+  // space and are rescaled to display space below, so tracking and
+  // everything downstream stays in native display coordinates (ADR-9).
+  // Inference input is always 640² letterboxed, so the win here is
+  // pre-processing cost + stable tile geometry at 4K — not inference size.
+  const sf = scaleFactorFor(settings?.downscale, width, height);
+  const analysisW = sf === 1 ? width : Math.max(1, Math.round(width * sf));
+  const analysisH = sf === 1 ? height : Math.max(1, Math.round(height * sf));
+
   // Models + ORT sessions (download progress folded into onProgress).
   const detectors = await createDetectors({
     epPolicy: settings?.epPolicy,
@@ -154,11 +238,15 @@ export async function runAnalyze({
     const sink = new VideoSampleSink(videoTrack);
 
     // ONE canvas for the whole run (@MX:WARN memory discipline) — the 640²
-    // letterbox happens inside detector.js, not per-frame here.
-    const { ctx } = makeCanvas(width, height);
+    // letterbox happens inside detector.js, not per-frame here. Sized to the
+    // (possibly downscaled) analysis frame (REQ-117).
+    const { ctx } = makeCanvas(analysisW, analysisH);
 
-    // Dashcam tile grid is pure display-space geometry — compute once (REQ-008).
-    const tiles = settings?.dashcamMode ? tileGrid({ width, height }) : null;
+    // Dashcam tile grid: pure geometry on the ANALYSIS frame — tiles live in
+    // scaled space and mergeTiles maps tile-local boxes back into SCALED
+    // full-frame coords; the display-space rescale below then covers both
+    // passes uniformly (REQ-008 + REQ-117).
+    const tiles = settings?.dashcamMode ? tileGrid({ width: analysisW, height: analysisH }) : null;
 
     // Per-class decode gates (REQ-113): undefined → the detector's baked
     // defaults (0.6 face / 0.25 plate), so omitted settings change nothing.
@@ -176,8 +264,8 @@ export async function runAnalyze({
           cancelled = true;
           break;
         }
-        sample.draw(ctx, 0, 0, width, height);
-        const frame = ctx.getImageData(0, 0, width, height);
+        sample.draw(ctx, 0, 0, analysisW, analysisH);
+        const frame = ctx.getImageData(0, 0, analysisW, analysisH);
 
         // Full pass: faces every frame, plates every plateStride-th frame.
         const dets = [...(await detectors.detectFace(frame, faceOpts))];
@@ -200,11 +288,29 @@ export async function runAnalyze({
           dets.push(...mergeTiles(tileDets, tiles));
         }
 
+        // REQ-117: both passes produced boxes in SCALED analysis space —
+        // rescale to display space (guard: sf === 1 needs no pass). After
+        // this point everything is native display px (ADR-9).
+        if (sf !== 1) {
+          for (const d of dets) {
+            d.box = {
+              x: d.box.x / sf,
+              y: d.box.y / sf,
+              w: d.box.w / sf,
+              h: d.box.h / sf,
+            };
+          }
+        }
+
+        // REQ-120: minimum display-size filter BEFORE the tracker — tiny
+        // detections never seed or feed a track.
+        const kept = filterByMinSize(dets, settings?.minSizePx ?? 0);
+
         // Detector t is a placeholder (0) — the sink timestamp is authoritative
         // (ADR-3, seconds keyframes under VFR sources).
         const t = sample.timestamp;
-        for (const d of dets) d.t = t;
-        tracker.update(dets, t);
+        for (const d of kept) d.t = t;
+        tracker.update(kept, t);
       } finally {
         // @MX:WARN memory discipline: the sample is closed on EVERY exit path
         // (success, cancel, detector throw) — decoded frames are never retained.

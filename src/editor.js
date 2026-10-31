@@ -1407,6 +1407,13 @@ export function mountEditor(els, hooks) {
     if (timeline && timeline.style) {
       timeline.style.cursor = state.trimMode ? 'crosshair' : '';
     }
+    // v1.15.1: in trim mode the scrub thumb must yield — its fat-finger
+    // hit zone would otherwise steal the presses that start a trim region
+    // (users naturally drag from the playhead). pointer-events: none makes
+    // strip presses fall through to the trim-create handler.
+    if (thumb && thumb.style) {
+      thumb.style.pointerEvents = state.trimMode ? 'none' : '';
+    }
 
     if (trackList) renderTrackList(state.tracks, d);
   }

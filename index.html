@@ -1149,6 +1149,12 @@
           <span id="transport-time" class="num">0:00.0 / 0:00.0</span>
         </div>
         <p id="manual-hint" class="manual-hint">Missed a face? Pause (<kbd>Space</kbd>) and drag a box on the video — it becomes a solid redaction over the whole clip.</p>
+        <!-- v1.15.1: trim mode belongs to the TIMELINE, not the redaction
+             tracks — the toggle lives here, right above the strip. -->
+        <div id="trim-bar">
+          <button id="trim-toggle" type="button" aria-pressed="false" title="Trim mode: drag on the timeline to mark regions for deletion — greyed-out regions are removed at export">✂ Trim</button>
+          <span id="trim-hint" class="stat-line" hidden>Drag on the timeline to mark a region to cut. Drag a ✂ edge to adjust; ✕ removes it.</span>
+        </div>
         <section id="timeline" aria-label="Track timeline — click a chip to scrub and toggle its redaction; drag a chip edge to trim its span">
           <span id="timeline-current" class="num timecode">0:00.0</span>
           <div id="timeline-track">
@@ -1266,15 +1272,14 @@
         <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
           <summary>Tracks</summary>
           <!-- v1.13.0: bulk style buttons — IDs are the contract (main.js
-               wires the clicks); segmented styling mirrors #size-filter.
-               v1.15.0 REQ-125: the ✂ trim-mode toggle rides the same header
-               row (#trim-toggle is the contract id). -->
+               wires the clicks); segmented styling mirrors #size-filter. -->
+          <div id="trim-bar">
+
           <div id="trim-bar">
             <div id="bulk-style" role="group" aria-label="Set all tracks style">
               <button id="bulk-solid" type="button">All solid</button>
               <button id="bulk-pixelate" type="button">All pixelate</button>
             </div>
-            <button id="trim-toggle" type="button" aria-pressed="false" title="Trim mode: drag on the timeline to mark regions for deletion — they are greyed out here and removed at export">✂ Trim</button>
           </div>
           <ul id="track-list"></ul>
           <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>

@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.15.1] — 2026-10-31
+
+### Fixed
+- Trim drags starting at the playhead were stolen by the scrub thumb's hit zone (users naturally drag from where the playhead is) — in trim mode the thumb now yields so region creation works from anywhere on the timeline. Verified by a faithful probe: a drag starting exactly at the thumb creates a region.
+- Changed: the ✂ Trim toggle moved from the Tracks panel to the timeline area (trimming is independent of redaction tracks), with an inline hint while trim mode is active.
+
 ## [1.15.0] — 2026-10-31
 
 ### Added

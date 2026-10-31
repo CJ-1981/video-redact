@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-nocheck -- in-page runtime script: DOM access pattern-matched at runtime, not typecheck time
 /**
  * debug-trim-export.mjs — v1.15.0 REQ-125/126 acceptance probe.
  *
@@ -138,6 +139,35 @@ try {
   // through the app's own state by seeking with the app's seek path).
   console.log('--- exporting with 2 trimmed regions ---');
   const downloadPromise = page.waitForEvent('download', { timeout: 240000 });
+  // v1.15.1 FAITHFUL-USER check: the natural gesture starts the drag AT the
+  // playhead thumb (users drag from where they are). Pre-fix, the thumb's
+  // fat-finger zone stole the press (seek, no region).
+  {
+    // park the playhead at 30% by seeking
+    await page.evaluate(() => {
+      const v = document.querySelector('#preview-video');
+      v.currentTime = 0.3 * (v.duration || 1);
+    });
+    await page.waitForTimeout(150);
+    await page.evaluate(() => {
+      document.querySelector('#timeline')?.scrollIntoView({ block: 'center' });
+    });
+    const geo = await timelineGeometry();
+    const y = Math.round(geo.top + geo.height / 2);
+    const thumbX = geo.left + geo.width * 0.3; // thumb sits at the playhead
+    const endX = geo.left + geo.width * 0.55;
+    const before = await page.evaluate(() => document.querySelectorAll('.trim-region').length);
+    console.log(`--- FAITHFUL: drag FROM thumb x ${Math.round(thumbX)} → ${Math.round(endX)}`);
+    await page.mouse.move(thumbX, y, { steps: 2 });
+    await page.mouse.down();
+    await page.mouse.move((thumbX + endX) / 2, y, { steps: 3 });
+    await page.mouse.move(endX, y, { steps: 3 });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+    const after = await page.evaluate(() => document.querySelectorAll('.trim-region').length);
+    console.log(`    trim regions before=${before} after=${after} ${after > before ? 'PASS' : 'FAIL'}`);
+  }
+
   await page.click('#export-button');
   const download = await downloadPromise;
   const outPath = join(await mkdtemp(join(tmpdir(), 'trim-export-')), download.suggestedFilename());
@@ -169,7 +199,10 @@ try {
   } else {
     pass = false;
   }
-  const expected = FIXTURE_DURATION - 1.0; // ~1.0 s trimmed away
+  // v1.15.1: three regions now — the faithful thumb-origin drag [0.912, 1.672]s
+  // clips against the [1.5, 2.0]s region (overlap rejection), so the trimmed
+  // total is 0.4 + 0.5 + 0.588 = 1.488 s → expected output ≈ 1.55 s.
+  const expected = FIXTURE_DURATION - 1.488;
   if (Math.abs(duration - expected) <= 0.35) {
     console.log(`ok: output duration ${duration.toFixed(3)} s ≈ expected ${expected.toFixed(2)} s (±0.35)`);
   } else {

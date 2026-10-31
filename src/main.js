@@ -1549,6 +1549,7 @@ export async function mountApp(
     // separately) and the wiring must degrade to a no-op.
     bulkSolid: /** @type {HTMLButtonElement | null} */ ($('bulk-solid')),
     bulkPixelate: /** @type {HTMLButtonElement | null} */ ($('bulk-pixelate')),
+    trimHint: $('trim-hint'),
     // v1.15.0 REQ-125: ✂ trim-mode toggle (tracks panel header, next to
     // #bulk-style). Null-guarded like the bulk buttons.
     trimToggle: /** @type {HTMLButtonElement | null} */ ($('trim-toggle')),
@@ -1795,6 +1796,9 @@ export async function mountApp(
     if (!els.trimToggle) return;
     els.trimToggle.setAttribute('aria-pressed', app.trimMode ? 'true' : 'false');
     els.trimToggle.classList.toggle('trim-mode', app.trimMode);
+    // v1.15.1: the trim hint lives next to the toggle (timeline area) and
+    // teaches the interaction while the mode is on.
+    if (els.trimHint) els.trimHint.hidden = !app.trimMode;
   }
 
   /** Reset ALL trim state (v1.15.0): regions, id counter, trim mode + the

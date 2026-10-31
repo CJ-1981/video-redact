@@ -1928,3 +1928,29 @@ describe('editor.trimRegionViews (v1.15.0 REQ-125 view model)', () => {
     ]);
   });
 });
+
+const { filterTracksByClass, trackSummaryCounts, formatTrackSummary } = await import('../../src/editor.js');
+
+describe('track-list filter + summary (v1.21.0)', () => {
+  const face = { id: 1, cls: 'face' };
+  const plate = { id: 2, cls: 'plate' };
+  const manual = { id: 3, cls: 'manual' };
+
+  it('filterTracksByClass filters by class; all/invalid returns everything', () => {
+    const tracks = [face, plate, manual];
+    expect(filterTracksByClass(tracks, 'face')).toEqual([face]);
+    expect(filterTracksByClass(tracks, 'plate')).toEqual([plate]);
+    expect(filterTracksByClass(tracks, 'manual')).toEqual([manual]);
+    expect(filterTracksByClass(tracks, 'all')).toEqual(tracks);
+    expect(filterTracksByClass(tracks, 'bogus')).toEqual(tracks);
+    expect(filterTracksByClass(undefined, 'face')).toEqual([]);
+  });
+
+  it('trackSummaryCounts + formatTrackSummary produce the panel summary', () => {
+    const counts = trackSummaryCounts([face, face, plate, manual]);
+    expect(counts).toEqual({ faces: 2, plates: 1, manual: 1, total: 4 });
+    expect(formatTrackSummary(counts)).toBe('2 faces · 1 plate · 1 manual');
+    expect(formatTrackSummary(trackSummaryCounts([face]))).toBe('1 face');
+    expect(formatTrackSummary(trackSummaryCounts([]))).toBe('No tracks');
+  });
+});

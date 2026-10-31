@@ -584,6 +584,58 @@ export function toggleTrack(tracks, trackId, enabled) {
  * @returns {import('./types.js').Track[]} New array; unknown id → unchanged
  *     content (still a new array).
  */
+/**
+ * Filter tracks by class for the track list (v1.21.0 REQ: filter buttons).
+ * 'all' → everything; 'face'/'plate'/'manual' → that class only.
+ * PURE — returns a NEW array; invalid filter → unchanged (all).
+ *
+ * @param {import('./types.js').Track[]} tracks
+ * @param {string | undefined} [filter] 'all' | 'face' | 'plate' | 'manual'
+ * @returns {import('./types.js').Track[]}
+ */
+export function filterTracksByClass(tracks, filter) {
+  if (!Array.isArray(tracks)) return [];
+  if (filter !== 'face' && filter !== 'plate' && filter !== 'manual') {
+    return [...tracks];
+  }
+  return tracks.filter((t) => t.cls === filter);
+}
+
+/**
+ * Per-class counts for the Tracks summary (v1.21.0). PURE.
+ * @param {import('./types.js').Track[]} tracks
+ * @returns {{faces: number, plates: number, manual: number, total: number}}
+ */
+export function trackSummaryCounts(tracks) {
+  const counts = { faces: 0, plates: 0, manual: 0, total: 0 };
+  for (const t of Array.isArray(tracks) ? tracks : []) {
+    counts.total += 1;
+    if (t.cls === 'face') counts.faces += 1;
+    else if (t.cls === 'plate') counts.plates += 1;
+    else if (t.cls === 'manual') counts.manual += 1;
+  }
+  return counts;
+}
+
+/**
+ * Human summary for the Tracks panel title (v1.21.0): "3 faces · 2 plates ·
+ * 1 manual" (zero parts omitted), "No tracks" when empty. PURE.
+ *
+ * @param {{faces: number, plates: number, manual: number, total: number}} counts
+ * @returns {string}
+ */
+export function formatTrackSummary(counts) {
+  /** @type {{faces?: number, plates?: number, manual?: number, total?: number}} */
+  const c = /** @type {any} */ (counts ?? {});
+  if (!Number(c.total)) return 'No tracks';
+  const parts = [];
+  if (c.faces) parts.push(`${c.faces} face${c.faces === 1 ? '' : 's'}`);
+  if (c.plates) parts.push(`${c.plates} plate${c.plates === 1 ? '' : 's'}`);
+  if (c.manual) parts.push(`${c.manual} manual`);
+  return parts.join(' · ') || 'No tracks';
+}
+
+
 export function trimTrack(tracks, trackId, start, end, durationSec) {
   let a = Number.isFinite(start) ? start : 0;
   let b = Number.isFinite(end) ? end : a;
@@ -1421,7 +1473,7 @@ export function mountEditor(els, hooks) {
       thumb.style.pointerEvents = state.trimMode ? 'none' : '';
     }
 
-    if (trackList) renderTrackList(state.tracks, d);
+    if (trackList) renderTrackList(state.tracks, d, state.trackFilter);
   }
 
   /**
@@ -1435,14 +1487,17 @@ export function mountEditor(els, hooks) {
    * @param {import('./types.js').Track[]} tracks
    * @param {number} d Video duration (0 until metadata exists).
    */
-  function renderTrackList(tracks, d) {
+  function renderTrackList(tracks, d, trackFilter) {
+    // v1.21.0: the list honors the class filter (chips/timeline/preview are
+    // unaffected — filtering is a list-finding aid only).
+    const filtered = filterTracksByClass(tracks, trackFilter);
     const active = doc && doc.activeElement;
     const existing = new Map();
     for (const row of Array.from(trackList.querySelectorAll('li.track-row[data-track-id]'))) {
       existing.set(String(row.dataset.trackId), row);
     }
     const keep = new Set();
-    for (const track of Array.isArray(tracks) ? tracks : []) {
+    for (const track of filtered) {
       const idStr = String(track.id);
       keep.add(idStr);
       const row = existing.get(idStr) ?? buildTrackRow(track.id);

@@ -781,6 +781,18 @@
       margin: 10px 0 8px;
       max-width: none;
     }
+    #track-filter { display: flex; margin: 10px 0 8px; max-width: none; }
+    #track-filter .filter-btn {
+      flex: 1 1 0; min-height: 32px; padding: 4px 8px; font-size: 12px;
+      background: var(--bg-inset); border: 1px solid var(--line); color: var(--ink-hi);
+    }
+    #track-filter .filter-btn + .filter-btn { margin-left: -1px; }
+    #track-filter .filter-btn:first-child { border-radius: 8px 0 0 8px; }
+    #track-filter .filter-btn:last-child { border-radius: 0 8px 8px 0; }
+    #track-filter .filter-btn[aria-pressed='true'] {
+      background: var(--accent); color: #14100A; z-index: 1; position: relative;
+    }
+    #track-summary { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--ink-hi); }
     #bulk-style button {
       flex: 1 1 0;
       min-width: 0;
@@ -1256,12 +1268,18 @@
                Clicking a panel applies that level to BOTH sensitivity sliders. -->
 
           <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
-            <summary>Tracks</summary>
+            <summary>Tracks <span id="track-summary" class="stat-line"></span></summary>
             <!-- v1.17.0: bulk style buttons get their OWN full-width row directly
                  above the list (IDs are the contract — main.js wires the clicks);
                  segmented styling mirrors #size-filter. The v1.15 #trim-bar
                  wrapper is gone (the ✂ toggle moved to the timeline in v1.15.1
                  and left an unclosed duplicate wrapper here — fixed). -->
+            <div id="track-filter" role="group" aria-label="Filter tracks by type">
+              <button type="button" class="filter-btn" data-filter="all" aria-pressed="true">All</button>
+              <button type="button" class="filter-btn" data-filter="face" aria-pressed="false">Face</button>
+              <button type="button" class="filter-btn" data-filter="plate" aria-pressed="false">Plate</button>
+              <button type="button" class="filter-btn" data-filter="manual" aria-pressed="false">Manual</button>
+            </div>
             <div id="bulk-style" role="group" aria-label="Set all tracks style">
               <button id="bulk-solid" type="button">All solid</button>
               <button id="bulk-pixelate" type="button">All pixelate</button>

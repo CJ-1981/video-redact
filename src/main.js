@@ -122,7 +122,16 @@
  */
 import { secureContextInfo, guidance, probeCapabilities } from './capability.js';
 import { MODELS } from './models.js';
-import { manualTrackFromBox, mountEditor, setTrackStyle, toggleTrack, trimTrack } from './editor.js';
+import {
+  filterTracksByClass,
+  formatTrackSummary,
+  manualTrackFromBox,
+  mountEditor,
+  setTrackStyle,
+  toggleTrack,
+  trackSummaryCounts,
+  trimTrack,
+} from './editor.js';
 import { openInput } from './ingest.js';
 import { filterByMinSize, runAnalyze, sampleFrameAt, scaleFactorFor } from './analyze.js';
 import {
@@ -1760,6 +1769,8 @@ export async function mountApp(
     trimRegions: $('trim-regions'),
     trackList: $('track-list'),
     trackListEmpty: $('track-list-empty'),
+    trackFilter: $('track-filter'),
+    trackSummary: $('track-summary'),
     analyzeButton: /** @type {HTMLButtonElement | null} */ ($('analyze-button')),
     analyzeCancel: /** @type {HTMLButtonElement | null} */ ($('analyze-cancel')),
     analyzeStatus: $('analyze-status'),
@@ -1845,6 +1856,7 @@ export async function mountApp(
    *          manualNextId: number, objectUrl: string | null,
    *          trims: Array<{id: number, start: number, end: number}>,
    *          nextTrimId: number, trimMode: boolean,
+ *          trackFilter: 'all' | 'face' | 'plate' | 'manual',
    *          settings: {minSizePx: number, downscale: 'full' | '1080p' | '720p',
    *                     pixelStrength: 'fine' | 'normal' | 'coarse' | 'max'}}} */
   const app = {
@@ -1864,6 +1876,7 @@ export async function mountApp(
     trims: [],
     nextTrimId: 1,
     trimMode: false,
+    trackFilter: 'all',
     // v1.12.0: the analyze-pass settings driven by the #size-filter button
     // group (REQ-120) and #downscale-select (REQ-117); reset per file load
     // and Clear (resetSizeFilter / resetDownscale). v1.17.0 REQ-129: the
@@ -2061,7 +2074,23 @@ export async function mountApp(
     if (els.workspace) els.workspace.hidden = false;
   }
 
+  /** Tracks-panel summary + empty-note (v1.21.0): the empty-note decision
+   * honors the active class filter; the summary always shows ALL tracks. */
+  function updateTrackSummary() {
+    const counts = trackSummaryCounts(app.tracks);
+    if (els.trackSummary) els.trackSummary.textContent = formatTrackSummary(counts);
+    const filtered = filterTracksByClass(app.tracks, app.trackFilter);
+    if (els.trackListEmpty) {
+      els.trackListEmpty.hidden = filtered.length > 0;
+      els.trackListEmpty.textContent =
+        app.tracks.length > 0 && filtered.length === 0
+          ? 'No tracks match this filter.'
+          : 'No tracks yet — run Analyze, then click a chip or row to toggle redaction.';
+    }
+  }
+
   function refreshTrackUi() {
+    updateTrackSummary();
     editor?.refresh();
     if (els.trackListEmpty) els.trackListEmpty.hidden = app.tracks.length > 0;
   }
@@ -2085,6 +2114,12 @@ export async function mountApp(
   function resetTrimState() {
     app.trims = [];
     app.nextTrimId = 1;
+    app.trackFilter = 'all'; // v1.21.0: track-list class filter
+    if (els.trackFilter) {
+      for (const b of /** @type {any} */ (els.trackFilter.querySelectorAll('.filter-btn'))) {
+        b.setAttribute('aria-pressed', String(b.dataset.filter === 'all'));
+      }
+    }
     app.trimMode = false;
     syncTrimToggleUi();
   }
@@ -2749,6 +2784,7 @@ export async function mountApp(
         // never a stale playback capture.
         getState: () => ({
           tracks: app.tracks,
+          trackFilter: app.trackFilter,
           currentTime: els.video?.currentTime ?? 0,
           duration: app.meta?.duration,
           // v1.15.0 REQ-125: trim regions + trim mode drive the greyed
@@ -3091,6 +3127,21 @@ export async function mountApp(
     applyPixelStrength(btn.getAttribute?.('data-strength'));
     editor?.refresh(); // the preview re-renders at the new block size
   });
+
+  // --- v1.21.0: track-list class filter (#track-filter) ----------------------
+  if (els.trackFilter) {
+    els.trackFilter.addEventListener('click', (e) => {
+      const target = /** @type {HTMLElement} */ (e.target instanceof doc.defaultView.Element ? e.target : null);
+      const btn = target && typeof target.closest === 'function' ? target.closest('.filter-btn') : null;
+      if (!btn) return;
+      const filter = /** @type {any} */ (btn).dataset.filter;
+      app.trackFilter = filter === 'face' || filter === 'plate' || filter === 'manual' ? filter : 'all';
+      for (const b of els.trackFilter.querySelectorAll('.filter-btn')) {
+        b.setAttribute('aria-pressed', String(b === btn));
+      }
+      refreshTrackUi();
+    });
+  }
 
   // --- v1.13.0: bulk track-style buttons (#bulk-solid / #bulk-pixelate) ------
   //

@@ -11,6 +11,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Fixed
 - The preview height handle could no longer drag DOWN to enlarge (v1.18.1 follow-up): the reserved-space clamp counted the tracks/compare panels — which moved into the same column in v1.18.1 — as must-stay-visible, leaving almost no enlargement room. The clamp now reserves only the chrome above the stage plus a minimal constant for the controls directly below it; enlarging pushes the timeline/tracks below the fold (theater-mode behavior, bounded by the 75vh cap, footer in normal flow can never overlap).
 
+## [1.21.0] — 2026-11-01
+
+### Added
+- Tracks panel summary: the title shows per-class counts ("Tracks — 2 faces · 1 plate · 1 manual"), refreshed live.
+- Track filter buttons (All / Face / Plate / Manual) above the list — filtering is a list-finding aid only; the preview, timeline chips, and export are unaffected. Filter resets to All on file load / Clear; when the filter hides everything, the list explains "No tracks match this filter."
+
 ## [1.20.1] — 2026-11-01
 
 ### Added

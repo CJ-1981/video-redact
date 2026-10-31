@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.18.2] — 2026-11-01
+
+### Fixed
+- The preview height handle could no longer drag DOWN to enlarge (v1.18.1 follow-up): the reserved-space clamp counted the tracks/compare panels — which moved into the same column in v1.18.1 — as must-stay-visible, leaving almost no enlargement room. The clamp now reserves only the chrome above the stage plus a minimal constant for the controls directly below it; enlarging pushes the timeline/tracks below the fold (theater-mode behavior, bounded by the 75vh cap, footer in normal flow can never overlap).
+
 ## [1.18.1] — 2026-11-01
 
 ### Fixed

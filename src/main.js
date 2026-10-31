@@ -4077,8 +4077,6 @@ export async function mountApp(
    * @returns {number} Reserved height, CSS px (≥ 0).
    */
   function stageReservedHeight() {
-    const stageH = els.previewStage ? els.previewStage.offsetHeight : 0;
-    const columnH = els.stageColumn ? els.stageColumn.offsetHeight : 0;
     const footerH = els.keyboardHints ? els.keyboardHints.offsetHeight : 0;
     const view = doc.defaultView;
     let stageTopDoc = 0;
@@ -4091,7 +4089,16 @@ export async function mountApp(
     if (els.appMain && view && typeof view.getComputedStyle === 'function') {
       padBottom = parseFloat(view.getComputedStyle(els.appMain).paddingBottom) || 0;
     }
-    return Math.max(0, stageTopDoc) + Math.max(0, columnH - stageH) + footerH + padBottom;
+    // v1.18.2 FINAL: reserve the chrome ABOVE the stage (header/stepper/
+    // intake — stageTopDoc) plus a minimal constant for the controls that
+    // sit immediately below it (handle + transport). Everything further down
+    // (timeline, tracks, compare) scrolls under the fold when the stage is
+    // enlarged — standard theater-mode behavior; the 75vh cap is the real
+    // bound. The footer is in normal document flow (v1.13.1) and can never
+    // overlap, so it is not reserved either.
+    void footerH;
+    const MIN_BELOW_CHROME_PX = 120;
+    return Math.max(0, stageTopDoc) + MIN_BELOW_CHROME_PX + padBottom;
   }
 
   /** Live stage height (source of truth once the user first resizes). */

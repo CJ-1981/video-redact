@@ -104,6 +104,27 @@ try {
     return { timelineBottom: Math.round(a.bottom), tracksTop: Math.round(b.top), gap: Math.round(b.top - a.bottom) };
   });
   console.log('TRACKS GAP:', JSON.stringify(gap));
+
+  // ---- v1.18.2: the stage handle must drag DOWN to enlarge ---------------
+  const handle = await page.locator('#stage-resize-handle').boundingBox();
+  const stageBefore = await page.evaluate(() => document.querySelector('#preview-stage').getBoundingClientRect().height);
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2 + 250, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const stageAfter = await page.evaluate(() => document.querySelector('#preview-stage').getBoundingClientRect().height);
+  const tlVis = await page.evaluate(() => {
+    const r = document.querySelector('#timeline').getBoundingClientRect();
+    return r.bottom <= window.innerHeight + 1;
+  });
+  console.log(`STAGE DRAG: ${Math.round(stageBefore)}px -> ${Math.round(stageAfter)}px (grew ${Math.round(stageAfter - stageBefore)}px) | timeline fully visible: ${tlVis}`);
+  if (stageAfter - stageBefore < 150) {
+    console.log('FAIL  stage did not enlarge on drag-down');
+    process.exitCode = 1;
+  } else {
+    console.log('PASS  stage enlarges on drag-down');
+  }
   const dz = await page.evaluate(() => {
     const el = document.querySelector('#drop-zone');
     if (!el) return null;

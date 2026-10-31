@@ -67,6 +67,7 @@ import {
   canEncodeVideo,
 } from 'mediabunny';
 import { pixelateFrame } from './redact.js';
+import { scaleFactorFor } from './analyze.js';
 import './types.js';
 
 /**
@@ -161,7 +162,7 @@ export { pixelateFrame };
  *            frameCanvas: OffscreenCanvas | HTMLCanvasElement,
  *            scratchCanvas: OffscreenCanvas | HTMLCanvasElement}}
  */
-function createBurnIn(tracks, width, height, stage) {
+function createBurnIn(tracks, width, height, stage, lockSize = false) {
   const frameCanvas = createCanvas(width, height);
   const scratchCanvas = createCanvas(1, 1);
   const ctx = /** @type {CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D} */ (
@@ -178,9 +179,12 @@ function createBurnIn(tracks, width, height, stage) {
    */
   function process(sample) {
     try {
-      const w = Number(sample.displayWidth) || knownW;
-      const h = Number(sample.displayHeight) || knownH;
-      if (w !== knownW || h !== knownH) {
+      // v1.16.0: with a locked size (export downscale) the canvas NEVER
+      // follows the sample's native dims — the sample draws INTO the scaled
+      // canvas, which defines the output resolution.
+      const w = lockSize ? knownW : Number(sample.displayWidth) || knownW;
+      const h = lockSize ? knownH : Number(sample.displayHeight) || knownH;
+      if (!lockSize && (w !== knownW || h !== knownH)) {
         // Resolution changed mid-stream (rare): resize resets the bitmap.
         frameCanvas.width = w;
         frameCanvas.height = h;
@@ -270,6 +274,47 @@ async function probeLadder(width, height, settings) {
 /** settings.quality → mediabunny Quality ('balanced' ≈ encoder 'medium'). */
 function mapQuality(quality) {
   return new Quality(quality === 'balanced' ? 'medium' : 'high');
+}
+
+/**
+ * Scale EVERY track's keyframe boxes by `sf` (v1.16.0 export resolution):
+ * pixelateFrame consumes display-space tracks matched to the canvas it draws
+ * on, so a downscaled export needs proportionally scaled tracks. PURE —
+ * returns a NEW array (input untouched); `sf === 1` returns the input.
+ *
+ * @param {import('./types.js').Track[]} tracks
+ * @param {number} sf
+ * @returns {import('./types.js').Track[]}
+ */
+export function scaleTracks(tracks, sf) {
+  if (!Array.isArray(tracks) || !Number.isFinite(sf) || sf === 1) return tracks;
+  return tracks.map((t) => ({
+    ...t,
+    keyframes: new Map(
+      [...t.keyframes].map(([kt, b]) => [
+        kt,
+        { x: b.x * sf, y: b.y * sf, w: b.w * sf, h: b.h * sf },
+      ]),
+    ),
+  }));
+}
+
+/**
+ * Export geometry for the chosen resolution (v1.16.0): scale factor + the
+ * integer output dimensions. PURE. `full`/unknown → 1.
+ *
+ * @param {'full'|'1080p'|'720p'|undefined} resolution
+ * @param {number} width Source display width.
+ * @param {number} height Source display height.
+ * @returns {{sf: number, outW: number, outH: number}}
+ */
+export function exportGeometry(resolution, width, height) {
+  const sf = scaleFactorFor(resolution, width, height);
+  return {
+    sf,
+    outW: Math.max(1, Math.round(width * sf)),
+    outH: Math.max(1, Math.round(height * sf)),
+  };
 }
 
 /**
@@ -545,7 +590,9 @@ async function concatKeptSegments(segStagings, rung, settings, kept, onProgress,
     const firstVideo = await segInputs[0].getPrimaryVideoTrack();
     if (!firstVideo) throw new Error('The first kept segment has no video track.');
     const videoConfig = await firstVideo.getDecoderConfig();
-    const firstAudio = (await segInputs[0].getAudioTracks())[0] ?? null;
+    const firstAudio = settings.removeAudio
+      ? null
+      : (await segInputs[0].getAudioTracks())[0] ?? null;
     const audioConfig = firstAudio ? await firstAudio.getDecoderConfig() : null;
 
     if (settings.outputMode === 'buffer') {
@@ -746,10 +793,14 @@ async function runTrimmedExport({
           format: new rung.Format(),
           target: new StreamTarget(segStream.writable, { chunked: true }),
         });
-        const burn = createBurnIn(tracks, width, height, rung.stage);
-        // Same invariant as the single pass: NO `audio` options and NO `copy`
-        // override — the audio track packet-copies within the segment window
-        // (REQ-017 / AC-08).
+        // v1.16.0: export resolution — same scaling as the single pass.
+        const { sf: segSf, outW: segOutW, outH: segOutH } = exportGeometry(
+          settings.exportResolution, width, height,
+        );
+        const burn = createBurnIn(scaleTracks(tracks, segSf), segOutW, segOutH, rung.stage, segSf !== 1);
+        // Same invariant as the single pass: NO `copy` override — the audio
+        // track packet-copies within the segment window (REQ-017 / AC-08),
+        // unless the user removed the audio track.
         const conversion = await Conversion.init({
           input,
           output,
@@ -759,7 +810,9 @@ async function runTrimmedExport({
             quality: mapQuality(settings.quality),
             hardwareAcceleration: rung.hw,
             process: burn.process,
+            ...(segSf !== 1 ? { processedWidth: segOutW, processedHeight: segOutH } : {}),
           },
+          ...(settings.removeAudio ? { audio: { discard: true } } : {}),
         });
         if (!conversion.isValid) {
           const reasons = (conversion.discardedTracks ?? [])
@@ -834,6 +887,8 @@ async function runTrimmedExport({
  * @param {{quality?: 'high'|'balanced', outputMode?: 'stream'|'buffer',
  *           saveHandle?: object, forceWebM?: boolean,
  *           dashcamMode?: boolean, padSeconds?: number,
+ *           exportResolution?: 'full'|'1080p'|'720p',
+ *           removeAudio?: boolean,
  *           trims?: Array<{id?: number, start: number, end: number}>}} [opts.settings]
  *     `outputMode` 'stream' (default) stages into OPFS via chunked
  *     StreamTarget; 'buffer' holds the whole file in a BufferTarget (small
@@ -899,7 +954,11 @@ export async function runExport(opts) {
     /** @type {{writable?: WritableStream<object>, bytes?: () => number, ioError?: () => unknown}} */
     let stream;
     try {
-      const burn = createBurnIn(tracks, width, height, rung.stage);
+      // v1.16.0: export resolution — burn-in canvas + tracks scale together;
+      // processedWidth/Height hint the encoder.
+      const { sf, outW, outH } = exportGeometry(settings.exportResolution, width, height);
+      const exportTracks = scaleTracks(tracks, sf);
+      const burn = createBurnIn(exportTracks, outW, outH, rung.stage, sf !== 1);
       let output;
       if (staging.kind === 'buffer') {
         output = new Output({ format: new rung.Format(), target: staging.target });
@@ -911,8 +970,9 @@ export async function runExport(opts) {
         });
       }
 
-      // NO `audio` options and NO `copy` override: audio packet-copies into
-      // the container that hosts its codec (REQ-017 / AC-08 invariant).
+      // NO `copy` override: audio packet-copies into the container that hosts
+      // its codec (REQ-017 / AC-08 invariant) — unless the user removed the
+      // audio track (v1.16.0).
       const conversion = await Conversion.init({
         input,
         output,
@@ -921,7 +981,9 @@ export async function runExport(opts) {
           quality: mapQuality(settings.quality),
           hardwareAcceleration: rung.hw,
           process: burn.process,
+          ...(sf !== 1 ? { processedWidth: outW, processedHeight: outH } : {}),
         },
+        ...(settings.removeAudio ? { audio: { discard: true } } : {}),
       });
       if (!conversion.isValid) {
         const reasons = (conversion.discardedTracks ?? [])

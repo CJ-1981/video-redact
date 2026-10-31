@@ -6,6 +6,16 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-10-31
+
+### Added
+- Export resolution selection: Full (match source) / 1080p / 720p — the burn-in canvas, redaction boxes, and encoder hints all scale together (locked-size burn-in prevents the pipeline from silently reverting to source dims).
+- Audio removal: an "Include audio" checkbox in the export panel — off exports a silent video (audio track discarded).
+- Honest labels on the encoder-quality select (the old labels implied a resolution change that never happened).
+
+### Changed
+- The resolution and audio choices reset with every export-panel reset (file load, Clear, re-export).
+
 ## [1.15.2] — 2026-10-31
 
 ### Added

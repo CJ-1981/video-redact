@@ -203,6 +203,8 @@ import {
   runExport,
   discardExportTemp,
   pixelateFrame,
+  scaleTracks,
+  exportGeometry,
 } from '../../src/exporter.js';
 import { dilate } from '../../src/redact.js';
 
@@ -1402,5 +1404,70 @@ describe('runExport — trimmed path (v1.15.0 REQ-126)', () => {
       expect(ratios[i]).toBeGreaterThanOrEqual(ratios[i - 1]);
     }
     expect(ratios[ratios.length - 1]).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('export resolution + audio removal (v1.16.0)', () => {
+  it('scaleTracks scales every keyframe box non-mutatingly; sf 1 returns input', () => {
+    const track = { id: 1, keyframes: new Map([[0, { x: 100, y: 200, w: 50, h: 25 }]]) };
+    const out = scaleTracks([track], 0.5);
+    expect(out).not.toStrictEqual([track]);
+    expect([...out[0].keyframes][0][1]).toEqual({ x: 50, y: 100, w: 25, h: 12.5 });
+    expect([...track.keyframes][0][1]).toEqual({ x: 100, y: 200, w: 50, h: 25 }); // untouched
+    const input = [track]; // identity contract: sf 1 returns the SAME array
+    expect(scaleTracks(input, 1)).toBe(input);
+  });
+
+  it('exportGeometry: full → sf 1 native dims; 1080p/720p scale the long edge', () => {
+    expect(exportGeometry('full', 3840, 2160)).toEqual({ sf: 1, outW: 3840, outH: 2160 });
+    expect(exportGeometry('1080p', 3840, 2160)).toEqual({ sf: 0.5, outW: 1920, outH: 1080 });
+    expect(exportGeometry('720p', 3840, 2160)).toEqual({ sf: 1280 / 3840, outW: 1280, outH: 720 });
+    // portrait: long edge is the height
+    const g = exportGeometry('1080p', 2160, 3840);
+    expect(g.outW).toBe(1080);
+    expect(g.outH).toBe(1920);
+    expect(exportGeometry(undefined, 1920, 1080).sf).toBe(1); // invalid/absent → 1
+  });
+
+  it('single pass with resolution 720p on a 2560x1440 source: burn-in canvas + processedWidth/Height hints scale', async () => {
+    const input = fakeInput({ w: 2560, h: 1440 });
+    const track = makeTrack({ keyframes: new Map([[1, { x: 1000, y: 500, w: 200, h: 100 }]]), start: 1, end: 3 });
+    const sample = fakeSample(1.2, { w: 2560, h: 1440 });
+    let conv;
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      conv = new mb.Conversion(opts);
+      scriptExecute(conv, { onDone: () => { conv.opts.video.process(sample); } });
+      return conv;
+    });
+    // 720p cap 1280 on long edge 2560 → sf 0.5 → canvas 1280x720
+    await runExport({ input, tracks: [track], settings: { outputMode: 'buffer', quality: 'high', exportResolution: '720p' } });
+    expect(conv.opts.video.processedWidth).toBe(1280);
+    expect(conv.opts.video.processedHeight).toBe(720);
+    const frameCanvas = canvases[0]; // frame canvas is created first in the run
+    expect(frameCanvas.width).toBe(1280);
+    expect(frameCanvas.height).toBe(720);
+    // the box was scaled BEFORE dilate/pixelate: dilated scaled box
+    // (500*0.5=250, 250, 50, 25 → dilate 15% → {246.25, 246.25, 57.5, 32.5})
+    const draws = frameCanvas.rec.ctx.draws ?? frameCanvas.rec.draws ?? [];
+    const rect = (draws.length ? draws : frameCanvas.rec.calls).find?.((c) => c?.method === 'strokeRect' || c?.name === 'strokeRect');
+    // fall back: pixelate asserts live in redact tests; here just assert the
+    // sample was drawn into the SCALED canvas:
+    expect(sample.draw).toHaveBeenCalledWith(frameCanvas.rec.ctx, 0, 0, 1280, 720);
+    void rect;
+  });
+
+  it('single pass with removeAudio: audio discard option present; absent → no audio key', async () => {
+    let captured;
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      captured = opts;
+      const conv = new mb.Conversion(opts);
+      scriptExecute(conv, { onDone: () => {} });
+      return conv;
+    });
+    await runExport({ input: fakeInput(), tracks: [], settings: { outputMode: 'buffer', quality: 'high', removeAudio: true } });
+    expect(captured.audio).toEqual({ discard: true });
+    mb.Conversion.init.mockClear();
+    await runExport({ input: fakeInput(), tracks: [], settings: { outputMode: 'buffer', quality: 'high' } });
+    expect(captured.audio).toBeUndefined();
   });
 });

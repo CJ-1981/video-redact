@@ -1823,6 +1823,10 @@ export async function mountApp(
   function resetExportUi() {
     setBar(els.exportBar, 0);
     if (els.exportStatus) els.exportStatus.textContent = '';
+    // v1.16.0: resolution + audio reset with every export-panel reset
+    // (file load, Clear, re-export).
+    if (els.exportResolution) els.exportResolution.value = 'full';
+    if (els.exportAudio) els.exportAudio.checked = true;
   }
 
   function requestPersistentStorage() {
@@ -2956,6 +2960,9 @@ export async function mountApp(
       tracks: app.tracks,
       settings: {
         quality: els.quality?.value === 'balanced' ? 'balanced' : 'high',
+        // v1.16.0: export resolution + audio removal.
+        exportResolution: normalizeDownscale(els.exportResolution?.value),
+        removeAudio: els.exportAudio ? !els.exportAudio.checked : false,
         outputMode: 'stream', // OPFS staging; delivery handled inside runExport
         // v1.15.0 REQ-126: trim regions to EXCLUDE from the output. Empty
         // array → the exporter takes the unchanged single-pass path.

@@ -1247,9 +1247,27 @@
           <summary>Export</summary>
           <label for="export-quality">Quality</label>
           <select id="export-quality">
-            <option value="high" selected>High — match source resolution</option>
-            <option value="balanced">Balanced — halved resolution</option>
+            <option value="high" selected>High quality (larger file)</option>
+            <option value="balanced">Balanced quality (smaller file)</option>
           </select>
+          <!-- v1.16.0: export resolution — scales the output video; the
+               burn-in pixelation scales with it. -->
+          <label class="slider-row" for="export-resolution">
+            <span class="slider-name">Export&nbsp;resolution</span>
+            <select id="export-resolution">
+              <option value="full" selected>Full — match source</option>
+              <option value="1080p">1080p (long edge)</option>
+              <option value="720p">720p (long edge)</option>
+            </select>
+          </label>
+          <!-- v1.16.0: audio removal — checked by default. -->
+          <label class="slider-row" for="export-audio">
+            <span class="slider-name">Audio</span>
+            <span class="times">
+              <input type="checkbox" id="export-audio" checked />
+              <span>Include audio track</span>
+            </span>
+          </label>
           <p class="warn-note">Pixelation is burned into the exported video. The preview above is pixel-truthful: what you see is exactly what ships.</p>
           <div id="export-progress" class="progress-rail" role="progressbar" aria-valuemin="0" aria-valuemax="100">
             <div id="export-progress-bar" class="progress-bar"></div>

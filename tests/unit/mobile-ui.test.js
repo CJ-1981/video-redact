@@ -214,7 +214,14 @@ describe('REQ-112: @media (max-width: 820px) mobile block', () => {
 
 /** Extract a CSS rule body by its exact `selector {` opening (balanced scan). */
 function cssRule(selector) {
-  const start = HTML.indexOf(`${selector} {`);
+  // Grouped selectors ("a,\n b {") — find the selector name followed by a
+  // comma or a brace, so shared rules resolve for every selector in the group.
+  const patterns = [`${selector} {`, `${selector},`];
+  let start = -1;
+  for (const pat of patterns) {
+    const idx = HTML.indexOf(pat);
+    if (idx >= 0 && (start < 0 || idx < start)) start = idx;
+  }
   if (start < 0) return '';
   const bodyStart = HTML.indexOf('{', start);
   let depth = 0;
@@ -321,6 +328,17 @@ describe('v1.12.0 REQ-118: #rail-resize separator', () => {
     expect(rule).toContain('width: 10px');
     expect(rule).toContain('cursor: col-resize');
     expect(rule).toContain('touch-action: none');
+  });
+
+  it('both width handles share identical visual states (v1.19.0 field report)', () => {
+    const railRule = cssRule('#rail-resize');
+    const intakeRule = cssRule('#intake-resize');
+    // ONE shared base rule covers both handles.
+    expect(railRule).toContain('width: 10px');
+    expect(intakeRule).toContain('width: 10px');
+    expect(HTML).toMatch(/#rail-resize:hover,\s*#intake-resize:hover\s*{[^}]*background:\s*var\(--line\)/);
+    expect(HTML).toMatch(/#rail-resize:focus-visible,\s*#intake-resize:focus-visible\s*{[^}]*outline:\s*2px solid var\(--accent\)/);
+    expect(HTML).toMatch(/#rail-resize::before,[\s\S]*?#intake-resize::before/);
   });
 
   it('mobile ≤820px: handle hidden, workspace back to a single column', () => {

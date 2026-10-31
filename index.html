@@ -276,15 +276,7 @@
     /* ── Rail resize handle (v1.12.0 REQ-118): draggable vertical separator
        between the preview column and the side panel. Drag ↔ / ArrowLeft /
        ArrowRight adjust --rail-w; double-click resets (wired by main.js). ── */
-    #rail-resize {
-      align-self: stretch;
-      width: 10px;
-      border-radius: 5px;
-      cursor: col-resize;
-      touch-action: none;
-      user-select: none;
-      background: transparent;
-    }
+    #rail-resize,
     #intake-resize {
       align-self: stretch;
       width: 10px;
@@ -294,10 +286,26 @@
       user-select: none;
       background: transparent;
     }
-    #rail-resize:hover { background: var(--line); }
-    #rail-resize:focus-visible {
+    /* v1.19.0: identical visual states for BOTH width handles — the left
+       handle previously had no hover/focus highlight (field report). */
+    #rail-resize:hover,
+    #intake-resize:hover { background: var(--line); }
+    #rail-resize:focus-visible,
+    #intake-resize:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
+    }
+    /* Visible affordance: a subtle grip dot column on both handles so they
+       are discoverable without hovering. */
+    #rail-resize::before,
+    #intake-resize::before {
+      content: '';
+      display: block;
+      width: 2px;
+      height: 36px;
+      margin: 0 auto;
+      border-radius: 1px;
+      background: var(--line);
     }
 
     /* ── Drop zone + capability report ── */

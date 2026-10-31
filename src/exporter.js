@@ -158,11 +158,18 @@ export { pixelateFrame };
  * @param {number} width Display px.
  * @param {number} height Display px.
  * @param {string} stage Ladder stage of the current attempt.
+ * @param {boolean} [lockSize] When true the frame canvas NEVER follows the
+ *     sample's native dims (export downscale — the canvas defines resolution).
+ * @param {('fine'|'normal'|'coarse'|'max')} [strength] Pixelation strength
+ *     forwarded into pixelateFrame → applyPixelation (v1.17.0). Invalid or
+ *     missing values resolve to the shared default 'normal' (×2 block size)
+ *     inside redact.pixelStrengthMultiplier — preview and export land on the
+ *     SAME multiplier (AC-04 shared-seam rule).
  * @returns {{process: (sample: object) => OffscreenCanvas | HTMLCanvasElement,
  *            frameCanvas: OffscreenCanvas | HTMLCanvasElement,
  *            scratchCanvas: OffscreenCanvas | HTMLCanvasElement}}
  */
-function createBurnIn(tracks, width, height, stage, lockSize = false) {
+function createBurnIn(tracks, width, height, stage, lockSize = false, strength) {
   const frameCanvas = createCanvas(width, height);
   const scratchCanvas = createCanvas(1, 1);
   const ctx = /** @type {CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D} */ (
@@ -194,7 +201,7 @@ function createBurnIn(tracks, width, height, stage, lockSize = false) {
       // VideoSample.draw applies rotation/flip metadata (AC-15): the canvas
       // is upright display space, matching the display-oriented track boxes.
       sample.draw(ctx, 0, 0, w, h);
-      pixelateFrame(ctx, tracks, sample.timestamp, { width: w, height: h }, { scratch: scratchCanvas });
+      pixelateFrame(ctx, tracks, sample.timestamp, { width: w, height: h }, { scratch: scratchCanvas, strength });
       return frameCanvas;
     } catch (err) {
       // tracksAt density violation or renderer failure: wrap as ExportError so
@@ -797,7 +804,7 @@ async function runTrimmedExport({
         const { sf: segSf, outW: segOutW, outH: segOutH } = exportGeometry(
           settings.exportResolution, width, height,
         );
-        const burn = createBurnIn(scaleTracks(tracks, segSf), segOutW, segOutH, rung.stage, segSf !== 1);
+        const burn = createBurnIn(scaleTracks(tracks, segSf), segOutW, segOutH, rung.stage, segSf !== 1, settings.pixelStrength);
         // Same invariant as the single pass: NO `copy` override — the audio
         // track packet-copies within the segment window (REQ-017 / AC-08),
         // unless the user removed the audio track.
@@ -889,14 +896,19 @@ async function runTrimmedExport({
  *           dashcamMode?: boolean, padSeconds?: number,
  *           exportResolution?: 'full'|'1080p'|'720p',
  *           removeAudio?: boolean,
+ *           pixelStrength?: 'fine'|'normal'|'coarse'|'max',
  *           trims?: Array<{id?: number, start: number, end: number}>}} [opts.settings]
  *     `outputMode` 'stream' (default) stages into OPFS via chunked
  *     StreamTarget; 'buffer' holds the whole file in a BufferTarget (small
  *     clips only). `saveHandle` delivers directly into that handle. See
- *     probeLadder for `forceWebM`. v1.15.0 REQ-126: non-empty `trims` switches
- *     to the multi-segment trimmed export — the output contains only the kept
- *     segments, concatenated with continuous timestamps; empty/undefined
- *     trims run the single-pass path byte-for-byte unchanged.
+ *     probeLadder for `forceWebM`. v1.17.0 `pixelStrength` selects the
+ *     pixelation block-size multiplier for the burn-in ('fine' ×1 preserves
+ *     the v1.16 sizes; default 'normal' ×2; 'coarse' ×3; 'max' ×4) — honored
+ *     identically by the preview seam (redact.pixelateFrame). v1.15.0
+ *     REQ-126: non-empty `trims` switches to the multi-segment trimmed export
+ *     — the output contains only the kept segments, concatenated with
+ *     continuous timestamps; empty/undefined trims run the single-pass path
+ *     byte-for-byte unchanged.
  * @param {(progress: {ratio: number, bytesWritten?: number}) => void} [opts.onProgress]
  *     `ratio` 0–1 from Conversion.onProgress; `bytesWritten` is the staged
  *     byte count so far (stream mode).
@@ -958,7 +970,7 @@ export async function runExport(opts) {
       // processedWidth/Height hint the encoder.
       const { sf, outW, outH } = exportGeometry(settings.exportResolution, width, height);
       const exportTracks = scaleTracks(tracks, sf);
-      const burn = createBurnIn(exportTracks, outW, outH, rung.stage, sf !== 1);
+      const burn = createBurnIn(exportTracks, outW, outH, rung.stage, sf !== 1, settings.pixelStrength);
       let output;
       if (staging.kind === 'buffer') {
         output = new Output({ format: new rung.Format(), target: staging.target });

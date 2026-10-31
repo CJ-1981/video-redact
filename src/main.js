@@ -73,6 +73,15 @@
  *   setAllTrackStyles(tracks, style)   bulk restyle model (v1.13.0): every
  *                                      track → 'solid' | 'pixelate' in a NEW
  *                                      array (invalid style → unchanged)
+ *   normalizePixelStrength(value) / PIXEL_STRENGTH_VALUES /
+ *   pixelStrengthPressed(selected)
+ *                                      pixelation-strength model (v1.17.0
+ *                                      REQ-129): 'fine'|'normal'|'coarse'|'max',
+ *                                      invalid → 'normal'
+ *   describeCompareContext(settings)   compare status-line suffix (v1.17.0
+ *                                      REQ-128): detect-affecting settings
+ *   adoptTracks(tracks) / clampTracksToDuration(tracks, durationSec) /
+ *   videoBaseName(name)                project-load helpers (v1.17.0 REQ-130)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -115,9 +124,16 @@ import { secureContextInfo, guidance, probeCapabilities } from './capability.js'
 import { MODELS } from './models.js';
 import { manualTrackFromBox, mountEditor, setTrackStyle, toggleTrack, trimTrack } from './editor.js';
 import { openInput } from './ingest.js';
-import { runAnalyze, sampleFrameAt } from './analyze.js';
-import { createDetectors, decodeYunetOutputs, parsePlateRows } from './detector.js';
+import { filterByMinSize, runAnalyze, sampleFrameAt, scaleFactorFor } from './analyze.js';
+import {
+  createDetectors,
+  decodeYunetOutputs,
+  mergeTiles,
+  parsePlateRows,
+  tileGrid,
+} from './detector.js';
 import { ExportError, discardExportTemp, runExport } from './exporter.js';
+import { parseProject, serializeProject, validateVideoMatch } from './project.js';
 import './types.js';
 
 // ---------------------------------------------------------------------------
@@ -695,6 +711,51 @@ export function normalizeDownscale(value) {
 }
 
 // ---------------------------------------------------------------------------
+// Pixelation strength model (v1.17.0 REQ-129) — mirrors redact.PIXEL_STRENGTHS
+// ('fine'|'normal'|'coarse'|'max'; multiplier lives in redact.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * The pixelation-strength options, in #pixel-strength button order
+ * (REQ-129). Kept in the same order as redact.PIXEL_STRENGTHS's keys — the
+ * main-wiring suite pins the two lists together. Typed string[] so `.includes`
+ * accepts raw (unvalidated) values.
+ * @type {string[]}
+ */
+export const PIXEL_STRENGTH_VALUES = ['fine', 'normal', 'coarse', 'max'];
+
+/**
+ * Normalize a #pixel-strength data-strength value (REQ-129). PURE: a legal
+ * option passes through; anything else (missing button attribute, hand-edited
+ * DOM, a project file's unknown value) degrades to 'normal' — the shipped
+ * default preview AND export both land on (redact.pixelStrengthMultiplier
+ * resolves the same default for the block-size math).
+ *
+ * @param {unknown} value Raw data-strength / project-settings value.
+ * @returns {'fine' | 'normal' | 'coarse' | 'max'}
+ */
+export function normalizePixelStrength(value) {
+  const v = String(value ?? '');
+  return /** @type {'fine' | 'normal' | 'coarse' | 'max'} */ (
+    PIXEL_STRENGTH_VALUES.includes(v) ? v : 'normal'
+  );
+}
+
+/**
+ * Selected strength → the aria-pressed booleans for the #pixel-strength
+ * group, aligned with PIXEL_STRENGTH_VALUES (REQ-129: exactly one button
+ * pressed). PURE; an invalid selection presses 'normal' (the wiring stores
+ * only normalized values).
+ *
+ * @param {unknown} selected Currently selected strength.
+ * @returns {boolean[]}
+ */
+export function pixelStrengthPressed(selected) {
+  const sel = normalizePixelStrength(selected);
+  return PIXEL_STRENGTH_VALUES.map((value) => value === sel);
+}
+
+// ---------------------------------------------------------------------------
 // Overlay control-bar view model (pure; v1.4.0 REQ-111)
 // ---------------------------------------------------------------------------
 
@@ -829,6 +890,33 @@ export function applyThresholdLevel(level, settings = {}) {
     confFace: clamp(v, THRESHOLD_FACE_RANGE),
     confPlate: clamp(v, THRESHOLD_PLATE_RANGE),
   };
+}
+
+/**
+ * Detect-affecting settings → the compare status-line suffix (v1.17.0
+ * REQ-128). PURE. The threshold compare mirrors the analyze pass's detection
+ * geometry (downscale raster, dashcam tile pass, min-size filter), so the
+ * status line names exactly the settings that shaped the panels:
+ *
+ *   {dashcamMode: true, minSizePx: 24, downscale: '720p'} → 'dashcam ON · min ≥24px · 720p'
+ *
+ * Off/default parts are omitted (dashcam off, minSizePx ≤ 0, downscale
+ * 'full'); nothing applies → '' (no suffix rendered). Invalid min-size
+ * values never render a bogus threshold.
+ *
+ * @param {{dashcamMode?: boolean, minSizePx?: number, downscale?: string} | null | undefined} [settings]
+ * @returns {string} ' · '-joined context, or '' when everything is default.
+ */
+export function describeCompareContext(settings) {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  /** @type {string[]} */
+  const parts = [];
+  if (s.dashcamMode === true) parts.push('dashcam ON');
+  const minPx = Number(s.minSizePx);
+  if (Number.isFinite(minPx) && minPx > 0) parts.push(`min ≥${Math.round(minPx)}px`);
+  const downscale = normalizeDownscale(s.downscale);
+  if (downscale !== 'full') parts.push(downscale);
+  return parts.join(' · ');
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1162,155 @@ export function setAllTrackStyles(tracks, style) {
       ? /** @type {import('./types.js').Track} */ ({ ...track, style })
       : track,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Project load model (v1.17.0 REQ-130) — pure helpers for adopting a parsed
+// .vrproj into AppState. src/project.js owns the file format; these own the
+// merge into the app.
+// ---------------------------------------------------------------------------
+
+/**
+ * File name → download base without its extension ("clip.mp4" → "clip");
+ * a name that is all extension (or empty) degrades to 'video'. PURE —
+ * drives the `redact-project-<base>.vrproj` download name (REQ-130).
+ *
+ * @param {unknown} name The loaded video's file name.
+ * @returns {string}
+ */
+export function videoBaseName(name) {
+  const raw = String(name ?? '').trim();
+  const dot = raw.lastIndexOf('.');
+  if (dot <= 0) return raw.length > 0 ? raw : 'video';
+  return raw.slice(0, dot);
+}
+
+/**
+ * Adopt a parsed project's tracks into app state (v1.17.0 REQ-130). PURE.
+ * Manual + auto ids are unique within a project, so tracks are accepted
+ * AS-IS; a corrupted file with duplicate/non-numeric ids is re-issued fresh
+ * ids past the current maximum so chips/rows/toggle dispatch stay functional.
+ * Keyframes arrive either as an in-memory Map (parseProject's revival) or an
+ * array of [seconds, box] pairs — both become a Map; a track left without
+ * usable keyframes is DISABLED (an enabled track with no keyframes would
+ * violate the redact density invariant and fail the preview closed —
+ * disabling keeps the app alive; the user can delete or redraw it).
+ *
+ * @param {unknown} tracks
+ *     The parsed project's tracks (any shape).
+ * @returns {{tracks: import('./types.js').Track[], manualNextId: number}}
+ *     The adopted array (never the input) and the next free manual id
+ *     (max adopted id + 1).
+ */
+export function adoptTracks(tracks) {
+  const source = (Array.isArray(tracks) ? tracks : []).filter(
+    (t) => !!t && typeof t === 'object',
+  );
+
+  // Keyframe revival: Map kept, [seconds, box] pairs converted, anything
+  // else → empty Map.
+  const revived = source.map((track) => {
+    const kf = /** @type {{keyframes?: unknown}} */ (track).keyframes;
+    if (kf instanceof Map) return /** @type {import('./types.js').Track} */ (track);
+    if (Array.isArray(kf)) {
+      const map = new Map(
+        kf.filter((e) => Array.isArray(e) && e.length >= 2),
+      );
+      return /** @type {import('./types.js').Track} */ ({ ...track, keyframes: map });
+    }
+    return /** @type {import('./types.js').Track} */ ({ ...track, keyframes: new Map() });
+  });
+
+  // An enabled track with zero keyframes cannot render a redaction (the
+  // density invariant) — disable it instead of failing the preview closed.
+  // Non-mutating: the track is copied when the flag flips.
+  const usable = revived.map((track) =>
+    track.enabled !== false && (track.keyframes?.size ?? 0) === 0
+      ? /** @type {import('./types.js').Track} */ ({ ...track, enabled: false })
+      : track,
+  );
+
+  // Id repair: non-finite ids get fresh ones; duplicates are re-issued past
+  // the running maximum. Unique valid ids are accepted as-is (REQ-130).
+  let maxId = 0;
+  for (const track of revived) {
+    const id = Number(track.id);
+    if (Number.isFinite(id)) maxId = Math.max(maxId, id);
+  }
+  const seen = new Set();
+  let nextFresh = maxId + 1;
+  const out = usable.map((track) => {
+    const id = Number(track.id);
+    if (Number.isFinite(id) && !seen.has(id)) {
+      seen.add(id);
+      return track;
+    }
+    const fresh = nextFresh;
+    nextFresh += 1;
+    return /** @type {import('./types.js').Track} */ ({ ...track, id: fresh });
+  });
+
+  const manualNextId =
+    out.reduce((m, t) => Math.max(m, Number(t?.id) || 0), 0) + 1;
+  return { tracks: out, manualNextId };
+}
+
+/**
+ * Clamp a project's tracks to a NEW video's duration (v1.17.0 REQ-130): a
+ * project saved against a longer video can carry spans past the loaded
+ * file's end. PURE. Tracks entirely past the duration are DROPPED; spans are
+ * clamped to the duration; keyframes beyond it are dropped (they can never
+ * render for t ≤ end). Non-finite/≤ 0 duration → the tracks come back
+ * untouched. Returns {tracks, clamped} — `clamped` counts tracks shortened
+ * or dropped, so the caller can surface ONE readable warning.
+ *
+ * @param {import('./types.js').Track[] | null | undefined} tracks
+ * @param {number} durationSec The loaded video's duration, seconds.
+ * @returns {{tracks: import('./types.js').Track[], clamped: number}}
+ */
+export function clampTracksToDuration(tracks, durationSec) {
+  const source = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : null;
+  if (dur == null) return { tracks: source, clamped: 0 };
+  /** @type {import('./types.js').Track[]} */
+  const out = [];
+  let clamped = 0;
+  for (const track of source) {
+    const start = Number(track.start);
+    const end = Number(track.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      out.push(track);
+      continue;
+    }
+    if (start >= dur) {
+      clamped += 1; // entirely past the new video's end — nothing to render
+      continue;
+    }
+    const nextEnd = Math.min(end, dur);
+    // Keyframes beyond the duration can never render (t ≤ end ≤ dur) — drop
+    // them, but only COPY the Map when something is actually dropped so
+    // untouched tracks keep object identity.
+    let keyframes = track.keyframes;
+    if (keyframes instanceof Map) {
+      let beyond = false;
+      for (const kt of keyframes.keys()) {
+        if (Number(kt) > dur) {
+          beyond = true;
+          break;
+        }
+      }
+      if (beyond) {
+        keyframes = new Map([...keyframes].filter(([kt]) => Number(kt) <= dur));
+      }
+    }
+    if (nextEnd !== end || keyframes !== track.keyframes) clamped += 1;
+    out.push(
+      nextEnd !== end || keyframes !== track.keyframes
+        ? /** @type {import('./types.js').Track} */ ({ ...track, end: nextEnd, keyframes })
+        : track,
+    );
+  }
+  return { tracks: out, clamped };
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,6 +1763,12 @@ export async function mountApp(
     compareStatus: $('compare-status'),
     thresholdPanels: $('threshold-panels'),
     quality: /** @type {HTMLSelectElement | null} */ ($('export-quality')),
+    // v1.16.0 CRITICAL FIX: these refs were accidentally dropped when the
+    // settings edit failed — els.exportResolution was undefined, so the UI
+    // selections silently fell back to full-res + audio (field report:
+    // exported file unchanged despite 720p + audio-off).
+    exportResolution: /** @type {HTMLSelectElement | null} */ ($('export-resolution')),
+    exportAudio: /** @type {HTMLInputElement | null} */ ($('export-audio')),
     exportBar: $('export-progress-bar'),
     exportButton: /** @type {HTMLButtonElement | null} */ ($('export-button')),
     exportCancel: /** @type {HTMLButtonElement | null} */ ($('export-cancel')),
@@ -1553,6 +1796,13 @@ export async function mountApp(
     // v1.15.0 REQ-125: ✂ trim-mode toggle (tracks panel header, next to
     // #bulk-style). Null-guarded like the bulk buttons.
     trimToggle: /** @type {HTMLButtonElement | null} */ ($('trim-toggle')),
+    // v1.17.0 (REQ-129/130): the pixelation-strength button group, the
+    // project-save button and the project-load file input (inside the
+    // #project-load label). Every ref null-guarded at its use — markup may
+    // not carry the element and the wiring must degrade to a no-op.
+    pixelStrength: /** @type {HTMLElement | null} */ ($('pixel-strength')),
+    projectSave: /** @type {HTMLButtonElement | null} */ ($('project-save')),
+    projectLoad: /** @type {HTMLInputElement | null} */ ($('project-load-input')),
   };
 
   // --- REQ-004 secure-context gate: block everything, wire nothing --------
@@ -1577,7 +1827,8 @@ export async function mountApp(
    *          manualNextId: number, objectUrl: string | null,
    *          trims: Array<{id: number, start: number, end: number}>,
    *          nextTrimId: number, trimMode: boolean,
-   *          settings: {minSizePx: number, downscale: 'full' | '1080p' | '720p'}}} */
+   *          settings: {minSizePx: number, downscale: 'full' | '1080p' | '720p',
+   *                     pixelStrength: 'fine' | 'normal' | 'coarse' | 'max'}}} */
   const app = {
     step: 'gate',
     file: null,
@@ -1597,13 +1848,19 @@ export async function mountApp(
     trimMode: false,
     // v1.12.0: the analyze-pass settings driven by the #size-filter button
     // group (REQ-120) and #downscale-select (REQ-117); reset per file load
-    // and Clear (resetSizeFilter / resetDownscale).
-    settings: { minSizePx: 0, downscale: 'full' },
+    // and Clear (resetSizeFilter / resetDownscale). v1.17.0 REQ-129: the
+    // pixelation strength driven by the #pixel-strength group — preview AND
+    // export read it (resetPixelStrength).
+    settings: { minSizePx: 0, downscale: 'full', pixelStrength: 'normal' },
   };
   let editor = /** @type {ReturnType<typeof mountEditor> | null} */ (null);
   let analyzeCtl = /** @type {AbortController | null} */ (null);
   let exportCtl = /** @type {AbortController | null} */ (null);
   let persisted = false;
+  // v1.17.0 REQ-130: a parsed project awaiting its video. Set by the
+  // #project-load-input handler; applied the moment a video is open (or
+  // immediately when one already is). Cleared by Clear and after applying.
+  let pendingProject = /** @type {{project: Record<string, unknown>} | null} */ (null);
 
   // --- Small DOM utilities --------------------------------------------------
 
@@ -1756,6 +2013,9 @@ export async function mountApp(
     // disabled (never hidden) while the tracks list is empty.
     if (els.bulkSolid) els.bulkSolid.disabled = app.tracks.length === 0;
     if (els.bulkPixelate) els.bulkPixelate.disabled = app.tracks.length === 0;
+    // v1.17.0 REQ-130: the project-save button needs a loaded video (the
+    // project records its name/size) — disabled at the gate, live afterwards.
+    if (els.projectSave) els.projectSave.disabled = !app.file;
   }
 
   function showIntake() {
@@ -1890,9 +2150,11 @@ export async function mountApp(
   applySettings(DEFAULT_SETTINGS());
   // v1.12.0: the REQ-117/120 controls start from their defaults too (and
   // app.settings with them); the REQ-119 file-info block stays hidden until
-  // a file actually loads.
+  // a file actually loads. v1.17.0 REQ-129: the strength group starts on
+  // 'normal' (its aria-pressed states are honest from the first paint).
   resetSizeFilter();
   resetDownscale();
+  resetPixelStrength();
   // v1.15.0 REQ-125: the ✂ toggle starts unpressed (aria-pressed is honest
   // from the first paint; resetTrimState re-syncs it on load/clear).
   syncTrimToggleUi();
@@ -2083,9 +2345,11 @@ export async function mountApp(
     refreshTrackUi();
     // v1.12.0: the REQ-117/120 analyze settings reset per file (consistent
     // with the other analyze-panel controls), and the REQ-119 file-info
-    // block hides until THIS file's metadata lands.
+    // block hides until THIS file's metadata lands. v1.17.0 REQ-129: the
+    // pixelation strength is a per-file setting too — back to 'normal'.
     resetSizeFilter();
     resetDownscale();
+    resetPixelStrength();
     hideFileInfo();
 
     if (!els.fileInput) return;
@@ -2133,6 +2397,9 @@ export async function mountApp(
       // pre-analyze. A mount failure stays contained (mountEditorLive →
       // mountEditorSafe): readable toast, everything else keeps working.
       mountEditorLive();
+      // v1.17.0 REQ-130: a project loaded before its video applies now — the
+      // editor is mounted, the duration is known, tracks render clamped.
+      if (pendingProject) applyLoadedProject();
       toast(
         `Opened ${file.name} — ${meta.container}, ${meta.displayWidth}×${meta.displayHeight}` +
           (caps.canAnalyze ? '' : ' — video decode unavailable, see capability report'),
@@ -2292,6 +2559,9 @@ export async function mountApp(
     app.manualNextId = 1;
     // v1.15.0 REQ-125: trim regions + trim mode reset with everything else.
     resetTrimState();
+    // v1.17.0 REQ-130: a project loaded but not yet paired with its video is
+    // wiped too — Clear is a full unload; the user re-loads the .vrproj.
+    pendingProject = null;
 
     // (d) OPFS hygiene (REQ-019/AC-14 on explicit clear).
     void purgeExportTemps();
@@ -2308,6 +2578,7 @@ export async function mountApp(
     applySettings(DEFAULT_SETTINGS());
     resetSizeFilter(); // v1.12.0 REQ-120: back to Any
     resetDownscale(); // v1.12.0 REQ-117: back to Full
+    resetPixelStrength(); // v1.17.0 REQ-129: back to Normal
     hideFileInfo(); // v1.12.0 REQ-119: the file-info block goes away
     resetAnalyzeUi();
     resetExportUi();
@@ -2455,6 +2726,9 @@ export async function mountApp(
           // timeline overlays, the crosshair cursor and the preview veil.
           trims: app.trims,
           trimMode: app.trimMode,
+          // v1.17.0 REQ-129: the pixelation strength rides to
+          // editor.drawPreview → redact.pixelateFrame (the shared seam).
+          pixelStrength: app.settings.pixelStrength,
         }),
         onToggle: (trackId, enabled) => {
           app.tracks = toggleTrack(app.tracks, trackId, enabled);
@@ -2750,6 +3024,45 @@ export async function mountApp(
   });
   blurAfterChange(els.downscaleSelect);
 
+  // --- v1.17.0 REQ-129: pixelation strength button group ----------------------
+  //
+  // #pixel-strength holds .strength-btn buttons (data-strength
+  // "fine"|"normal"|"coarse"|"max"); exactly one is aria-pressed at a time.
+  // The click delegation (closest('.strength-btn')) maps the string
+  // data-strength onto app.settings.pixelStrength via the pure
+  // normalizePixelStrength; editor.drawPreview passes it into
+  // redact.pixelateFrame (the shared preview/export seam) and runExport
+  // carries it in settings. Null-guarded: markup may not carry the group.
+
+  /** Set the strength (normalized) + sync the group's aria-pressed states. */
+  function applyPixelStrength(selected) {
+    app.settings.pixelStrength = normalizePixelStrength(selected);
+    const pressed = pixelStrengthPressed(app.settings.pixelStrength);
+    if (!els.pixelStrength) return;
+    let index = 0;
+    for (const btn of els.pixelStrength.querySelectorAll('.strength-btn')) {
+      btn.setAttribute('aria-pressed', String(pressed[index] === true));
+      index += 1;
+    }
+  }
+
+  /** Back to Normal — file load + Clear (per-file setting by design). */
+  function resetPixelStrength() {
+    applyPixelStrength('normal');
+  }
+
+  els.pixelStrength?.addEventListener('click', (e) => {
+    // Click delegation: the group container listens; the button wins via
+    // closest('.strength-btn') (also covers clicks on a button's text node).
+    const target = /** @type {Element | null} */ (
+      /** @type {unknown} */ (e.target)
+    );
+    const btn = target?.closest?.('.strength-btn');
+    if (!btn) return;
+    applyPixelStrength(btn.getAttribute?.('data-strength'));
+    editor?.refresh(); // the preview re-renders at the new block size
+  });
+
   // --- v1.13.0: bulk track-style buttons (#bulk-solid / #bulk-pixelate) ------
   //
   // One click restyles EVERY track (manual + auto alike) to 'solid' or
@@ -2791,15 +3104,14 @@ export async function mountApp(
   }
 
   /**
-   * Render the 5 compare panels from ONE decode per model: counts via the
-   * pure buildThresholdPanels view model, boxes drawn in display coords
-   * scaled to each panel canvas (faces teal, plates violet — the app's
-   * track-1/track-2 palette).
+   * Render the 5 compare panels from the ALREADY-decoded detections
+   * (display-space, threshold 0, settings-filtered — see
+   * runThresholdCompare): counts via the pure buildThresholdPanels view
+   * model, boxes drawn in display coords scaled to each panel canvas (faces
+   * teal, plates violet — the app's track-1/track-2 palette).
    */
-  function renderThresholdPanels({ outputs, geom, rows, dims, sample }) {
+  function renderThresholdPanels({ faces, plates, sample }) {
     if (!els.thresholdPanels) return;
-    const faces = decodeYunetOutputs(outputs, undefined, geom, { confThreshold: 0 });
-    const plates = parsePlateRows(rows, dims, geom, { confThreshold: 0 });
     const panels = buildThresholdPanels(THRESHOLD_LEVELS, faces, plates);
 
     const dispW = Number(sample.width) || 1;
@@ -2874,10 +3186,58 @@ export async function mountApp(
   let comparing = false;
 
   /**
-   * Single-frame threshold comparison (REQ-114): decode ONE sample at the
-   * chosen time (sampleFrameAt), run each model EXACTLY once (raw
-   * accessors), render the fixed-level panels. Progress/busy state on the
-   * button; failures surface via toast (REQ-021 pattern).
+   * Build the compare detection raster (v1.17.0 REQ-128): the sample's
+   * pixels on a canvas, drawn at the ANALYZE pass's scaled size when
+   * `sf < 1` (REQ-117 downscale — detections must come from the raster the
+   * analyze pass actually infers on). Returns null when no 2D canvas is
+   * available (node tests) — the caller then falls back to the decoded
+   * sample raster with sf treated as 1.
+   *
+   * @param {{imageDataLike: object, width: number, height: number}} sample
+   * @param {number} sf scaleFactorFor's factor for the current downscale.
+   * @returns {{ctx: object, frame: object, width: number, height: number,
+   *            scaled: boolean} | null}
+   */
+  function compareCanvasRaster(sample, sf) {
+    try {
+      const src = doc.createElement('canvas');
+      src.width = sample.width;
+      src.height = sample.height;
+      const sctx = src.getContext('2d');
+      if (!sctx || typeof sctx.putImageData !== 'function') return null;
+      sctx.putImageData(/** @type {ImageData} */ (sample.imageDataLike), 0, 0);
+      const scaled = Number.isFinite(sf) && sf > 0 && sf < 1;
+      const w = scaled ? Math.max(1, Math.round(sample.width * sf)) : sample.width;
+      const h = scaled ? Math.max(1, Math.round(sample.height * sf)) : sample.height;
+      const dst = doc.createElement('canvas');
+      dst.width = w;
+      dst.height = h;
+      const dctx = dst.getContext('2d');
+      if (
+        !dctx ||
+        typeof dctx.drawImage !== 'function' ||
+        typeof dctx.getImageData !== 'function'
+      ) {
+        return null;
+      }
+      dctx.drawImage(src, 0, 0, w, h);
+      return { ctx: dctx, frame: dctx.getImageData(0, 0, w, h), width: w, height: h, scaled };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Single-frame threshold comparison (REQ-114; v1.17.0 REQ-128): decode ONE
+   * sample at the chosen time (sampleFrameAt), then mirror the analyze
+   * pass's detection geometry EXACTLY — the REQ-117 downscale raster
+   * (scaleFactorFor, detections inferred on the SCALED frame and rescaled to
+   * display space), the dashcam tiled pass (tileGrid on the scaled dims,
+   * per-tile inferences, mergeTiles — the same cost the analyze pass pays),
+   * and the REQ-120 min-size filter per class — before the fixed-level
+   * counting. Decode stays at threshold 0 per inference (REQ-114: NMS
+   * order-equivalence) so the panels can count every level. Progress/busy
+   * state on the button; failures surface via toast (REQ-021 pattern).
    */
   async function runThresholdCompare() {
     if (comparing || !app.input || !app.meta) return;
@@ -2899,18 +3259,101 @@ export async function mountApp(
     try {
       const sample = await sampleFrameAt(app.input, t);
       if (gen !== app.gen) return;
-      if (els.compareStatus) els.compareStatus.textContent = 'Running the models once…';
+      if (els.compareStatus) els.compareStatus.textContent = 'Running the models…';
       const detectors = await createDetectors(
         app.caps?.epPolicy === 'wasm' ? { epPolicy: ['wasm'] } : {},
       );
       try {
-        const { outputs, geom } = await detectors.detectFaceRaw(sample.imageDataLike);
-        const { rows, dims } = await detectors.detectPlateRaw(sample.imageDataLike);
+        // REQ-128: the analysis raster — scaled when downscale < 1, the
+        // sample as-is otherwise. A missing canvas (node) degrades to the
+        // unscaled sample with sf treated as 1 (and no tile slicing).
+        // Dashcam rides the SAME source as the analyze pass (the toggle).
+        const dashcamOn = els.dashcamToggle?.checked === true;
+        const sf = scaleFactorFor(app.settings.downscale, sample.width, sample.height);
+        const needRaster = sf < 1 || dashcamOn;
+        const raster = needRaster ? compareCanvasRaster(sample, sf) : null;
+        const frame = raster ? raster.frame : sample.imageDataLike;
+        const rw = raster ? raster.width : sample.width;
+        const rh = raster ? raster.height : sample.height;
+        const effSf = raster?.scaled ? sf : 1;
+
+        // Full pass: ONE inference per model, decoded at threshold 0.
+        const faceFull = await detectors.detectFaceRaw(frame);
+        const plateFull = await detectors.detectPlateRaw(frame);
         if (gen !== app.gen) return;
-        renderThresholdPanels({ outputs, geom, rows, dims, sample });
+        /** @type {import('./types.js').Detection[]} */
+        const faces = /** @type {import('./types.js').Detection[]} */ (
+          decodeYunetOutputs(faceFull.outputs, undefined, faceFull.geom, {
+            confThreshold: 0,
+          }).map((d) => ({ ...d, pass: 'full' }))
+        );
+        /** @type {import('./types.js').Detection[]} */
+        const plates = /** @type {import('./types.js').Detection[]} */ (
+          /** @type {unknown} */ (
+            parsePlateRows(plateFull.rows, plateFull.dims, plateFull.geom, {
+              confThreshold: 0,
+            }).map((d) => ({ ...d, pass: 'full' }))
+          )
+        );
+
+        // Dashcam pass (REQ-128): the SAME tiled sweep the analyze loop runs
+        // — tileGrid on the analysis dims, per-tile inferences, tile-local
+        // decodes merged back into full-frame coords (design §4.1).
+        if (dashcamOn && raster) {
+          const tiles = tileGrid({ width: rw, height: rh });
+          /** @type {Array<import('./types.js').Detection & {tileIndex?: number}>} */
+          const tileFaces = [];
+          /** @type {Array<import('./types.js').Detection & {tileIndex?: number}>} */
+          const tilePlates = [];
+          for (let i = 0; i < tiles.length; i++) {
+            const tile = tiles[i];
+            const tileRaster = raster.ctx.getImageData(tile.x, tile.y, tile.w, tile.h);
+            const tf = await detectors.detectFaceRaw(tileRaster);
+            const tp = await detectors.detectPlateRaw(tileRaster);
+            if (gen !== app.gen) return;
+            const tag = (d) => ({ ...d, tileIndex: i, pass: 'tile' });
+            tileFaces.push(
+              ...decodeYunetOutputs(tf.outputs, undefined, tf.geom, { confThreshold: 0 }).map(tag),
+            );
+            tilePlates.push(
+              ...parsePlateRows(tp.rows, tp.dims, tp.geom, { confThreshold: 0 }).map(tag),
+            );
+          }
+          faces.push(...mergeTiles(tileFaces, tiles));
+          plates.push(...mergeTiles(tilePlates, tiles));
+        }
+
+        // REQ-117: detections came back in SCALED analysis space — rescale
+        // to display space (the analyze loop's ADR-9 rule) before filtering.
+        if (effSf !== 1) {
+          const inv = 1 / effSf;
+          for (const d of [...faces, ...plates]) {
+            d.box = {
+              x: d.box.x * inv,
+              y: d.box.y * inv,
+              w: d.box.w * inv,
+              h: d.box.h * inv,
+            };
+          }
+        }
+
+        // REQ-120: minimum display-size filter per class, BEFORE counting —
+        // the panels must show what the analyze pass would actually track.
+        const keptFaces = filterByMinSize(faces, app.settings.minSizePx ?? 0);
+        const keptPlates = filterByMinSize(plates, app.settings.minSizePx ?? 0);
+
+        renderThresholdPanels({ faces: keptFaces, plates: keptPlates, sample });
         if (els.compareStatus) {
+          // REQ-128: the status line names the settings that shaped the
+          // panels (dashcam ON / min-size / downscale), omitted when default.
+          const context = describeCompareContext({
+            dashcamMode: dashcamOn,
+            minSizePx: app.settings.minSizePx,
+            downscale: app.settings.downscale,
+          });
           els.compareStatus.textContent =
-            `Frame at ${formatClock(sample.t)} — click a level to apply it to both sliders.`;
+            `Frame at ${formatClock(sample.t)} — click a level to apply it to both sliders.` +
+            (context ? ` · ${context}` : '');
         }
       } finally {
         detectors.close();
@@ -2967,6 +3410,10 @@ export async function mountApp(
         // v1.15.0 REQ-126: trim regions to EXCLUDE from the output. Empty
         // array → the exporter takes the unchanged single-pass path.
         trims: app.trims.slice(),
+        // v1.17.0 REQ-129: the pixelation strength rides to the exporter's
+        // burn-in — preview and export must resolve the SAME block sizes
+        // (AC-04 shared-seam rule; invalid values re-default to 'normal').
+        pixelStrength: normalizePixelStrength(app.settings.pixelStrength),
       },
       signal: ctl.signal,
       onProgress: (p) => {
@@ -3024,6 +3471,164 @@ export async function mountApp(
   blurAfterClick(els.exportButton);
   els.exportCancel?.addEventListener('click', () => exportCtl?.abort());
   blurAfterClick(els.exportCancel);
+
+  // --- Project save/load (v1.17.0 REQ-130; src/project.js owns the format) ---
+  //
+  // #project-save serializes {version, settings, trims, tracks} (+ the video
+  // identity meta) into a downloadable `redact-project-<video>.vrproj` — the
+  // video's BYTES never leave the device. #project-load-input parses a
+  // .vrproj: typed readable errors per failure code; a valid project is
+  // either applied immediately (video already open) or held in
+  // pendingProject until the user opens its video (then validated — name/
+  // size mismatches WARN but never block — and clamped to the new duration).
+
+  /** Typed failure code → readable toast body (REQ-021 pattern). */
+  const PROJECT_ERROR_MESSAGES = {
+    'bad-json': 'This project file is not valid JSON — it may be corrupted or truncated.',
+    'bad-structure': 'This project file is missing required sections (version/settings/trims/tracks) — it may not be a video-redact project.',
+    'unsupported-version': 'This project file uses an unsupported format version — re-save it with the current app.',
+  };
+
+  /**
+   * Apply a parsed project to app state (REQ-130). The video association is
+   * the caller's concern; here the settings merge through the existing
+   * normalizers (UI follows), trims re-normalize against the loaded
+   * duration, tracks are adopted (adoptTracks) and clamped to the video
+   * (clampTracksToDuration, one warning when anything was shortened), and
+   * the app steps to review when the editor is mounted.
+   */
+  function applyLoadedProject() {
+    const project = pendingProject?.project;
+    pendingProject = null;
+    if (!project || typeof project !== 'object') return;
+    const p = /** @type {Record<string, unknown>} */ (project);
+
+    // 1. Settings — every field through its own normalizer; the UI controls
+    //    (sliders stay untouched: confFace/confPlate are not stored in the
+    //    project contract) follow the same apply* helpers the clicks use.
+    const s = p.settings && typeof p.settings === 'object'
+      ? /** @type {Record<string, unknown>} */ (p.settings)
+      : {};
+    applyPixelStrength(normalizePixelStrength(s.pixelStrength));
+    applyDownscale(s.downscale);
+    applySizeFilter(Number(s.minSizePx));
+    if (els.dashcamToggle) els.dashcamToggle.checked = s.dashcamMode === true;
+
+    // 2. Trims + tracks. Duration known → normalize/clamp against it; a
+    //    project saved against a longer video loses its past-the-end spans
+    //    (with ONE readable warning).
+    app.trims = normalizeTrims(p.trims, app.meta?.duration);
+    const adopted = adoptTracks(p.tracks);
+    const clamped = clampTracksToDuration(adopted.tracks, app.meta?.duration);
+    app.tracks = clamped.tracks;
+    app.manualNextId = adopted.manualNextId;
+
+    // 3. Video-identity check: a mismatch WARNS but never blocks (REQ-130 —
+    //    re-encoded copies stay usable).
+    if (app.file) {
+      const match = validateVideoMatch(p, app.file);
+      if (match && match.ok !== true) {
+        toast(match.message || 'This video does not match the video saved in the project.', {
+          kind: 'error',
+          timeoutMs: 8000,
+        });
+      }
+    }
+
+    // 4. Step + refresh. Review only when the video is loaded (editor
+    //    mounted) — a project without its video stays at the gate/ready.
+    if (editor && app.input && app.step !== 'review') {
+      app.step = 'review';
+      applyStepper();
+    }
+    updateButtons();
+    refreshTrackUi();
+    if (clamped.clamped > 0) {
+      toast('Some project tracks were clamped to this video’s duration.', { timeoutMs: 6000 });
+    }
+  }
+
+  els.projectSave?.addEventListener('click', () => {
+    void (async () => {
+      if (!app.file) return; // disabled-state guard (updateButtons)
+      const payload = {
+        version: APP_VERSION,
+        settings: { ...app.settings },
+        trims: app.trims.map((r) => ({ ...r })),
+        tracks: app.tracks,
+        meta: {
+          videoName: app.file.name,
+          videoSize: app.file.size,
+          videoLastModified: app.file.lastModified ?? 0,
+        },
+      };
+      let json;
+      try {
+        json = serializeProject(payload);
+      } catch (err) {
+        toast(
+          `Could not save the project: ${err instanceof Error ? err.message : String(err)}`,
+          { kind: 'error', timeoutMs: 8000 },
+        );
+        return;
+      }
+      if (typeof URL.createObjectURL !== 'function') {
+        toast('Project download is not supported in this browser.', { kind: 'error' });
+        return;
+      }
+      // The shared download pattern: Blob → object URL → anchor click →
+      // revoke (same lifecycle the exporter's download path uses).
+      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      const name = `redact-project-${videoBaseName(app.file.name)}.vrproj`;
+      const a = doc.createElement('a');
+      a.href = url;
+      a.download = name;
+      (doc.body ?? els.workspace ?? doc.documentElement)?.appendChild?.(a);
+      a.click();
+      a.remove?.();
+      URL.revokeObjectURL(url);
+      toast(`Project saved — ${name}`, { kind: 'ok' });
+    })();
+  });
+  blurAfterClick(els.projectSave);
+
+  els.projectLoad?.addEventListener('change', () => {
+    void (async () => {
+      const file = els.projectLoad?.files?.[0];
+      if (els.projectLoad) els.projectLoad.value = ''; // re-select re-fires change
+      if (!file) return;
+      let text = '';
+      try {
+        text = await file.text();
+      } catch (err) {
+        toast(
+          `Could not read the project file: ${err instanceof Error ? err.message : String(err)}`,
+          { kind: 'error', timeoutMs: 8000 },
+        );
+        return;
+      }
+      const res = parseProject(text);
+      if (!res || res.ok !== true) {
+        const failed = res && res.ok === false ? res : { code: 'bad-structure', message: '' };
+        const base = PROJECT_ERROR_MESSAGES[failed.code] ?? 'This project file could not be loaded.';
+        const detail = failed.message ? ` ${failed.message}` : '';
+        toast(`${base}${detail}`, { kind: 'error', timeoutMs: 10000 });
+        return;
+      }
+      pendingProject = { project: res.project };
+      if (app.input && app.file && editor) {
+        applyLoadedProject(); // video already open — apply immediately
+      } else {
+        // REQ-130: the video association is EXPLICIT — the project stores no
+        // video bytes, so tell the user which file to open next.
+        const expected = res.project?.meta?.videoName;
+        toast(
+          `Project loaded — now open the video it belongs to${expected ? ` (expected: ${expected})` : '.'}`,
+          { timeoutMs: 10000 },
+        );
+      }
+    })();
+  });
 
   // --- Transport (SPEC-VID-002 REQ-105 / AC-104; v1.4.0 REQ-111) ---------------
 

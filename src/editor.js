@@ -1179,7 +1179,13 @@ export function mountEditor(els, hooks) {
         (r) => Number.isFinite(t) && t >= r.start && t <= r.end,
       );
       if (!inTrim) {
-        pixelateFrame(ctx, tracksCanvasPx, t, { width: bw, height: bh });
+        // v1.17.0 REQ-129: the selected pixelation strength rides through the
+        // shared seam — getState().pixelStrength ('fine'|'normal'|'coarse'|
+        // 'max'; invalid/missing → redact's 'normal' default) so the preview
+        // resolves the same block sizes the export burn-in will (AC-04).
+        pixelateFrame(ctx, tracksCanvasPx, t, { width: bw, height: bh }, {
+          strength: state.pixelStrength,
+        });
       }
       // 2. Outline pass for ALL tracks (enabled solid + disabled dashed),
       //    on top of the burned pixels so strokes stay crisp — same scaled

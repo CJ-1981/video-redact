@@ -419,10 +419,12 @@ describe('runExport — burn-in process callback (AC-04)', () => {
 
     // Pixelation burned: the last drawImage per sample is the nearest-neighbour
     // upscale back into the DILATED box (dilate(box, 0.15, frame) — clamped).
+    // Default pixelStrength 'normal' (×2): dilated 46×46 → block 24 → src 2×2;
+    // dilated 23×23 → block 24 → src 1×1.
     const upscales = [...frameCanvas.rec.calls].filter((c) => c[0] === 'drawImage');
     expect(upscales).toHaveLength(2);
-    expect(upscales[0].slice(2)).toEqual([0, 0, 4, 4, 97, 47, 46, 46]);
-    expect(upscales[1].slice(2)).toEqual([0, 0, 2, 2, 198.5, 58.5, 23, 23]);
+    expect(upscales[0].slice(2)).toEqual([0, 0, 2, 2, 97, 47, 46, 46]);
+    expect(upscales[1].slice(2)).toEqual([0, 0, 1, 1, 198.5, 58.5, 23, 23]);
   });
 
   it('samples ONLY the dilated region into the pixelation scratch (reused canvas)', async () => {
@@ -440,11 +442,12 @@ describe('runExport — burn-in process callback (AC-04)', () => {
     expect(scratch).toBeDefined();
 
     // Downscale step ran on the scratch, sourcing exactly the dilated box
-    // from the frame canvas: drawImage(frame, 97, 47, 46, 46, 0, 0, 4, 4).
+    // from the frame canvas: drawImage(frame, 97, 47, 46, 46, 0, 0, 2, 2)
+    // (default pixelStrength 'normal' ×2 → block 24 → src 2×2).
     const downs = scratch.rec.calls.filter((c) => c[0] === 'drawImage');
     expect(downs).toHaveLength(1);
     expect(downs[0][1]).toBe(frameCanvas);
-    expect(downs[0].slice(2)).toEqual([97, 47, 46, 46, 0, 0, 4, 4]);
+    expect(downs[0].slice(2)).toEqual([97, 47, 46, 46, 0, 0, 2, 2]);
 
     // The upscale drew FROM the scratch canvas.
     const ups = frameCanvas.rec.calls.filter((c) => c[0] === 'drawImage');
@@ -530,6 +533,58 @@ describe('runExport — burn-in process callback (AC-04)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Pixelation strength plumbing (v1.17.0): settings.pixelStrength → burn-in
+// ---------------------------------------------------------------------------
+
+describe('runExport — settings.pixelStrength flows into the burn-in (v1.17.0)', () => {
+  // A 400×400 box dilates to 460×460 (frame 320×180 clamps the shifted origin
+  // to 0,0 but the dilated SIZE is preserved). Base block = max(12, 46) = 46:
+  //   fine ×1 → 46  → scratch ceil(460/46)  = 10×10 (v1.16 behavior)
+  //   normal ×2 → 92 → 5×5 (the DEFAULT — doubles vs v1.16)
+  //   coarse ×3 → 138 → 4×4
+  //   max ×4 → 184  → 3×3
+  const bigBox = { x: 0, y: 0, w: 400, h: 400 };
+
+  /** Burn one frame with the given settings; return the pixelation scratch dims. */
+  async function burnWithStrength(settings) {
+    const track = makeTrack({ keyframes: new Map([[0, bigBox]]) });
+    let conv;
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      conv = new mb.Conversion(opts);
+      scriptExecute(conv, { onDone: () => conv.opts.video.process(fakeSample(0)) });
+      return conv;
+    });
+    await runExport({ input: fakeInput(), tracks: [track], settings: { ...bufferSettings, ...settings } });
+    const scratch = canvases[1]; // [0] = frame canvas, [1] = pixelation scratch
+    return { w: scratch.width, h: scratch.height };
+  }
+
+  it("missing pixelStrength resolves to 'normal' ×2 → block 92 → scratch 5×5", async () => {
+    expect(await burnWithStrength({})).toEqual({ w: 5, h: 5 });
+  });
+
+  it("'normal' ×2 → block 92 → scratch 5×5", async () => {
+    expect(await burnWithStrength({ pixelStrength: 'normal' })).toEqual({ w: 5, h: 5 });
+  });
+
+  it("'fine' ×1 preserves the v1.16 block rule → block 46 → scratch 10×10", async () => {
+    expect(await burnWithStrength({ pixelStrength: 'fine' })).toEqual({ w: 10, h: 10 });
+  });
+
+  it("'coarse' ×3 → block 138 → scratch 4×4", async () => {
+    expect(await burnWithStrength({ pixelStrength: 'coarse' })).toEqual({ w: 4, h: 4 });
+  });
+
+  it("'max' ×4 → block 184 → scratch 3×3", async () => {
+    expect(await burnWithStrength({ pixelStrength: 'max' })).toEqual({ w: 3, h: 3 });
+  });
+
+  it("invalid pixelStrength falls back to 'normal' ×2 → scratch 5×5 (never throws, never ×1)", async () => {
+    expect(await burnWithStrength({ pixelStrength: 'bogus' })).toEqual({ w: 5, h: 5 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Shared composition seam (editor alignment — AC-04 symmetry)
 // ---------------------------------------------------------------------------
 
@@ -545,7 +600,7 @@ describe('pixelateFrame — shared dilate+applyPixelation composition', () => {
     pixelateFrame(rec.ctx, tracks, 2, { width: 320, height: 180 }, { scratch });
     const ups = rec.calls.filter((c) => c[0] === 'drawImage');
     expect(ups).toHaveLength(1);
-    expect(ups[0].slice(2)).toEqual([0, 0, 4, 4, 97, 47, 46, 46]);
+    expect(ups[0].slice(2)).toEqual([0, 0, 2, 2, 97, 47, 46, 46]); // default ×2 → block 24
   });
 
   it('matches the box redact.dilate produces (composition contract)', () => {

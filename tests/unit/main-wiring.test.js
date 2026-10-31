@@ -20,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import * as main from '../../src/main.js';
+import { PIXEL_STRENGTHS } from '../../src/redact.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -73,6 +74,27 @@ vi.mock('../../src/analyze.js', () => ({
   sampleFrameAt: async () => {
     throw new Error('unused in unit tests');
   },
+}));
+
+// v1.17.0 REQ-129: the export button IS exercised below (startExport's
+// settings must carry pixelStrength), so the exporter runs behind a mock —
+// the burn-in itself is exporter.test.js's territory.
+const { runExportMock, FakeExportError } = vi.hoisted(() => {
+  /** Minimal ExportError stand-in (main.js only does instanceof + .stage). */
+  class FakeExportError extends Error {
+    constructor(stage, message) {
+      super(message ?? `export failed at ${stage}`);
+      this.name = 'ExportError';
+      this.stage = stage;
+    }
+  }
+  return { runExportMock: vi.fn(async () => ({ bytes: 1 })), FakeExportError };
+});
+
+vi.mock('../../src/exporter.js', () => ({
+  ExportError: FakeExportError,
+  discardExportTemp: vi.fn(async () => true),
+  runExport: runExportMock,
 }));
 
 const CAPS_FIXTURE = {
@@ -827,6 +849,17 @@ function makeFakeEl(tag = 'DIV') {
       return el.attrs[k] ?? null;
     },
     blur() {},
+    // v1.17.0: the project-save path clicks a created anchor; the
+    // #pixel-strength delegation resolves buttons via closest(sel).
+    click() {
+      el.clicked = (el.clicked || 0) + 1;
+    },
+    closest(selector) {
+      if (typeof selector !== 'string' || selector.length === 0) return null;
+      if (selector.startsWith('.')) return classes.has(selector.slice(1)) ? el : null;
+      if (selector.startsWith('#')) return el.attrs.id === selector.slice(1) ? el : null;
+      return null;
+    },
     querySelector() {
       return null;
     },
@@ -879,12 +912,21 @@ function makeFakeEnv() {
   };
   const docListeners = new Map();
   const elsById = new Map();
+  const createdEls = [];
   const fakeDoc = {
     body: { dataset: {} },
     activeElement: null,
     fullscreenElement: null,
     readyState: 'complete',
     defaultView: fakeView,
+    // v1.17.0: created elements are recorded (the project-save test asserts
+    // the download anchor's .download + click).
+    createElement(tag) {
+      const el = makeFakeEl(String(tag).toUpperCase());
+      createdEls.push(el);
+      return el;
+    },
+    __createdEls: createdEls,
     getElementById(id) {
       if (!elsById.has(id)) {
         if (id === 'preview-video') {
@@ -921,9 +963,6 @@ function makeFakeEnv() {
       }
       return elsById.get(id);
     },
-    createElement(tag) {
-      return makeFakeEl(String(tag).toUpperCase());
-    },
     addEventListener(type, fn) {
       if (!docListeners.has(type)) docListeners.set(type, new Set());
       docListeners.get(type).add(fn);
@@ -937,7 +976,7 @@ function makeFakeEnv() {
     },
     __docListeners: docListeners,
   };
-  return { fakeDoc, fakeView, viewListeners, docListeners, elsById };
+  return { fakeDoc, fakeView, viewListeners, docListeners, elsById, createdEls };
 }
 
 /** MountApp wiring is async; the analyze path resolves on the macrotask queue. */
@@ -2161,6 +2200,607 @@ describe('mountApp (v1.15.0): #trim-toggle + trim hooks + resets', () => {
       const st = hooks.getState();
       expect(st.trims).toEqual([]);
       expect(st.trimMode).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.17.0 REQ-128 — describeCompareContext (compare status-line suffix)
+// ---------------------------------------------------------------------------
+
+describe('main-wiring: describeCompareContext (v1.17.0 REQ-128)', () => {
+  it('joins every non-default setting in order: dashcam · min · downscale', () => {
+    expect(
+      main.describeCompareContext({ dashcamMode: true, minSizePx: 24, downscale: '720p' }),
+    ).toBe('dashcam ON · min ≥24px · 720p');
+  });
+
+  it('omits off/default parts; nothing applies → empty string', () => {
+    expect(main.describeCompareContext({})).toBe('');
+    expect(main.describeCompareContext(null)).toBe('');
+    expect(main.describeCompareContext(undefined)).toBe('');
+    expect(
+      main.describeCompareContext({ dashcamMode: false, minSizePx: 0, downscale: 'full' }),
+    ).toBe('');
+  });
+
+  it('renders each part alone, rounds fractional min sizes, and guards junk', () => {
+    expect(main.describeCompareContext({ dashcamMode: true })).toBe('dashcam ON');
+    expect(main.describeCompareContext({ minSizePx: 48 })).toBe('min ≥48px');
+    expect(main.describeCompareContext({ minSizePx: 24.4 })).toBe('min ≥24px');
+    expect(main.describeCompareContext({ downscale: '1080p' })).toBe('1080p');
+    // Invalid values never render a bogus threshold/preset.
+    expect(main.describeCompareContext({ minSizePx: Number.NaN })).toBe('');
+    expect(main.describeCompareContext({ minSizePx: 'bogus' })).toBe('');
+    expect(main.describeCompareContext({ downscale: 'bogus' })).toBe(''); // → full
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.17.0 REQ-129 — pixelation strength model (normalizePixelStrength /
+// PIXEL_STRENGTH_VALUES / pixelStrengthPressed)
+// ---------------------------------------------------------------------------
+
+describe('main-wiring: normalizePixelStrength (v1.17.0 REQ-129)', () => {
+  it('passes the four legal options through', () => {
+    expect(main.normalizePixelStrength('fine')).toBe('fine');
+    expect(main.normalizePixelStrength('normal')).toBe('normal');
+    expect(main.normalizePixelStrength('coarse')).toBe('coarse');
+    expect(main.normalizePixelStrength('max')).toBe('max');
+  });
+
+  it('degrades everything else to normal (missing attr, project junk, case)', () => {
+    for (const v of [undefined, null, '', 'bogus', 'FINE', 2, {}]) {
+      expect(main.normalizePixelStrength(v)).toBe('normal');
+    }
+  });
+
+  it('PIXEL_STRENGTH_VALUES match the button order AND redact.PIXEL_STRENGTHS keys', () => {
+    expect(main.PIXEL_STRENGTH_VALUES).toEqual(['fine', 'normal', 'coarse', 'max']);
+    expect(main.PIXEL_STRENGTH_VALUES).toEqual(Object.keys(PIXEL_STRENGTHS));
+  });
+
+  it('pixelStrengthPressed maps the selection onto exactly one pressed button', () => {
+    expect(main.pixelStrengthPressed('fine')).toEqual([true, false, false, false]);
+    expect(main.pixelStrengthPressed('normal')).toEqual([false, true, false, false]);
+    expect(main.pixelStrengthPressed('coarse')).toEqual([false, false, true, false]);
+    expect(main.pixelStrengthPressed('max')).toEqual([false, false, false, true]);
+    // Invalid → the normalized default ('normal') is pressed.
+    expect(main.pixelStrengthPressed('bogus')).toEqual([false, true, false, false]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.17.0 REQ-130 — project-load pure models (adoptTracks /
+// clampTracksToDuration / videoBaseName)
+// ---------------------------------------------------------------------------
+
+describe('main-wiring: adoptTracks (v1.17.0 REQ-130 project load)', () => {
+  const box = { x: 1, y: 2, w: 3, h: 4 };
+
+  it('accepts unique-id tracks as-is; manualNextId lands past the max', () => {
+    const a = { ...manualTrack(3), keyframes: new Map([[1, box]]) };
+    const b = { ...autoTrack(7), keyframes: new Map([[1, box]]) };
+    const { tracks, manualNextId } = main.adoptTracks([a, b]);
+    expect(tracks).toEqual([a, b]);
+    expect(manualNextId).toBe(8);
+  });
+
+  it('revives [seconds, box] keyframe pairs to a Map (the .vrproj JSON shape)', () => {
+    const { tracks } = main.adoptTracks([
+      { ...autoTrack(1), keyframes: [[0.5, box], [1.5, box]] },
+    ]);
+    expect(tracks[0].keyframes).toBeInstanceOf(Map);
+    expect(tracks[0].keyframes.get(0.5)).toBe(box);
+    expect(tracks[0].keyframes.get(1.5)).toBe(box);
+  });
+
+  it('disables keyframe-less enabled tracks (density invariant) instead of failing the preview closed', () => {
+    const { tracks } = main.adoptTracks([{ ...autoTrack(1), enabled: true, keyframes: [] }]);
+    expect(tracks[0].enabled).toBe(false);
+    // A deliberately disabled track stays disabled (no flip back on).
+    const { tracks: off } = main.adoptTracks([
+      { ...autoTrack(2), enabled: false, keyframes: [] },
+    ]);
+    expect(off[0].enabled).toBe(false);
+  });
+
+  it('repairs duplicate ids past the max and guards degenerate inputs', () => {
+    const { tracks, manualNextId } = main.adoptTracks([manualTrack(2), manualTrack(2)]);
+    const ids = tracks.map((t) => t.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain(2);
+    expect(ids.filter((id) => id !== 2)[0]).toBeGreaterThan(2);
+    expect(manualNextId).toBe(Math.max(...ids) + 1);
+    expect(main.adoptTracks(null)).toEqual({ tracks: [], manualNextId: 1 });
+    expect(main.adoptTracks('nope')).toEqual({ tracks: [], manualNextId: 1 });
+  });
+});
+
+describe('main-wiring: clampTracksToDuration (v1.17.0 REQ-130 project load)', () => {
+  const box = { x: 0, y: 0, w: 2, h: 2 };
+
+  it('clamps the span end, drops keyframes beyond the duration, and counts the edit', () => {
+    const track = {
+      ...autoTrack(1),
+      start: 1,
+      end: 6,
+      keyframes: new Map([[1, box], [2, box], [5, box]]),
+    };
+    const { tracks, clamped } = main.clampTracksToDuration([track], 4);
+    expect(tracks[0].end).toBe(4);
+    expect([...tracks[0].keyframes.keys()]).toEqual([1, 2]); // 5 > 4 → dropped
+    expect(clamped).toBe(1);
+  });
+
+  it('drops tracks entirely past the duration; untouched tracks keep their identity', () => {
+    const inside = {
+      ...autoTrack(1),
+      start: 0.5,
+      end: 2,
+      keyframes: new Map([[1, box]]),
+    };
+    const { tracks, clamped } = main.clampTracksToDuration(
+      [inside, { ...inside, id: 2, start: 9, end: 10 }],
+      4,
+    );
+    expect(tracks.map((t) => t.id)).toEqual([1]);
+    expect(tracks[0]).toBe(inside);
+    expect(clamped).toBe(1); // the dropped one
+  });
+
+  it('guards degenerate input: non-finite duration → untouched; invalid spans pass through', () => {
+    const tracks = [{ ...autoTrack(1), start: 1, end: 6, keyframes: new Map() }];
+    const out = main.clampTracksToDuration(tracks, Number.NaN);
+    expect(out.tracks).toEqual(tracks);
+    expect(out.clamped).toBe(0);
+    expect(main.clampTracksToDuration(null, 4)).toEqual({ tracks: [], clamped: 0 });
+    const weird = { ...autoTrack(3), start: 'x', end: 'y', keyframes: new Map() };
+    const r = main.clampTracksToDuration([weird], 2);
+    expect(r.tracks).toEqual([weird]);
+    expect(r.clamped).toBe(0);
+  });
+});
+
+describe('main-wiring: videoBaseName (v1.17.0 REQ-130 download name)', () => {
+  it('strips the extension; keeps multi-dot stems; degrades safely', () => {
+    expect(main.videoBaseName('clip.mp4')).toBe('clip');
+    expect(main.videoBaseName('my.video.take3.mov')).toBe('my.video.take3');
+    expect(main.videoBaseName('noext')).toBe('noext');
+    expect(main.videoBaseName('.mp4')).toBe('.mp4'); // all-extension name kept whole
+    expect(main.videoBaseName('')).toBe('video');
+    expect(main.videoBaseName(undefined)).toBe('video');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.17.0 — mountApp wiring through the fake DOM (REQ-129 strength clicks,
+// REQ-130 project save/load)
+// ---------------------------------------------------------------------------
+
+describe('mountApp (v1.17.0): #pixel-strength wiring + strength in the seams', () => {
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  /** Seed the #pixel-strength group with its four .strength-btn buttons. */
+  function seedStrengthGroup(elsById) {
+    const group = makeFakeEl('DIV');
+    const buttons = ['fine', 'normal', 'coarse', 'max'].map((s) => {
+      const b = makeFakeEl('BUTTON');
+      b.setAttribute('data-strength', s);
+      b.classList.add('strength-btn');
+      return b;
+    });
+    group.querySelectorAll = () => buttons;
+    elsById.set('pixel-strength', group);
+    return { group, buttons };
+  }
+
+  function hooksHandle(refreshes, sink) {
+    return (_els, editorHooks) => {
+      sink.hooks = editorHooks;
+      return {
+        destroy() {},
+        refresh: () => refreshes.push('refresh'),
+        redraw() {},
+        getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+      };
+    };
+  }
+
+  it('REQ-129: a strength click sets the normalized setting, swaps aria-pressed, refreshes the editor', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const { group, buttons } = seedStrengthGroup(elsById);
+      const refreshes = [];
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(refreshes, sink) });
+      await openFile(fakeDoc); // the editor (and its hooks) mounts at ready
+
+      // Mount default: 'normal' pressed (the shipped default), state normal.
+      expect(buttons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['false', 'true', 'false', 'false'],
+      );
+      expect(sink.hooks.getState().pixelStrength).toBe('normal');
+
+      group.dispatch('click', { target: buttons[3] }); // data-strength="max"
+      expect(buttons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['false', 'false', 'false', 'true'],
+      );
+      expect(sink.hooks.getState().pixelStrength).toBe('max');
+      expect(refreshes.length).toBeGreaterThanOrEqual(1); // preview re-render
+
+      // A click on a non-button target is a no-op; an invalid data-strength
+      // degrades to 'normal' (button states still swapped).
+      group.dispatch('click', { target: { closest: () => null } });
+      expect(sink.hooks.getState().pixelStrength).toBe('max');
+      buttons[2].setAttribute('data-strength', 'bogus');
+      group.dispatch('click', { target: buttons[2] });
+      expect(sink.hooks.getState().pixelStrength).toBe('normal');
+      expect(buttons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['false', 'true', 'false', 'false'],
+      );
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('REQ-129: the strength resets to normal on file load and on Clear', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const { group, buttons } = seedStrengthGroup(elsById);
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle([], sink) });
+      await openFile(fakeDoc); // hooks live from ready
+      group.dispatch('click', { target: buttons[3] }); // max
+      expect(sink.hooks.getState().pixelStrength).toBe('max');
+
+      await openFile(fakeDoc); // per-file reset
+      expect(sink.hooks.getState().pixelStrength).toBe('normal');
+      expect(buttons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['false', 'true', 'false', 'false'],
+      );
+
+      group.dispatch('click', { target: buttons[2] }); // coarse
+      fakeDoc.getElementById('clear-file').dispatch('click');
+      expect(sink.hooks.getState().pixelStrength).toBe('normal');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('REQ-129: getState().pixelStrength is what editor.drawPreview passes into pixelateFrame', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const { group, buttons } = seedStrengthGroup(elsById);
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle([], sink) });
+      await openFile(fakeDoc);
+      group.dispatch('click', { target: buttons[2] }); // coarse
+      expect(sink.hooks.getState().pixelStrength).toBe('coarse');
+
+      // drawPreview (no DOM here) — the source wires the shared seam with the
+      // state value, so preview and export resolve the same block sizes.
+      const editorSrc = readFileSync(join(ROOT, 'src', 'editor.js'), 'utf8');
+      expect(editorSrc).toContain('strength: state.pixelStrength');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('REQ-129: startExport carries settings.pixelStrength into runExport', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const { group, buttons } = seedStrengthGroup(elsById);
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      group.dispatch('click', { target: buttons[2] }); // coarse
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp(); // → review
+      fakeDoc.getElementById('export-button').dispatch('click');
+      await flushApp();
+
+      expect(runExportMock).toHaveBeenCalledTimes(1);
+      const call = runExportMock.mock.calls[0][0];
+      expect(call.settings.pixelStrength).toBe('coarse');
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+
+describe('mountApp (v1.17.0): project save/load (REQ-130)', () => {
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  function hooksHandle(refreshes, sink) {
+    return (_els, editorHooks) => {
+      sink.hooks = editorHooks;
+      return {
+        destroy() {},
+        refresh: () => refreshes.push('refresh'),
+        redraw() {},
+        getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+      };
+    };
+  }
+
+  /** Build a real .vrproj body through the real serializeProject contract. */
+  function projectJson(overrides = {}) {
+    const box = { x: 1, y: 1, w: 8, h: 8 };
+    return JSON.stringify({
+      version: '1',
+      settings: {
+        pixelStrength: 'coarse',
+        downscale: '720p',
+        minSizePx: 48,
+        dashcamMode: true,
+        ...overrides.settings,
+      },
+      trims: [{ id: 1, start: 1, end: 2 }],
+      tracks: [
+        {
+          id: 5,
+          cls: 'manual',
+          label: 'Manual #5',
+          color: '#A78BFA',
+          start: 0.5,
+          end: 99, // deliberately past the fixture duration (4 s) → clamped
+          enabled: true,
+          source: 'manual',
+          style: 'solid',
+          keyframes: [[0.5, box], [3, box]],
+        },
+      ],
+      meta: { videoName: 'clip.mp4', videoSize: 3, videoLastModified: 0 },
+      ...overrides.top,
+    });
+  }
+
+  async function loadProject(fakeDoc, json) {
+    const loadInput = fakeDoc.getElementById('project-load-input');
+    loadInput.files = [new Blob([json], { type: 'application/json' })];
+    loadInput.dispatch('change');
+    await flushApp();
+  }
+
+  it('#project-save: disabled until a file loads; serializes the payload and downloads <video>.vrproj', async () => {
+    const { fakeDoc, fakeView, elsById, createdEls } = makeFakeEnv();
+    armGlobals(fakeView);
+    const createdUrls = [];
+    const origCreate = URL.createObjectURL;
+    const origRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = (blob) => {
+      createdUrls.push(blob);
+      return 'blob:vrproj';
+    };
+    URL.revokeObjectURL = () => {};
+    try {
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle([], sink) });
+      const saveBtn = fakeDoc.getElementById('project-save');
+      expect(saveBtn.disabled).toBe(true); // nothing to save at the gate
+
+      await openFile(fakeDoc);
+      expect(saveBtn.disabled).toBe(false);
+
+      // Give it settings + a trim + a manual track to serialize.
+      sink.hooks.onManualBox({ x: 1, y: 1, w: 8, h: 8 }, 1.25);
+      sink.hooks.onTrimAdd(1, 2);
+
+      saveBtn.dispatch('click');
+      const anchor = createdEls.find((el) => el.tagName === 'A');
+      expect(anchor).toBeTruthy();
+      expect(anchor.download).toBe('redact-project-clip.vrproj');
+      expect(anchor.clicked).toBe(1);
+      // The stub also captures the video preview's blob URL — select the
+      // project's application/json blob.
+      const projectUrls = createdUrls.filter((b) => b.type === 'application/json');
+      expect(projectUrls).toHaveLength(1);
+
+      const payload = JSON.parse(await projectUrls[0].text());
+      expect(payload.version).toBe('1'); // PROJECT_FORMAT_VERSION stamped
+      expect(payload.settings.pixelStrength).toBe('normal'); // app default
+      expect(payload.trims).toEqual([{ id: 1, start: 1, end: 2 }]);
+      expect(payload.tracks).toHaveLength(1);
+      expect(payload.tracks[0].keyframes).toEqual([[0, { x: 1, y: 1, w: 8, h: 8 }]]); // Map → [s, box]
+      expect(payload.meta.videoName).toBe('clip.mp4');
+      expect(payload.meta.videoSize).toBe(3);
+
+      // Confirmation names the same file the anchor carries.
+      expect(toastTexts(fakeDoc)).toContain('Project saved — redact-project-clip.vrproj');
+    } finally {
+      URL.createObjectURL = origCreate;
+      URL.revokeObjectURL = origRevoke;
+      restoreGlobals();
+    }
+  });
+
+  it('a valid project loaded WITHOUT its video prompts for the video (expected: <name>)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await loadProject(fakeDoc, projectJson());
+      expect(toastTexts(fakeDoc)).toContain(
+        'Project loaded — now open the video it belongs to (expected: clip.mp4)',
+      );
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('a valid project applies when its video opens: settings, trims, tracks, clamp, review step', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      // Seed the three settings control surfaces so the applied values can
+      // be observed through the same UI the clicks drive.
+      const sizeFilter = makeFakeEl('DIV');
+      const sizeButtons = ['0', '24', '48', '96'].map((size) => {
+        const b = makeFakeEl('BUTTON');
+        b.setAttribute('data-size', size);
+        return b;
+      });
+      sizeFilter.querySelectorAll = () => sizeButtons;
+      elsById.set('size-filter', sizeFilter);
+      const downscaleSelect = makeFakeEl('SELECT');
+      elsById.set('downscale-select', downscaleSelect);
+      const strengthGroup = makeFakeEl('DIV');
+      const strengthButtons = ['fine', 'normal', 'coarse', 'max'].map((s) => {
+        const b = makeFakeEl('BUTTON');
+        b.setAttribute('data-strength', s);
+        b.classList.add('strength-btn');
+        return b;
+      });
+      strengthGroup.querySelectorAll = () => strengthButtons;
+      elsById.set('pixel-strength', strengthGroup);
+
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle([], sink) });
+      await loadProject(fakeDoc, projectJson()); // no video yet → prompt
+      expect(toastTexts(fakeDoc)).toContain(
+        'Project loaded — now open the video it belongs to (expected: clip.mp4)',
+      );
+
+      await openFile(fakeDoc); // the pending project applies here
+      const st = sink.hooks.getState();
+
+      // Settings merged through the normalizers + UI follows.
+      expect(fakeDoc.getElementById('dashcam-toggle').checked).toBe(true);
+      expect(downscaleSelect.value).toBe('720p');
+      expect(sizeButtons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['false', 'false', 'true', 'false'],
+      );
+      expect(strengthButtons.map((b) => b.attrs['aria-pressed'])).toEqual(
+        ['false', 'false', 'true', 'false'],
+      );
+
+      // Trims re-normalized; tracks adopted + clamped to the 4 s fixture.
+      expect(st.trims).toEqual([{ id: 1, start: 1, end: 2 }]);
+      expect(st.tracks).toHaveLength(1);
+      expect(st.tracks[0]).toMatchObject({ id: 5, source: 'manual', end: 4 });
+      expect([...st.tracks[0].keyframes.keys()]).toEqual([0.5, 3]);
+      expect(
+        toastTexts(fakeDoc).some((t) => t.includes('clamped to this video')),
+      ).toBe(true); // clamp warning
+
+      // The project's manual id space is adopted (next box cannot collide)…
+      sink.hooks.onManualBox({ x: 0, y: 0, w: 2, h: 2 }, 0.5);
+      const ids = sink.hooks.getState().tracks.map((t) => t.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(sink.hooks.getState().tracks.at(-1)).toMatchObject({ label: 'Manual #6' });
+
+      // …and the app stepped to review (the editor is mounted).
+      expect(fakeDoc.getElementById('analyze-button').textContent).toBe('Re-analyze');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('a video-identity mismatch WARNS but the project still applies', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle([], sink) });
+      await loadProject(fakeDoc, projectJson({ top: { meta: { videoName: 'other.mp4', videoSize: 3, videoLastModified: 0 } } }));
+      await openFile(fakeDoc);
+
+      expect(
+        toastTexts(fakeDoc).some((t) =>
+          t.includes('The selected video "clip.mp4" doesn\'t match the video saved in this project ("other.mp4")'),
+        ),
+      ).toBe(true);
+      // Still proceeds: the tracks render (clamped to the fixture duration).
+      expect(sink.hooks.getState().tracks).toHaveLength(1);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('typed load failures: bad-json / bad-structure / unsupported-version toasts', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+
+      await loadProject(fakeDoc, '{not json');
+      expect(toastTexts(fakeDoc).at(-1)).toContain('not valid JSON');
+
+      await loadProject(fakeDoc, '{"version":"1","settings":{}}');
+      expect(toastTexts(fakeDoc).at(-1)).toContain('missing required sections');
+
+      await loadProject(fakeDoc, projectJson({ top: { version: '9' } }));
+      expect(toastTexts(fakeDoc).at(-1)).toContain('unsupported format version');
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('Clear wipes a loaded-but-unapplied project (no association survives)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle([], sink) });
+      await loadProject(fakeDoc, projectJson());
+      fakeDoc.getElementById('clear-file').dispatch('click');
+
+      await openFile(fakeDoc); // NO application — the pending project is gone
+      const st = sink.hooks.getState();
+      expect(st.tracks).toEqual([]);
+      expect(st.trims).toEqual([]);
     } finally {
       restoreGlobals();
     }

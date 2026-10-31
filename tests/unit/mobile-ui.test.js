@@ -556,6 +556,110 @@ describe('v1.13.0: #bulk-style bulk track-style buttons', () => {
 });
 
 // ---------------------------------------------------------------------------
+// v1.17.0: #bulk-style moves to its own full-width row above #track-list;
+// #pixel-strength segmented group joins #trim-toggle inside #trim-bar
+// ---------------------------------------------------------------------------
+
+describe('v1.17.0: #bulk-style is its own row between the summary and #track-list', () => {
+  const trackStart = HTML.indexOf('id="tracks-panel"');
+  const trackEnd = HTML.indexOf('</details>', trackStart);
+  const trackBlock = HTML.slice(trackStart, trackEnd);
+
+  it('DOM order inside #tracks-panel: summary → #bulk-style → #track-list → empty note', () => {
+    const summaryEnd = trackBlock.indexOf('</summary>');
+    const bulk = trackBlock.indexOf('id="bulk-style"');
+    const list = trackBlock.indexOf('id="track-list"');
+    const empty = trackBlock.indexOf('id="track-list-empty"');
+    expect(summaryEnd).toBeGreaterThan(-1);
+    expect(bulk).toBeGreaterThan(summaryEnd);
+    expect(list).toBeGreaterThan(bulk);
+    expect(empty).toBeGreaterThan(list);
+  });
+
+  it('no #trim-bar wrapper is left inside #tracks-panel (v1.15 leftover removed)', () => {
+    expect(trackBlock).not.toContain('id="trim-bar"');
+  });
+
+  it('is a full-width row: no 320px cap, top+bottom margins own the spacing', () => {
+    const rule = cssRule('#bulk-style');
+    expect(rule).toContain('display: flex');
+    expect(rule).toContain('max-width: none');
+    expect(rule).not.toContain('max-width: 320px');
+  });
+
+  it('the v1.15 "#trim-bar #bulk-style" override is gone from the CSS', () => {
+    expect(HTML).not.toMatch(/#trim-bar\s+#bulk-style/);
+  });
+
+  it('the two contract button IDs survive exactly once each', () => {
+    expect(HTML.split('id="bulk-solid"').length - 1).toBe(1);
+    expect(HTML.split('id="bulk-pixelate"').length - 1).toBe(1);
+  });
+});
+
+describe('v1.17.0: #pixel-strength segmented group inside #trim-bar', () => {
+  // The single #trim-bar instance is the one wrapping #trim-toggle.
+  const barStart = HTML.indexOf('id="trim-bar"');
+  const barEnd = HTML.indexOf('</div>', HTML.indexOf('id="trim-hint"', barStart));
+  const bar = HTML.slice(barStart, barEnd);
+
+  it('exactly one #trim-bar exists and it holds #trim-toggle + #pixel-strength', () => {
+    expect(HTML.split('id="trim-bar"').length - 1).toBe(1);
+    expect(bar).toContain('id="trim-toggle"');
+    expect(bar).toContain('id="pixel-strength"');
+    // #bulk-style moved out — it is NOT a trim-bar child anymore.
+    expect(bar).not.toContain('id="bulk-style"');
+    expect(HTML.split('id="pixel-strength"').length - 1).toBe(1);
+  });
+
+  it('is a labeled group with the pixel-block tooltip', () => {
+    const at = HTML.indexOf('id="pixel-strength"');
+    const tag = HTML.slice(HTML.lastIndexOf('<div', at), HTML.indexOf('>', at) + 1);
+    expect(tag).toContain('role="group"');
+    expect(tag).toContain('aria-label="Pixelation strength"');
+    expect(tag).toContain('title="Pixel block size for redaction — larger blocks hide more"');
+  });
+
+  it('offers 4 data-strength segments in order: fine/normal/coarse/max', () => {
+    const start = HTML.indexOf('id="pixel-strength"');
+    const group = HTML.slice(start, HTML.indexOf('</div>', start));
+    const strengths = [...group.matchAll(/data-strength="([^"]+)"/g)].map((m) => m[1]);
+    expect(strengths).toEqual(['fine', 'normal', 'coarse', 'max']);
+    for (const label of ['Fine', 'Normal', 'Coarse', 'Max']) {
+      expect(group).toContain(`>${label}</button>`);
+    }
+    expect(group.split('class="strength-btn"').length - 1).toBe(4);
+  });
+
+  it("'normal' is the default pressed segment; the others are not", () => {
+    const start = HTML.indexOf('id="pixel-strength"');
+    const group = HTML.slice(start, HTML.indexOf('</div>', start));
+    const pressed = [...group.matchAll(/data-strength="([^"]+)" aria-pressed="([^"]+)"/g)].map(
+      (m) => `${m[1]}=${m[2]}`,
+    );
+    expect(pressed).toEqual(['fine=false', 'normal=true', 'coarse=false', 'max=false']);
+    expect(group).toContain('data-strength="normal" aria-pressed="true"');
+    for (const s of ['fine', 'coarse', 'max']) {
+      expect(group).toContain(`data-strength="${s}" aria-pressed="false"`);
+    }
+  });
+
+  it('segmented CSS mirrors #size-filter (joined borders, accent pressed fill)', () => {
+    const group = cssRule('#pixel-strength');
+    expect(group).toContain('display: flex');
+    const btn = cssRule('.strength-btn');
+    expect(btn).toContain('flex: 1 1 0');
+    expect(btn).toContain('margin-left: -1px');
+    expect(btn).toContain('border-radius: 0');
+    const pressed = cssRule(".strength-btn[aria-pressed='true']");
+    expect(pressed).toContain('background: var(--accent)');
+    expect(pressed).toContain('border-color: var(--accent)');
+    expect(pressed).toContain('color: #14100A');
+    expect(cssRule('.strength-btn:focus-visible')).toContain('outline: 2px solid var(--accent)');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // v1.13.0 item 3: collapsible panels (native details.panel-collapse)
 // ---------------------------------------------------------------------------
 

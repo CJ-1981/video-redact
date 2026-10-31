@@ -89,6 +89,32 @@ export function tracksAt(tracks, t) {
 }
 
 /**
+ * Pixelation strength presets (v1.17.0 field fix: wide-but-short regions such
+ * as license plates stayed readable at the old base block size). The chosen
+ * multiplier is applied to the base block AFTER the `max(12, min/10)` floor,
+ * so a higher strength coarsens the mosaic everywhere. `fine` (×1) preserves
+ * the v1.16 block sizes for users who want maximum regional fidelity; the
+ * DEFAULT is `normal` (×2) — the block size doubles vs v1.16 whenever no
+ * explicit strength is supplied.
+ * @type {{fine: number, normal: number, coarse: number, max: number}}
+ */
+export const PIXEL_STRENGTHS = { fine: 1, normal: 2, coarse: 3, max: 4 };
+
+/**
+ * Resolve the block-size multiplier for a pixelation strength. Invalid or
+ * missing values fall back to `normal` (×2) — the same default preview and
+ * export must both land on (AC-04 shared-seam rule).
+ *
+ * @param {'fine'|'normal'|'coarse'|'max'|null|undefined} [strength]
+ * @returns {number} Multiplier (one of 1, 2, 3, 4; default 2).
+ */
+export function pixelStrengthMultiplier(strength) {
+  return strength != null && Object.prototype.hasOwnProperty.call(PIXEL_STRENGTHS, strength)
+    ? PIXEL_STRENGTHS[strength]
+    : PIXEL_STRENGTHS.normal;
+}
+
+/**
  * Shared scratch canvas for applyPixelation (module-level lazy singleton;
  * OffscreenCanvas preferred, DOM canvas fallback). Resized per call —
  * assignment resets the bitmap, so only assign when the size actually
@@ -140,11 +166,15 @@ function resolveScratch(requested, dw, dh) {
  *      ctx.drawImage(scratch, 0, 0, dw, dh, box.x, box.y, box.w, box.h)
  *   4. ctx.restore()  (caller's smoothing state and transform untouched)
  *
- * Block size rule (design §4.5): `block = max(12, round(min(boxW, boxH)/10))`
- * native px — ≥ ~10 blocks across the smallest dimension so the region is
- * unrecoverable at a glance; `opts.block` overrides (≥ 1). Downscale target
- * is dw = ceil(box.w / block) × dh = ceil(box.h / block). Called on the
- * region AFTER dilation (REQ-007).
+ * Block size rule (design §4.5, extended v1.17.0 by the user-selectable
+ * strength): `block = max(12, round(min(boxW, boxH)/10)) * multiplier` native
+ * px — ≥ ~10 blocks across the smallest dimension BEFORE the strength
+ * multiplier, so the region is unrecoverable at a glance; the multiplier
+ * (opts.strength → pixelStrengthMultiplier, default 'normal' = ×2) coarsens
+ * the mosaic on top. The product is rounded and clamped ≥ 4. `opts.block`
+ * overrides the whole rule outright (≥ 1; strength does not apply to an
+ * explicit override). Downscale target is dw = ceil(box.w / block) ×
+ * dh = ceil(box.h / block). Called on the region AFTER dilation (REQ-007).
  *
  * Preview and export share this exact function (pixel-truthful preview,
  * REQ-016 / AC-04).
@@ -152,19 +182,24 @@ function resolveScratch(requested, dw, dh) {
  * @param {CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D} ctx
  * @param {import('./types.js').Box} box Region to pixelate (display px).
  * @param {{block?: number,
+ *          strength?: 'fine'|'normal'|'coarse'|'max',
  *          scratch?: HTMLCanvasElement | OffscreenCanvas |
  *                    ((dw: number, dh: number) => HTMLCanvasElement | OffscreenCanvas)}} [opts]
- *     `block` overrides the minimum-size rule; `scratch` injects or reuses a
- *     canvas — an instance (export hot path avoids per-frame allocation) or a
- *     factory called as scratch(dw, dh) (tests inject recorder contexts).
+ *     `block` overrides the block-size rule entirely; `strength` selects the
+ *     strength multiplier applied to the rule (invalid/missing → 'normal',
+ *     ×2); `scratch` injects or reuses a canvas — an instance (export hot
+ *     path avoids per-frame allocation) or a factory called as scratch(dw, dh)
+ *     (tests inject recorder contexts).
  * @returns {void}
  */
 export function applyPixelation(ctx, box, opts) {
   const minSide = Math.min(box.w, box.h);
-  const block = Math.max(
-    1,
-    (opts && opts.block) !== undefined ? opts.block : Math.max(12, Math.round(minSide / 10)),
-  );
+  const block = (opts && opts.block) !== undefined
+    ? Math.max(1, opts.block)
+    : Math.max(
+      4,
+      Math.round(Math.max(12, Math.round(minSide / 10)) * pixelStrengthMultiplier(opts?.strength)),
+    );
   const dw = Math.max(1, Math.ceil(box.w / block));
   const dh = Math.max(1, Math.ceil(box.h / block));
   const scratch = resolveScratch(opts && opts.scratch, dw, dh);
@@ -317,8 +352,11 @@ export function drawOverlay(ctx, tracks, t, viewScale = 1) {
  *     box coordinates must live in the same pixel space as `ctx`).
  * @param {number} t Seconds.
  * @param {{width: number, height: number}} frameSize Display px.
- * @param {{scratch?: HTMLCanvasElement | OffscreenCanvas}} [opts] Reused
- *     pixelation scratch (hot path avoids per-frame allocation).
+ * @param {{scratch?: HTMLCanvasElement | OffscreenCanvas,
+ *          strength?: 'fine'|'normal'|'coarse'|'max'}} [opts] Reused
+ *     pixelation scratch (hot path avoids per-frame allocation) and the
+ *     pixelation strength passed through to applyPixelation (invalid/missing
+ *     → 'normal', ×2 — preview and export must resolve identically, AC-04).
  * @returns {void}
  * @throws {Error} Propagates the redact density invariant when an enabled
  *     track covering `t` has no keyframes — privacy failure, never swallowed.
@@ -329,7 +367,7 @@ export function pixelateFrame(ctx, tracks, t, frameSize, opts = {}) {
     if (track && track.style === 'solid') {
       applySolid(ctx, region);
     } else {
-      applyPixelation(ctx, region, { scratch: opts?.scratch });
+      applyPixelation(ctx, region, { scratch: opts?.scratch, strength: opts?.strength });
     }
   }
 }

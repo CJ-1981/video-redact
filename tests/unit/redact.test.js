@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   dilate, tracksAt, applyPixelation, applySolid, pixelateFrame, drawOverlay,
+  PIXEL_STRENGTHS, pixelStrengthMultiplier,
 } from '../../src/redact.js';
 
 // ---------------------------------------------------------------------------
@@ -209,21 +210,32 @@ describe('tracksAt (dense nearest-keyframe lookup, REQ-014 skip)', () => {
 // ---------------------------------------------------------------------------
 
 describe('applyPixelation (design.md §4.5 burn-in, ADR-6)', () => {
-  it('derives block = max(12, round(min(w,h)/10)): 120×60 → block 12 (scratch 10×5)', () => {
+  it('default strength (normal ×2): 120×60 → base 12 × 2 = block 24 (scratch 5×3)', () => {
     const main = makeCtx();
     const scratch = makeScratch();
     applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { scratch: () => scratch.canvas });
-    // block = max(12, round(60/10)=6) = 12 → dw = ceil(120/12) = 10, dh = ceil(60/12) = 5.
+    // block = max(12, round(60/10)=6) × pixelStrengthMultiplier(undefined)=2 = 24
+    // → dw = ceil(120/24) = 5, dh = ceil(60/24) = 3.
+    expect(scratch.canvas.width).toBe(5);
+    expect(scratch.canvas.height).toBe(3);
+  });
+
+  it('strength fine (×1) preserves the v1.16 block rule: 120×60 → block 12 (scratch 10×5)', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { strength: 'fine', scratch: () => scratch.canvas });
+    // block = max(12, round(60/10)=6) × 1 = 12 → dw = 10, dh = 5.
     expect(scratch.canvas.width).toBe(10);
     expect(scratch.canvas.height).toBe(5);
   });
 
-  it('derives block 40 for a 400×400 box (scratch 10×10)', () => {
+  it('derives block 80 for a 400×400 box at the default strength (scratch 5×5)', () => {
     const main = makeCtx();
     const scratch = makeScratch();
     applyPixelation(main.ctx, { x: 10, y: 10, w: 400, h: 400 }, { scratch: () => scratch.canvas });
-    expect(scratch.canvas.width).toBe(10);
-    expect(scratch.canvas.height).toBe(10);
+    // block = max(12, round(40)) × 2 = 80 → dw = dh = ceil(400/80) = 5.
+    expect(scratch.canvas.width).toBe(5);
+    expect(scratch.canvas.height).toBe(5);
   });
 
   it('honours an explicit opts.block override', () => {
@@ -267,12 +279,12 @@ describe('applyPixelation (design.md §4.5 burn-in, ADR-6)', () => {
     expect(names.filter((n) => n === 'restore')).toHaveLength(1);
 
     // The only main-ctx draw is the upscale from the scratch canvas into the
-    // exact region (dw=10, dh=5 for 120×60 at block 12).
+    // exact region (dw=5, dh=3 for 120×60 at default block 24).
     const draws = callsNamed(main.calls, 'drawImage');
     expect(draws).toHaveLength(1);
     const [, img, sx, sy, sw, sh, dx, dy, dw, dh] = draws[0];
     expect(img).toBe(scratch.canvas);
-    expect([sx, sy, sw, sh]).toEqual([0, 0, 10, 5]);
+    expect([sx, sy, sw, sh]).toEqual([0, 0, 5, 3]);
     expect([dx, dy, dw, dh]).toEqual([100, 50, 120, 60]);
   });
 
@@ -293,19 +305,162 @@ describe('applyPixelation (design.md §4.5 burn-in, ADR-6)', () => {
     const main = makeCtx();
     const scratch = makeScratch();
     applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { scratch: scratch.canvas });
-    expect(scratch.canvas.width).toBe(10);
-    expect(scratch.canvas.height).toBe(5);
+    expect(scratch.canvas.width).toBe(5);
+    expect(scratch.canvas.height).toBe(3);
     // Same instance flows into the upscale drawImage.
     expect(callsNamed(main.calls, 'drawImage')[0][1]).toBe(scratch.canvas);
   });
 
-  it('rounds fractional block rules up to whole scratch pixels (100×100 → block 12 → 9×9)', () => {
+  it('rounds fractional block rules up to whole scratch pixels (100×100 → block 24 → 5×5)', () => {
     const main = makeCtx();
     const scratch = makeScratch();
     applyPixelation(main.ctx, { x: 0, y: 0, w: 100, h: 100 }, { scratch: () => scratch.canvas });
-    // block = max(12, round(10)) = 12; ceil(100/12) = 9.
-    expect(scratch.canvas.width).toBe(9);
-    expect(scratch.canvas.height).toBe(9);
+    // block = max(12, round(10)) × 2 = 24; ceil(100/24) = 5.
+    expect(scratch.canvas.width).toBe(5);
+    expect(scratch.canvas.height).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pixelation strength (v1.17.0 field fix: selectable block-size multiplier)
+// ---------------------------------------------------------------------------
+
+describe('PIXEL_STRENGTHS / pixelStrengthMultiplier (strength presets)', () => {
+  it('exposes the agreed preset ladder', () => {
+    expect(PIXEL_STRENGTHS).toEqual({ fine: 1, normal: 2, coarse: 3, max: 4 });
+  });
+
+  it('maps every preset name to its multiplier', () => {
+    expect(pixelStrengthMultiplier('fine')).toBe(1);
+    expect(pixelStrengthMultiplier('normal')).toBe(2);
+    expect(pixelStrengthMultiplier('coarse')).toBe(3);
+    expect(pixelStrengthMultiplier('max')).toBe(4);
+  });
+
+  it('falls back to normal (×2) for missing, null, and invalid values', () => {
+    expect(pixelStrengthMultiplier()).toBe(2);
+    expect(pixelStrengthMultiplier(undefined)).toBe(2);
+    expect(pixelStrengthMultiplier(null)).toBe(2);
+    expect(pixelStrengthMultiplier('')).toBe(2);
+    expect(pixelStrengthMultiplier('ultra')).toBe(2);
+    expect(pixelStrengthMultiplier('2')).toBe(2); // name-keyed, not numeric
+  });
+});
+
+describe('applyPixelation — opts.strength (block = floor × multiplier)', () => {
+  it('fine (×1) → 120×60 block 12, scratch 10×5 (exact v1.16 behavior)', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { strength: 'fine', scratch: () => scratch.canvas });
+    expect(scratch.canvas.width).toBe(10);
+    expect(scratch.canvas.height).toBe(5);
+  });
+
+  it('normal (×2) → block 24, scratch 5×3', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { strength: 'normal', scratch: () => scratch.canvas });
+    expect(scratch.canvas.width).toBe(5);
+    expect(scratch.canvas.height).toBe(3);
+  });
+
+  it('coarse (×3) → block 36, scratch 4×2', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { strength: 'coarse', scratch: () => scratch.canvas });
+    expect(scratch.canvas.width).toBe(4);
+    expect(scratch.canvas.height).toBe(2);
+  });
+
+  it('max (×4) → block 48, scratch 3×2', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { strength: 'max', scratch: () => scratch.canvas });
+    expect(scratch.canvas.width).toBe(3);
+    expect(scratch.canvas.height).toBe(2);
+  });
+
+  it('invalid strength resolves to the ×2 default (never throws, never ×1)', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 120, h: 60 }, { strength: 'nonsense', scratch: () => scratch.canvas });
+    expect(scratch.canvas.width).toBe(5);
+    expect(scratch.canvas.height).toBe(3);
+  });
+
+  it('multiplier applies AFTER the floor: 300×70 plate → base 12, max → block 48 (scratch 7×2)', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 300, h: 70 }, { strength: 'max', scratch: () => scratch.canvas });
+    // base = max(12, round(7)) = 12 (wide-but-short: the floor binds) × 4 = 48
+    // → dw = ceil(300/48) = 7, dh = ceil(70/48) = 2.
+    expect(scratch.canvas.width).toBe(7);
+    expect(scratch.canvas.height).toBe(2);
+  });
+
+  it('block stays ≥ 4 after the multiplier clamp (degenerate small box)', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(main.ctx, { x: 0, y: 0, w: 3, h: 2 }, { strength: 'fine', scratch: () => scratch.canvas });
+    // base = max(12, 0) = 12 × 1 = 12 — the clamp is defensive, block ≥ 4 holds
+    // and the scratch can never drop below one block.
+    expect(scratch.canvas.width).toBe(1);
+    expect(scratch.canvas.height).toBe(1);
+  });
+
+  it('an explicit opts.block override wins over the strength multiplier', () => {
+    const main = makeCtx();
+    const scratch = makeScratch();
+    applyPixelation(
+      main.ctx,
+      { x: 0, y: 0, w: 100, h: 100 },
+      { block: 25, strength: 'max', scratch: () => scratch.canvas },
+    );
+    // Explicit block bypasses the strength rule entirely: ceil(100/25) = 4.
+    expect(scratch.canvas.width).toBe(4);
+    expect(scratch.canvas.height).toBe(4);
+  });
+});
+
+describe('pixelateFrame — opts.strength pass-through (shared seam)', () => {
+  const frame = { width: 1920, height: 1080 };
+
+  /** Pixelate the dilated 46×46 box and return the upscale source dims. */
+  function upscaleSrcDims(strengthOpts) {
+    const rec = makeCtx();
+    const scratch = makeScratch();
+    const track = makeTrack({
+      style: 'pixelate',
+      keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]),
+    });
+    pixelateFrame(rec.ctx, [track], 0, frame, { scratch: () => scratch.canvas, ...strengthOpts });
+    const ups = callsNamed(rec.calls, 'drawImage');
+    expect(ups).toHaveLength(1);
+    return ups[0].slice(2, 6); // [sx, sy, sw, sh]
+  }
+
+  it('no opts.strength → default normal (×2): dilated 46×46 → block 24 → src 2×2', () => {
+    expect(upscaleSrcDims({})).toEqual([0, 0, 2, 2]);
+  });
+
+  it('fine (×1) → dilated 46×46 → block 12 → src 4×4 (v1.16 pixels)', () => {
+    expect(upscaleSrcDims({ strength: 'fine' })).toEqual([0, 0, 4, 4]);
+  });
+
+  it('max (×4) → dilated 46×46 → block 48 → src 1×1', () => {
+    expect(upscaleSrcDims({ strength: 'max' })).toEqual([0, 0, 1, 1]);
+  });
+
+  it('solid tracks are unaffected by strength (fillRect has no block size)', () => {
+    const rec = makeCtx();
+    const track = makeTrack({
+      style: 'solid',
+      keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]),
+    });
+    pixelateFrame(rec.ctx, [track], 0, frame, { strength: 'max' });
+    const fills = callsNamed(rec.calls, 'fillRect');
+    expect(fills).toHaveLength(1);
+    expect(fills[0].slice(1)).toEqual([97, 47, 46, 46]); // geometry untouched
   });
 });
 

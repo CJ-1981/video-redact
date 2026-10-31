@@ -192,6 +192,33 @@
     }
     #clear-file:hover { background: #E5484D; color: #fff; }
     #clear-file:focus-visible { outline: 2px solid var(--alert); outline-offset: 2px; }
+    /* v1.17.0 REQ-130: project save/load — #project-save sits next to
+         ✕ Clear / Open another file and is disabled until a file is loaded
+         (main.js owns the disabled state); #project-load is a styled label
+         wrapping the hidden .vrproj file input so clicking it opens the
+         picker. #project-status carries save/load messages under the header. */
+    #project-save, #project-load {
+      font-size: 13px;
+      padding: 6px 12px;
+    }
+    #project-load {
+      display: inline-flex;
+      align-items: center;
+      color: var(--ink-hi);
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+    #project-load:hover { border-color: var(--ink); }
+    #project-load:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+    #project-status {
+      min-height: 1.2em;
+      padding: 4px 20px 0;
+      color: var(--ink);
+      font-size: 12.5px;
+    }
     /* v1.12.0 REQ-124: light-theme toggle (glyph ☀️/🌙 managed by main.js). */
     #theme-toggle { font-size: 15px; line-height: 1.2; padding: 6px 10px; }
     #stepper {
@@ -588,14 +615,16 @@
       pointer-events: none;
     }
 
-    /* ── Tracks panel header (v1.15.0): bulk style + ✂ trim toggle share one
-       row (#trim-bar wraps both). ── */
+    /* ── Timeline header row (v1.15.0): the ✂ trim toggle + the v1.17.0
+       pixelation-strength segmented group share #trim-bar; #trim-hint is
+       hidden by default. v1.17.0: the 320px cap is gone so the strength
+       group has room (it fills the row up to 320px). ── */
     #trim-bar {
       display: flex;
       align-items: stretch;
+      flex-wrap: wrap;
       gap: 8px;
       margin-top: 8px;
-      max-width: 320px;
     }
     #trim-toggle {
       flex: 0 0 auto;
@@ -609,6 +638,35 @@
       border-color: var(--accent);
       font-weight: 600;
     }
+    /* v1.17.0: pixelation strength — segmented control mirroring #size-filter
+       (joined borders, accent fill on the pressed segment). data-strength
+       values: fine / normal / coarse / max ('normal' ships pressed). */
+    #pixel-strength {
+      display: flex;
+      flex: 1 1 240px;
+      min-width: 0;
+      max-width: 320px;
+    }
+    .strength-btn {
+      flex: 1 1 0;
+      min-width: 0;
+      margin-left: -1px;
+      border-radius: 0;
+      padding: 6px 4px;
+      font-size: 12.5px;
+      min-height: 32px;
+    }
+    .strength-btn:first-child { margin-left: 0; border-radius: 8px 0 0 8px; }
+    .strength-btn:last-child { border-radius: 0 8px 8px 0; }
+    .strength-btn[aria-pressed='true'] {
+      position: relative;
+      z-index: 1; /* selected border stays visible over the collapsed neighbors */
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #14100A;
+      font-weight: 600;
+    }
+    .strength-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; z-index: 2; }
 
     /* ── Below-timeline flow (v1.12.0 REQ-116): the threshold-compare section
        and the track list move OUT of the right rail into a full-width row
@@ -710,19 +768,12 @@
 
     /* ── Bulk track-style buttons (v1.13.0): segmented control like
        #size-filter — small, subtle, joined borders; Agent-MAIN wires the
-       clicks (IDs are the contract). ── */
+       clicks (IDs are the contract). v1.17.0: it left #trim-bar and is its
+       own FULL-WIDTH row directly above #track-list (the two buttons share
+       the row 50/50). ── */
     #bulk-style {
       display: flex;
-      margin-top: 8px;
-      max-width: 320px;
-    }
-    /* v1.15.0: inside #trim-bar the bulk group fills the row (the ✂ toggle
-       takes its content width) and the wrapper owns the top margin. Kept
-       AFTER the base rules on purpose. */
-    #trim-bar #bulk-style {
-      flex: 1 1 0;
-      min-width: 0;
-      margin-top: 0;
+      margin: 10px 0 8px;
       max-width: none;
     }
     #bulk-style button {
@@ -1020,6 +1071,9 @@
 
       /* Touch targets: every control ≥ 40 px tall on coarse/narrow screens. */
       button, select { min-height: 40px; }
+      /* v1.17.0 REQ-130: the load control is a label styled as a button —
+         give it the same 40px touch target. */
+      #project-load { min-height: 40px; }
       input.span-input { min-height: 40px; }
       #export-quality { width: 100%; } /* long option text must not overflow */
 
@@ -1059,6 +1113,11 @@
            shown from ready → done. Wired by main.js clearAll(). -->
       <button id="clear-file" type="button" hidden>✕ Clear</button>
       <button id="change-file" type="button" hidden>Open another file</button>
+      <!-- v1.17.0 REQ-130: project save/load (always reachable in the header;
+           main.js enables/disables #project-save by load state and fills
+           #project-status with save/load messages). -->
+      <button id="project-save" type="button" disabled title="Save settings, trims and tracks as a .vrproj project file">💾 Save project</button>
+      <label id="project-load" for="project-load-input" title="Open a saved .vrproj project file">📂 Load project<input type="file" id="project-load-input" accept=".vrproj,application/json" hidden /></label>
     </div>
     <ol id="stepper" aria-label="Workflow steps">
       <li id="step-gate" data-step="gate" aria-current="step"><span class="num">①</span> Capability check</li>
@@ -1067,6 +1126,10 @@
       <li id="step-export" data-step="export"><span class="num">④</span> Export</li>
     </ol>
   </header>
+
+  <!-- v1.17.0 REQ-130: save/load message line (main.js fills it; empty = no
+       visual footprint beyond the min-height). -->
+  <p id="project-status" class="stat-line" role="status"></p>
 
   <main id="app-main">
     <!-- Step ①: file intake + capability honesty moment -->
@@ -1153,6 +1216,16 @@
              tracks — the toggle lives here, right above the strip. -->
         <div id="trim-bar">
           <button id="trim-toggle" type="button" aria-pressed="false" title="Trim mode: drag on the timeline to mark regions for deletion — greyed-out regions are removed at export">✂ Trim</button>
+          <!-- v1.17.0: pixelation strength — segmented control mirroring
+               #size-filter (selected segment = accent fill). data-strength
+               keys the pixel block size; main.js owns aria-pressed and the
+               setting ('normal' is the shipped default). -->
+          <div id="pixel-strength" role="group" aria-label="Pixelation strength" title="Pixel block size for redaction — larger blocks hide more">
+            <button type="button" class="strength-btn" data-strength="fine" aria-pressed="false">Fine</button>
+            <button type="button" class="strength-btn" data-strength="normal" aria-pressed="true">Normal</button>
+            <button type="button" class="strength-btn" data-strength="coarse" aria-pressed="false">Coarse</button>
+            <button type="button" class="strength-btn" data-strength="max" aria-pressed="false">Max</button>
+          </div>
           <span id="trim-hint" class="stat-line" hidden>Drag on the timeline to mark a region to cut. Drag a ✂ edge to adjust; ✕ removes it. Trimmed regions are skipped during analysis and removed at export.</span>
         </div>
         <section id="timeline" aria-label="Track timeline — click a chip to scrub and toggle its redaction; drag a chip edge to trim its span">
@@ -1289,15 +1362,14 @@
 
         <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
           <summary>Tracks</summary>
-          <!-- v1.13.0: bulk style buttons — IDs are the contract (main.js
-               wires the clicks); segmented styling mirrors #size-filter. -->
-          <div id="trim-bar">
-
-          <div id="trim-bar">
-            <div id="bulk-style" role="group" aria-label="Set all tracks style">
-              <button id="bulk-solid" type="button">All solid</button>
-              <button id="bulk-pixelate" type="button">All pixelate</button>
-            </div>
+          <!-- v1.17.0: bulk style buttons get their OWN full-width row directly
+               above the list (IDs are the contract — main.js wires the clicks);
+               segmented styling mirrors #size-filter. The v1.15 #trim-bar
+               wrapper is gone (the ✂ toggle moved to the timeline in v1.15.1
+               and left an unclosed duplicate wrapper here — fixed). -->
+          <div id="bulk-style" role="group" aria-label="Set all tracks style">
+            <button id="bulk-solid" type="button">All solid</button>
+            <button id="bulk-pixelate" type="button">All pixelate</button>
           </div>
           <ul id="track-list"></ul>
           <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>

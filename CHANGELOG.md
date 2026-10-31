@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.18.1] — 2026-11-01
+
+### Fixed
+- Large empty gap between the timeline and the Tracks panel: the below-timeline section was a workspace-grid child, so its position depended on the right rail's height. It now lives inside the preview column directly after the timeline — the tracks panel always follows the timeline with a constant 28px margin, measured at every layout width.
+
 ## [1.18.0] — 2026-10-31
 
 ### Added

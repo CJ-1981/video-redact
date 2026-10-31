@@ -95,6 +95,15 @@ try {
     return out.slice(0, 12);
   });
   console.log('LOADED OFFENDERS (>90% viewport):', JSON.stringify(offenders2, null, 1));
+  const gap = await page.evaluate(() => {
+    const tl = document.querySelector('#timeline');
+    const tp = document.querySelector('#tracks-panel');
+    if (!tl || !tp) return null;
+    const a = tl.getBoundingClientRect();
+    const b = tp.getBoundingClientRect();
+    return { timelineBottom: Math.round(a.bottom), tracksTop: Math.round(b.top), gap: Math.round(b.top - a.bottom) };
+  });
+  console.log('TRACKS GAP:', JSON.stringify(gap));
   const dz = await page.evaluate(() => {
     const el = document.querySelector('#drop-zone');
     if (!el) return null;

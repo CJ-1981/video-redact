@@ -673,15 +673,10 @@
        under the timeline — compare left, tracks right on wide screens,
        stacked single-column on mobile. ── */
     #below-timeline {
-      /* v1.18.0: first grid column ONLY — the tracks/compare panels align
-         with the preview width instead of spanning under the right rail. */
-      grid-column: 1;
-      display: grid;
-      /* v1.14.0: compare thresholds now sits UNDER tracks (user request) —
-         stacked single column. */
-      grid-template-columns: minmax(0, 1fr);
-      gap: 16px;
-      align-items: start;
+      /* v1.18.1: lives INSIDE the preview column (after the timeline) — the
+         tracks/compare panels follow the timeline directly with no gap,
+         regardless of the right rail's height. */
+      margin-top: 16px;
       min-width: 0;
     }
     #below-timeline > * {
@@ -1063,7 +1058,6 @@
       #app-main { align-items: flex-start; }
       #workspace { grid-template-columns: 1fr; }
       #rail-resize, #intake-resize { display: none; } /* no draggable splits on one column */
-      #below-timeline { grid-template-columns: 1fr; } /* REQ-116: stacked */
       #app-header { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
       #stepper { flex-wrap: wrap; }
       #stepper li { padding: 6px 8px; }
@@ -1244,6 +1238,40 @@
           </div>
           <span id="timeline-duration" class="num timecode">0:00.0</span>
         </section>
+        <section id="below-timeline" aria-label="Threshold comparison and detected tracks">
+          <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
+               decode + one inference per model, five fixed-level panels.
+               Clicking a panel applies that level to BOTH sensitivity sliders. -->
+
+          <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
+            <summary>Tracks</summary>
+            <!-- v1.17.0: bulk style buttons get their OWN full-width row directly
+                 above the list (IDs are the contract — main.js wires the clicks);
+                 segmented styling mirrors #size-filter. The v1.15 #trim-bar
+                 wrapper is gone (the ✂ toggle moved to the timeline in v1.15.1
+                 and left an unclosed duplicate wrapper here — fixed). -->
+            <div id="bulk-style" role="group" aria-label="Set all tracks style">
+              <button id="bulk-solid" type="button">All solid</button>
+              <button id="bulk-pixelate" type="button">All pixelate</button>
+            </div>
+            <ul id="track-list"></ul>
+            <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
+          </details>
+
+          <details id="threshold-compare" class="panel-collapse" open role="group" aria-label="Single-frame threshold comparison">
+            <summary>Compare thresholds</summary>
+            <label class="slider-row" for="compare-time">
+              <span class="slider-name">Frame&nbsp;time&nbsp;(s)</span>
+              <input type="number" id="compare-time" class="num" min="0" max="0" step="0.1" value="0" />
+              <!-- v1.11.0: one-click sync from the preview playhead — no manual
+                   read-off of the transport timecode. -->
+              <button id="compare-use-preview" type="button" title="Set frame time to the preview's current position">Use preview time</button>
+            </label>
+            <button id="compare-button" type="button">Compare thresholds</button>
+            <p id="compare-status" class="stat-line" role="status"></p>
+            <div id="threshold-panels"></div>
+          </details>
+        </section>
       </section>
 
       <!-- v1.12.0 REQ-118: draggable vertical separator between the preview
@@ -1358,40 +1386,6 @@
            compare (left) + track list (right) on wide screens, stacked on
            mobile. Both moved out of the right rail with every inner id
            intact. -->
-      <section id="below-timeline" aria-label="Threshold comparison and detected tracks">
-        <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
-             decode + one inference per model, five fixed-level panels.
-             Clicking a panel applies that level to BOTH sensitivity sliders. -->
-
-        <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
-          <summary>Tracks</summary>
-          <!-- v1.17.0: bulk style buttons get their OWN full-width row directly
-               above the list (IDs are the contract — main.js wires the clicks);
-               segmented styling mirrors #size-filter. The v1.15 #trim-bar
-               wrapper is gone (the ✂ toggle moved to the timeline in v1.15.1
-               and left an unclosed duplicate wrapper here — fixed). -->
-          <div id="bulk-style" role="group" aria-label="Set all tracks style">
-            <button id="bulk-solid" type="button">All solid</button>
-            <button id="bulk-pixelate" type="button">All pixelate</button>
-          </div>
-          <ul id="track-list"></ul>
-          <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
-        </details>
-
-        <details id="threshold-compare" class="panel-collapse" open role="group" aria-label="Single-frame threshold comparison">
-          <summary>Compare thresholds</summary>
-          <label class="slider-row" for="compare-time">
-            <span class="slider-name">Frame&nbsp;time&nbsp;(s)</span>
-            <input type="number" id="compare-time" class="num" min="0" max="0" step="0.1" value="0" />
-            <!-- v1.11.0: one-click sync from the preview playhead — no manual
-                 read-off of the transport timecode. -->
-            <button id="compare-use-preview" type="button" title="Set frame time to the preview's current position">Use preview time</button>
-          </label>
-          <button id="compare-button" type="button">Compare thresholds</button>
-          <p id="compare-status" class="stat-line" role="status"></p>
-          <div id="threshold-panels"></div>
-        </details>
-      </section>
     </div>
   </main>
 

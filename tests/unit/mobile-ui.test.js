@@ -246,16 +246,16 @@ describe('v1.12.0 REQ-116: #below-timeline bottom flow (compare + tracks)', () =
     expect(tracks).toBeLessThan(compare); // tracks first, compare UNDER tracks
   });
 
-  it('moved OUT of the right rail — the rail keeps only sensitivity + export', () => {
-    const rail = HTML.slice(
-      HTML.indexOf('id="right-rail"'),
-      HTML.indexOf('id="below-timeline"'),
-    );
-    expect(rail).not.toContain('id="threshold-compare"');
-    expect(rail).not.toContain('id="track-list"');
-    expect(rail).not.toContain('id="tracks-panel"');
-    expect(rail).toContain('id="sensitivity"');
-    expect(rail).toContain('id="export-panel"');
+  it('lives INSIDE the preview column (v1.18.1: follows the timeline with no gap)', () => {
+    const stage = HTML.indexOf('id="stage-column"');
+    const timeline = HTML.indexOf('id="timeline"');
+    const below = HTML.indexOf('id="below-timeline"');
+    const railResize = HTML.indexOf('id="rail-resize"');
+    expect(stage).toBeGreaterThan(-1);
+    expect(timeline).toBeGreaterThan(stage);
+    expect(below).toBeGreaterThan(timeline);
+    // it closes BEFORE the rail-resize handle (still inside #stage-column)
+    expect(railResize).toBeGreaterThan(below);
   });
 
   it('keeps every inner compare id exactly once (E2E/JS selectors untouched)', () => {
@@ -281,11 +281,10 @@ describe('v1.12.0 REQ-116: #below-timeline bottom flow (compare + tracks)', () =
     expect(cssRule('.threshold-panel')).toContain('flex: 0 0 240px');
   });
 
-  it('stacked single column (v1.14.0: compare under tracks), grid-column 1/-1', () => {
+  it('stacked single column flow (v1.14.0: compare under tracks); no grid placement since v1.18.1', () => {
     const rule = cssRule('#below-timeline');
-    expect(rule).toContain('grid-column: 1'); // v1.18.0: aligned with the preview column
-    expect(rule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
-    expect(rule).not.toMatch(/minmax\(0, 1fr\)\s+minmax\(0, 1fr\)/);
+    expect(rule).not.toContain('grid-column'); // plain block inside the column
+    expect(rule).toMatch(/margin-top:\s*16px/);
   });
 });
 

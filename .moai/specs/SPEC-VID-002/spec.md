@@ -79,3 +79,16 @@ v1.1.0 iterates the review experience of SPEC-VID-001: a solid-black redaction s
 
 - **REQ-113** — Detection confidence thresholds shall be user-configurable per class (face default 0.6, plate default 0.25) via sliders in the Analyze panel; the configured values drive the analyze pass (and any re-analysis).
 - **REQ-114** — Before running a full analysis, the user shall be able to run a single-frame threshold comparison: the system decodes one frame at a user-chosen time, runs each model exactly once, and renders side-by-side preview panels at fixed threshold levels (0.15/0.30/0.45/0.60/0.75) with per-panel detection counts (faces teal, plates violet); activating a panel applies that level to the sensitivity sliders. Single-frame decode and inference must complete within ~2 s on the WASM path.
+
+## Amendments — v1.12.0 (2026-10-31, field feedback round 5)
+
+- **REQ-115** — The analysis-abort control (existing #analyze-cancel) shall be visually prominent (danger styling, large) so users can stop slow passes.
+- **REQ-116** — The threshold-compare section and the track list shall render UNDER the preview timeline (bottom flow), with compare panels laid out horizontally in a scrollable strip; the right rail shrinks to capability/export/other panels.
+- **REQ-117** — An optional processing-downscale setting (Full / 1080p / 720p) shall cap the frame size used during analyze; detections shall be rescaled to native display coordinates before tracking (ADR-9 space unchanged downstream).
+- **REQ-118** — A draggable vertical handle between the preview column and the side panel shall adjust their width split (clamped, persisted per session).
+- **REQ-119** — A file-information block (name, size, last-modified date, type) shall render above the capability report.
+- **REQ-120** — A detection minimum-size filter shall be selectable via BUTTONS (Any / ≥24px / ≥48px / ≥96px, min box dimension in display px); smaller detections are skipped before tracking.
+- **REQ-121** — The compare frame-time input shall not truncate (full value visible/scrollable).
+- **REQ-122** — Keyboard: ←/→ jump ±5 s; Shift+←/→ frame-step; F toggles fullscreen/enlarged preview; M toggles mute (Space/B unchanged); shortcuts active whenever the preview is visible.
+- **REQ-123** — The Models/attribution panel shall render under the capability report (left column), out of the right rail.
+- **REQ-124** — A light theme shall be available via a toggle (dark default, choice persisted in localStorage), implemented as a CSS custom-property set swap with no component changes.

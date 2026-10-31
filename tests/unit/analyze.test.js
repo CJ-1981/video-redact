@@ -616,6 +616,8 @@ describe('scaleFactorFor (REQ-117 — analysis downscale factor)', () => {
 
   it('never upscales a frame already at or under the cap', () => {
     expect(scaleFactorFor('720p', 1280, 720)).toBe(1);
+    expect(scaleFactorFor('480p', 854, 480)).toBe(1);
+    expect(scaleFactorFor('480p', 3840, 2160)).toBeCloseTo(854 / 3840, 6);
     expect(scaleFactorFor('1080p', 1920, 1080)).toBe(1);
     expect(scaleFactorFor('720p', 640, 480)).toBe(1);
   });

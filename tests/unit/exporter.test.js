@@ -1477,6 +1477,7 @@ describe('export resolution + audio removal (v1.16.0)', () => {
     expect(exportGeometry('full', 3840, 2160)).toEqual({ sf: 1, outW: 3840, outH: 2160 });
     expect(exportGeometry('1080p', 3840, 2160)).toEqual({ sf: 0.5, outW: 1920, outH: 1080 });
     expect(exportGeometry('720p', 3840, 2160)).toEqual({ sf: 1280 / 3840, outW: 1280, outH: 720 });
+    expect(exportGeometry('480p', 3840, 2160)).toEqual({ sf: 854 / 3840, outW: 854, outH: 480 });
     // portrait: long edge is the height
     const g = exportGeometry('1080p', 2160, 3840);
     expect(g.outW).toBe(1080);

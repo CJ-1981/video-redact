@@ -693,7 +693,7 @@ export function sizeFilterPressed(selected) {
 /**
  * The REQ-117 processing-downscale options. @type {string[]}
  */
-export const DOWNSCALE_VALUES = ['full', '1080p', '720p'];
+export const DOWNSCALE_VALUES = ['full', '1080p', '720p', '480p'];
 
 /**
  * Normalize a #downscale-select value to a legal REQ-117 option. PURE;

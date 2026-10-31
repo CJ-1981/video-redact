@@ -673,7 +673,9 @@
        under the timeline — compare left, tracks right on wide screens,
        stacked single-column on mobile. ── */
     #below-timeline {
-      grid-column: 1 / -1;
+      /* v1.18.0: first grid column ONLY — the tracks/compare panels align
+         with the preview width instead of spanning under the right rail. */
+      grid-column: 1;
       display: grid;
       /* v1.14.0: compare thresholds now sits UNDER tracks (user request) —
          stacked single column. */
@@ -1331,6 +1333,7 @@
               <option value="full" selected>Full — match source</option>
               <option value="1080p">1080p (long edge)</option>
               <option value="720p">720p (long edge)</option>
+              <option value="480p">480p (long edge)</option>
             </select>
           </label>
           <!-- v1.16.0: audio removal — checked by default. -->

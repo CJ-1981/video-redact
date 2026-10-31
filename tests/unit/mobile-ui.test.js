@@ -283,7 +283,7 @@ describe('v1.12.0 REQ-116: #below-timeline bottom flow (compare + tracks)', () =
 
   it('stacked single column (v1.14.0: compare under tracks), grid-column 1/-1', () => {
     const rule = cssRule('#below-timeline');
-    expect(rule).toContain('grid-column: 1 / -1');
+    expect(rule).toContain('grid-column: 1'); // v1.18.0: aligned with the preview column
     expect(rule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
     expect(rule).not.toMatch(/minmax\(0, 1fr\)\s+minmax\(0, 1fr\)/);
   });

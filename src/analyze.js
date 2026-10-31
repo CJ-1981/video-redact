@@ -60,11 +60,12 @@ const DEFAULT_PLATE_STRIDE = 2;
 const DOWNSCALE_CAPS = new Map([
   ['1080p', 1920],
   ['720p', 1280],
+  ['480p', 854], // v1.18.0: also a valid EXPORT resolution (REQ export options)
 ]);
 
 /**
  * REQ-117 pure helper — analysis-canvas scale factor for a downscale preset.
- * The factor caps the LONG edge of the frame: '1080p' → 1920, '720p' → 1280;
+ * The factor caps the LONG edge of the frame: '1080p' → 1920, '720p' → 1280, '480p' → 854;
  * 'full' (and any unknown/invalid preset) → 1. Frames already at or under
  * the cap are never upscaled (result clamped to ≤ 1).
  *

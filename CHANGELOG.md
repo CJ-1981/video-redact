@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-10-31
+
+### Added
+- Export resolution 480p (long edge 854) — smallest/fastest export option.
+- The Tracks and Compare-thresholds panels now align with the preview column width (they previously spanned under the right rail).
+
 ## [1.17.1] — 2026-10-31
 
 ### Fixed

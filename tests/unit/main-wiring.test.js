@@ -1978,3 +1978,191 @@ describe('mountApp (v1.13.0): #bulk-solid / #bulk-pixelate wiring', () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// v1.15.0 REQ-125/126 — trim mode toggle, trim hooks, resets
+// ---------------------------------------------------------------------------
+
+describe('mountApp (v1.15.0): #trim-toggle + trim hooks + resets', () => {
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  function inertHandle(refreshes) {
+    return {
+      destroy() {},
+      refresh: () => {
+        refreshes.push('refresh');
+      },
+      redraw() {},
+      getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+    };
+  }
+
+  /** Mount + open the fixture file (the editor mounts on file-open — the
+   * hooks do not exist before that), returning the captured editor hooks. */
+  async function mountWithHooks(fakeDoc, refreshes) {
+    let hooks = null;
+    await main.mountApp(fakeDoc, {
+      mountEditor: (_els, editorHooks) => {
+        hooks = editorHooks;
+        return inertHandle(refreshes);
+      },
+    });
+    await openFile(fakeDoc);
+    return hooks;
+  }
+
+  it('#trim-toggle flips trimMode + aria-pressed and refreshes the editor', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      await main.mountApp(fakeDoc, { mountEditor: () => inertHandle(refreshes) });
+      const btn = fakeDoc.getElementById('trim-toggle');
+      expect(btn.getAttribute('aria-pressed')).toBe('false');
+      await openFile(fakeDoc); // the editor mounts here — refreshes flow after
+      const before = refreshes.length;
+
+      btn.dispatch('click');
+      expect(btn.getAttribute('aria-pressed')).toBe('true');
+      expect(btn.classList.contains('trim-mode')).toBe(true);
+      expect(refreshes.length).toBeGreaterThan(before);
+
+      btn.dispatch('click');
+      expect(btn.getAttribute('aria-pressed')).toBe('false');
+      expect(btn.classList.contains('trim-mode')).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('onTrimAdd inserts sorted regions through getState().trims and refreshes', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      const hooks = await mountWithHooks(fakeDoc, refreshes);
+      // FAKE_META.duration = 4 — all fixtures stay inside it.
+      hooks.onTrimAdd(3, 3.5);
+      hooks.onTrimAdd(1, 2);
+      const st = hooks.getState();
+      // Ids follow ASSIGNMENT order (nextTrimId counter); the array is
+      // sorted by start.
+      expect(st.trims).toEqual([
+        { id: 2, start: 1, end: 2 },
+        { id: 1, start: 3, end: 3.5 },
+      ]);
+      expect(st.trimMode).toBe(false);
+      expect(refreshes.length).toBeGreaterThanOrEqual(2);
+
+      // Rejected (fully covered) insert: no region, no id bump.
+      const before = refreshes.length;
+      hooks.onTrimAdd(3.1, 3.3);
+      expect(hooks.getState().trims).toHaveLength(2);
+      hooks.onTrimAdd(0.5, 3.75); // would swallow region 2 → rejected
+      expect(hooks.getState().trims).toHaveLength(2);
+      hooks.onTrimAdd(2.5, 2.8); // next insert still gets id 3
+      expect(hooks.getState().trims.find((r) => r.id === 3)).toEqual({ id: 3, start: 2.5, end: 2.8 });
+      expect(refreshes.length).toBeGreaterThan(before);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('onTrimEdge moves edges through the clamped model (never past a neighbor)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      const hooks = await mountWithHooks(fakeDoc, refreshes);
+      hooks.onTrimAdd(3, 3.5);
+      hooks.onTrimAdd(1, 2);
+
+      // Assignment order: id 1 = [3, 3.5], id 2 = [1, 2].
+      hooks.onTrimEdge(1, 'start', 0.5); // previous region (id 2) ends at 2 → clamps
+      expect(hooks.getState().trims.find((r) => r.id === 1).start).toBe(2);
+      hooks.onTrimEdge(1, 'end', 99); // clamps to the duration (4 s meta)
+      expect(hooks.getState().trims.find((r) => r.id === 1).end).toBe(4);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('onTrimRemove drops the region (✕ / double-click path)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      const hooks = await mountWithHooks(fakeDoc, refreshes);
+      hooks.onTrimAdd(2, 4);
+      hooks.onTrimRemove(1);
+      expect(hooks.getState().trims).toEqual([]);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('Clear resets regions, trim mode and the toggle UI', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      const hooks = await mountWithHooks(fakeDoc, refreshes);
+      hooks.onTrimAdd(2, 4);
+      const btn = fakeDoc.getElementById('trim-toggle');
+      btn.dispatch('click'); // trimMode on
+      expect(hooks.getState().trimMode).toBe(true);
+      expect(hooks.getState().trims).toHaveLength(1);
+
+      fakeDoc.getElementById('clear-file').dispatch('click');
+      const st = hooks.getState();
+      expect(st.trims).toEqual([]);
+      expect(st.trimMode).toBe(false);
+      expect(btn.getAttribute('aria-pressed')).toBe('false');
+      expect(btn.classList.contains('trim-mode')).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('a fresh file load resets the trim state too', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      const hooks = await mountWithHooks(fakeDoc, refreshes);
+      hooks.onTrimAdd(2, 4);
+      fakeDoc.getElementById('trim-toggle').dispatch('click');
+      expect(hooks.getState().trims).toHaveLength(1);
+
+      await openFile(fakeDoc); // re-open (the fresh AppState path)
+      const st = hooks.getState();
+      expect(st.trims).toEqual([]);
+      expect(st.trimMode).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+});

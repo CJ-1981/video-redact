@@ -535,6 +535,81 @@
       outline-offset: 2px;
     }
 
+    /* ── Trim regions (v1.15.0 REQ-125): greyed deletion marks on the
+       timeline. The layer sits between #track-chips and #playhead in DOM
+       order (paint order = chips < regions < playhead < thumb); the layer
+       itself is click-through, its .trim-region children are not. ── */
+    #trim-regions { position: absolute; inset: 0; pointer-events: none; }
+    .trim-region {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: rgba(128, 128, 128, 0.45);
+      border-left: 1px solid rgba(232, 236, 241, 0.7);
+      border-right: 1px solid rgba(232, 236, 241, 0.7);
+      pointer-events: auto;
+      cursor: crosshair;
+      min-width: 2px;
+    }
+    /* ✂ scissors sit ON each region edge, half outside (REQ-125). They are
+       also the edge-drag handles (col-resize). */
+    .trim-cut {
+      position: absolute;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 12px;
+      line-height: 1;
+      color: #fff;
+      text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
+      cursor: col-resize;
+      user-select: none;
+      touch-action: none;
+    }
+    .trim-cut[data-which='start'] { left: 0; }
+    .trim-cut[data-which='end'] { left: 100%; }
+    .trim-remove {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      font-size: 10px;
+      line-height: 1;
+      border-radius: 4px;
+    }
+    /* Live create-drag preview (editor.js appends/positions it). */
+    .trim-ghost {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: rgba(229, 72, 77, 0.3);
+      border: 1px dashed rgba(229, 72, 77, 0.9);
+      pointer-events: none;
+    }
+
+    /* ── Tracks panel header (v1.15.0): bulk style + ✂ trim toggle share one
+       row (#trim-bar wraps both). ── */
+    #trim-bar {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      margin-top: 8px;
+      max-width: 320px;
+    }
+    #trim-toggle {
+      flex: 0 0 auto;
+      min-height: 32px;
+      padding: 6px 10px;
+      font-size: 12.5px;
+    }
+    #trim-toggle[aria-pressed='true'] {
+      background: var(--accent);
+      color: var(--bg-panel);
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+
     /* ── Below-timeline flow (v1.12.0 REQ-116): the threshold-compare section
        and the track list move OUT of the right rail into a full-width row
        under the timeline — compare left, tracks right on wide screens,
@@ -640,6 +715,15 @@
       display: flex;
       margin-top: 8px;
       max-width: 320px;
+    }
+    /* v1.15.0: inside #trim-bar the bulk group fills the row (the ✂ toggle
+       takes its content width) and the wrapper owns the top margin. Kept
+       AFTER the base rules on purpose. */
+    #trim-bar #bulk-style {
+      flex: 1 1 0;
+      min-width: 0;
+      margin-top: 0;
+      max-width: none;
     }
     #bulk-style button {
       flex: 1 1 0;
@@ -1069,6 +1153,11 @@
           <span id="timeline-current" class="num timecode">0:00.0</span>
           <div id="timeline-track">
             <div id="track-chips"></div>
+            <!-- v1.15.0 REQ-125: greyed trim regions — painted above the
+                 chips, below the playhead/thumb (DOM order does the layering).
+                 main.js owns the regions; the editor renders .trim-region
+                 children (scissors edges + ✕) and the live-create ghost. -->
+            <div id="trim-regions"></div>
             <div id="playhead"></div>
             <div id="timeline-thumb" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="Drag to scrub · arrows step when focused"></div>
           </div>
@@ -1177,10 +1266,15 @@
         <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
           <summary>Tracks</summary>
           <!-- v1.13.0: bulk style buttons — IDs are the contract (main.js
-               wires the clicks); segmented styling mirrors #size-filter. -->
-          <div id="bulk-style" role="group" aria-label="Set all tracks style">
-            <button id="bulk-solid" type="button">All solid</button>
-            <button id="bulk-pixelate" type="button">All pixelate</button>
+               wires the clicks); segmented styling mirrors #size-filter.
+               v1.15.0 REQ-125: the ✂ trim-mode toggle rides the same header
+               row (#trim-toggle is the contract id). -->
+          <div id="trim-bar">
+            <div id="bulk-style" role="group" aria-label="Set all tracks style">
+              <button id="bulk-solid" type="button">All solid</button>
+              <button id="bulk-pixelate" type="button">All pixelate</button>
+            </div>
+            <button id="trim-toggle" type="button" aria-pressed="false" title="Trim mode: drag on the timeline to mark regions for deletion — they are greyed out here and removed at export">✂ Trim</button>
           </div>
           <ul id="track-list"></ul>
           <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>

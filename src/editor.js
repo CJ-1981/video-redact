@@ -350,6 +350,8 @@ export function thumbPinSettled(pinnedTimeSec, currentTimeSec) {
 /** Manual-drag rubber band (REQ-109: manual tracks themselves use the
  * categorical palette — alert red stays on the in-progress rubber band). */
 const ALERT_RED = '#E5484D';
+/** Grey veil over a frame whose time sits inside a trim region (REQ-125). */
+const TRIM_VEIL = 'rgba(128, 128, 128, 0.45)';
 /** "Keep visible" chips (design-direction.md safe green). */
 const SAFE_GREEN = '#3ECF8E';
 /** Drags smaller than this (canvas px) are clicks, not boxes. */
@@ -408,6 +410,34 @@ export function renderTimeline(tracks, durationSec, currentTimeSec) {
     enabled: track.enabled,
   }));
   return { chips, playheadPct: pct(currentTimeSec) };
+}
+
+// ---------------------------------------------------------------------------
+// PURE: trimRegionViews — greyed trim-region view model (v1.15.0 REQ-125)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the trim-region view model: one greyed overlay per trim region
+ * (v1.15.0 REQ-125) spanning its range as percentages of `durationSec`.
+ * PURE — no DOM; the caller maps the views onto the #trim-regions layer.
+ *
+ * @param {Array<{id: number, start: number, end: number}>} trims Trim
+ *     regions (sorted, non-overlapping — main.js's pure model).
+ * @param {number} durationSec Video duration (> 0; 0/NaN → no views).
+ * @returns {Array<{id: number, startPct: number, widthPct: number}>}
+ */
+export function trimRegionViews(trims, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return [];
+  return (Array.isArray(trims) ? trims : []).map((r) => {
+    const a = Math.min(Math.max(r.start, 0), dur);
+    const b = Math.min(Math.max(r.end, 0), dur);
+    return {
+      id: r.id,
+      startPct: (a / dur) * 100,
+      widthPct: ((b - a) / dur) * 100,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -939,12 +969,15 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  *
  * @param {object} els Stable DOM handles:
  *     `{ video, overlayCanvas, timeline, chipsContainer, playhead, trackList,
- *        timelineThumb? }`. The timeline strip is the trim-handle gesture
- *     surface (REQ-103, and REQ-110: bound to #timeline so boundary-edge grabs
- *     on full-span chips are seen); pointer geometry still maps through the
- *     chips layer. `timelineThumb` (v1.7.0) is the draggable scrub handle —
- *     when omitted it is resolved as the static `#timeline-thumb` inside the
- *     strip markup.
+ *        timelineThumb?, trimRegions? }`. The timeline strip is the trim-handle
+ *     gesture surface (REQ-103, and REQ-110: bound to #timeline so
+ *     boundary-edge grabs on full-span chips are seen); pointer geometry still
+ *     maps through the chips layer. `timelineThumb` (v1.7.0) is the draggable
+ *     scrub handle — when omitted it is resolved as the static
+ *     `#timeline-thumb` inside the strip markup. `trimRegions` (v1.15.0
+ *     REQ-125) is the greyed trim-region layer — when omitted it is resolved
+ *     as the static `#trim-regions` inside the strip markup; a missing layer
+ *     disables only the trim UI (chips/playhead/list are unaffected).
  * @param {object} hooks Callbacks into main.js:
  *     `{ onToggle(trackId, enabled), onSeek(t), onManualBox(box, t),
  *        onTrimTrack(trackId, start, end), onSetStyle(trackId, style),
@@ -953,7 +986,11 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  *     consulted ONLY when video.duration is NaN/≤0 (see duration()).
  *     `onStepFrame` (v1.7.0, optional) is the thumb's ±1-frame keyboard path —
  *     the host's own step math (source fps); without it the thumb falls back
- *     to a ±1/30 s seek.
+ *     to a ±1/30 s seek. v1.15.0 REQ-125: `getState().trims` +
+ *     `getState().trimMode` drive the greyed regions, the crosshair strip and
+ *     the preview veil; `onTrimAdd(start, end)` / `onTrimEdge(id, which, t)` /
+ *     `onTrimRemove(id)` (optional) mutate the region model — all optional,
+ *     guarded like the other hooks.
  * @returns {{destroy: () => void, refresh: () => void,
  *            redraw: () => void, getGestureState: () => {dragging: boolean,
  *            pinRemainingMs: number}}} `destroy` tears all listeners/frames
@@ -980,6 +1017,12 @@ export function mountEditor(els, hooks) {
       ? timeline.querySelector('#timeline-thumb')
       : null);
   const trackList = (els && els.trackList) || null;
+  // v1.15.0 REQ-125: the greyed trim-region layer (sits above #track-chips,
+  // below the playhead/thumb). Resolved by the HOST (main.js passes
+  // els.trimRegions — a querySelector fallback here would happily grab the
+  // wrong node in partial-els embeds); an absent layer disables only the trim
+  // UI (chips/playhead/list are unaffected).
+  const trimRegions = (els && els.trimRegions) || null;
 
   const hasHook = (name) => !!(hooks && typeof hooks[name] === 'function');
   const getState = () =>
@@ -1002,6 +1045,16 @@ export function mountEditor(els, hooks) {
   };
   const callSetStyle = (id, style) => {
     if (hasHook('onSetStyle')) hooks.onSetStyle(id, style);
+  };
+  // v1.15.0 REQ-125 trim hooks: region create / edge move / remove.
+  const callTrimAdd = (start, end) => {
+    if (hasHook('onTrimAdd')) hooks.onTrimAdd(start, end);
+  };
+  const callTrimEdge = (id, which, t) => {
+    if (hasHook('onTrimEdge')) hooks.onTrimEdge(id, which, t);
+  };
+  const callTrimRemove = (id) => {
+    if (hasHook('onTrimRemove')) hooks.onTrimRemove(id);
   };
   // v1.7.0 thumb keyboard: ±1 frame rides the host's step math (main.js's
   // stepFrame knows the source fps via app.meta); without the hook a ~30 fps
@@ -1117,12 +1170,28 @@ export function mountEditor(els, hooks) {
       //    pixels equal exported pixels (AC-04). Source-rect sampling in
       //    applyPixelation is untransformed — no ctx transform anywhere.
       const tracksCanvasPx = tracksInCanvasPx(state.tracks, previewScale);
-      pixelateFrame(ctx, tracksCanvasPx, t, { width: bw, height: bh });
+      // v1.15.0 REQ-125: the playhead inside a trim region — the frame is
+      // marked for deletion and never reaches the export, so the pixelation
+      // burn is SKIPPED here too (the veil, not the mosaic, is the truth),
+      // and a grey veil fills the canvas LAST — on top of frames and track
+      // outlines alike, the clearest "this part will be removed" signal.
+      const inTrim = (state.trims ?? []).some(
+        (r) => Number.isFinite(t) && t >= r.start && t <= r.end,
+      );
+      if (!inTrim) {
+        pixelateFrame(ctx, tracksCanvasPx, t, { width: bw, height: bh });
+      }
       // 2. Outline pass for ALL tracks (enabled solid + disabled dashed),
       //    on top of the burned pixels so strokes stay crisp — same scaled
       //    boxes so strokes align with the burned regions; viewScale keeps
       //    stroke/label metrics CSS-px consistent.
       drawOverlay(ctx, tracksCanvasPx, t, previewScale);
+      if (inTrim) {
+        ctx.save();
+        ctx.fillStyle = TRIM_VEIL;
+        ctx.fillRect(0, 0, bw, bh);
+        ctx.restore();
+      }
     } catch (err) {
       // Density invariant violated (tracker bug): fail CLOSED — never leave
       // an unredacted frame on screen — and re-throw (never swallow). The
@@ -1325,6 +1394,20 @@ export function mountEditor(els, hooks) {
     if (playhead) playhead.style.left = `${vm.playheadPct}%`;
     updateThumb();
 
+    // v1.15.0 REQ-125: greyed trim regions in the dedicated layer (above the
+    // chips, below the playhead/thumb) + the trim-mode strip cursor. The
+    // live-create ghost survives refreshes (edge drags fire hooks → render).
+    if (trimRegions) {
+      trimRegions.textContent = '';
+      for (const view of trimRegionViews(state.trims, d)) {
+        trimRegions.appendChild(buildTrimRegion(view));
+      }
+      if (trimCreate?.ghost) trimRegions.appendChild(trimCreate.ghost);
+    }
+    if (timeline && timeline.style) {
+      timeline.style.cursor = state.trimMode ? 'crosshair' : '';
+    }
+
     if (trackList) renderTrackList(state.tracks, d);
   }
 
@@ -1482,6 +1565,20 @@ export function mountEditor(els, hooks) {
    * pointer actually moved (a no-move click must not jump-trim the edge). */
   let trimDrag = /** @type {{id: number, zone: 'start'|'end', moved: boolean} | null} */ (null);
   /**
+   * v1.15.0 REQ-125: live trim-CREATE drag (trim mode) — anchor time plus the
+   * live ghost preview element (null ghost when the regions layer is absent;
+   * creation still works). A release shorter than MIN_TRACK_SPAN_S is ignored
+   * and falls back to the tap-seek verdict.
+   * @type {{t0: number, ghost: HTMLElement | null} | null}
+   */
+  let trimCreate = null;
+  /**
+   * v1.15.0 REQ-125: live trim-REGION edge drag (delegated on the regions
+   * layer; region presses never reach the strip handlers).
+   * @type {{id: number, which: 'start'|'end', pointerId: number} | null}
+   */
+  let regionDrag = null;
+  /**
    * Strip pointerdown anchor for the pointerup gesture decision (v1.6.2):
    * press position plus the press-time hit verdict — whether it latched a
    * chip edge zone (that side's trim owns the gesture) and whether the press
@@ -1507,6 +1604,82 @@ export function mountEditor(els, hooks) {
     const rect = chipsContainer.getBoundingClientRect();
     if (!(rect.width > 0)) return null;
     return { x: e.clientX - rect.left, y: e.clientY - rect.top, width: rect.width };
+  }
+
+  // --- Trim regions (v1.15.0 REQ-125): layer render + gestures --------------
+
+  /**
+   * Map a client x to a time through the CHIPS-layer rect — the SAME axis the
+   * chips, playhead, thumb and every other timeline mapping use (v1.6.1 REG-1
+   * rule).
+   * @param {number} clientX
+   * @returns {number | null} Seconds, or null when geometry/duration is unusable.
+   */
+  function trimTimeAtClientX(clientX) {
+    const rect =
+      chipsContainer && typeof chipsContainer.getBoundingClientRect === 'function'
+        ? chipsContainer.getBoundingClientRect()
+        : null;
+    const d = duration();
+    if (!rect || !(rect.width > 0) || !(d > 0)) return null;
+    return timelineTimeAt(clientX - rect.left, rect.width, d);
+  }
+
+  /**
+   * Build one greyed trim-region overlay (scissors at both edges, ✕ remove
+   * button). The edges are the drag handles (`.trim-cut`); the ✕ is the
+   * remove button — both consumed by the delegated layer listeners below.
+   * @param {{id: number, startPct: number, widthPct: number}} view
+   * @returns {HTMLElement}
+   */
+  function buildTrimRegion(view) {
+    const el = doc.createElement('div');
+    el.className = 'trim-region';
+    el.dataset.trimId = String(view.id);
+    el.title = 'Trim region — drag an edge to adjust · ✕ or double-click removes';
+    el.style.left = `${view.startPct}%`;
+    el.style.width = `${view.widthPct}%`;
+    for (const which of ['start', 'end']) {
+      const edge = doc.createElement('span');
+      edge.className = 'trim-cut trim-edge';
+      edge.dataset.which = which;
+      edge.textContent = '✂';
+      edge.title = 'Drag to adjust the trim edge';
+      el.appendChild(edge);
+    }
+    const remove = doc.createElement('button');
+    remove.type = 'button';
+    remove.className = 'trim-remove';
+    remove.dataset.trimId = String(view.id);
+    remove.textContent = '✕';
+    remove.title = 'Remove this trim region';
+    el.appendChild(remove);
+    return el;
+  }
+
+  /** Fresh live-create ghost preview in the regions layer (may be null). */
+  function makeGhost() {
+    if (!doc || !trimRegions || typeof trimRegions.appendChild !== 'function') return null;
+    const ghost = doc.createElement('div');
+    ghost.className = 'trim-ghost';
+    trimRegions.appendChild(ghost);
+    return ghost;
+  }
+
+  /** Position the live-create ghost between two times (clamped, ordered). */
+  function positionGhost(ghost, t0, t1) {
+    const d = duration();
+    if (!ghost || !(d > 0)) return;
+    const a = Math.min(Math.max(Math.min(t0, t1), 0), d);
+    const b = Math.min(Math.max(Math.max(t0, t1), 0), d);
+    ghost.style.left = `${(a / d) * 100}%`;
+    ghost.style.width = `${((b - a) / d) * 100}%`;
+  }
+
+  /** End the create-drag with no residue (cancel path). */
+  function dropGhost() {
+    if (trimCreate?.ghost) trimCreate.ghost.remove();
+    trimCreate = null;
   }
 
   function onTimelineDblClick(e) {
@@ -1567,7 +1740,24 @@ export function mountEditor(els, hooks) {
       downPos.edgeLeft = hit.zone === 'start';
       downPos.edgeRight = hit.zone === 'end';
     }
-    if (!hit || hit.zone === 'body') return; // plain chip / bare rail tap → pointerup-seek path
+    if (!hit || hit.zone === 'body') {
+      // v1.15.0 REQ-125: in trim mode, a press on the bare strip or a chip
+      // BODY starts a trim-CREATE drag — the region runs from the press time
+      // to the release time. (A press on a trim REGION never gets here: the
+      // regions layer stops propagation on its own pointerdowns.) A release
+      // shorter than MIN_TRACK_SPAN_S is ignored as a create and falls back
+      // to the tap-seek verdict in onChipsPointerUp.
+      if (getState().trimMode) {
+        trimCreate = { t0: clampTime(timelineTimeAt(p.x, p.width, d)), ghost: makeGhost() };
+        try {
+          timeline.setPointerCapture(e.pointerId);
+        } catch {
+          /* detached strip — capture is best-effort */
+        }
+        e.preventDefault();
+      }
+      return; // plain chip / bare rail tap → pointerup-seek path
+    }
     trimDrag = { id: hit.track.id, zone: hit.zone, moved: false };
     try {
       timeline.setPointerCapture(e.pointerId);
@@ -1581,6 +1771,13 @@ export function mountEditor(els, hooks) {
     if (trimDrag) {
       trimDrag.moved = true;
       applyTrimDrag(e.clientX);
+      e.preventDefault();
+      return;
+    }
+    if (trimCreate) {
+      // v1.15.0: live ghost preview for the region being drawn.
+      const t = trimTimeAtClientX(e.clientX);
+      if (t != null) positionGhost(trimCreate.ghost, trimCreate.t0, t);
       e.preventDefault();
       return;
     }
@@ -1612,6 +1809,26 @@ export function mountEditor(els, hooks) {
   function onChipsPointerUp(e) {
     const start = downPos;
     endTrimDrag(e); // no-op unless this gesture is a chip-edge trim
+    // v1.15.0 REQ-125: finish a trim-CREATE drag first. A region of at least
+    // MIN_TRACK_SPAN_S is committed through onTrimAdd and CONSUMES the
+    // gesture (never a seek); a shorter drag is ignored as a create and
+    // falls through to the normal verdict (a still tap stays a seek).
+    if (trimCreate) {
+      const t0 = trimCreate.t0;
+      const t1 = trimTimeAtClientX(e.clientX);
+      if (trimCreate.ghost) trimCreate.ghost.remove();
+      trimCreate = null;
+      try {
+        timeline.releasePointerCapture(e.pointerId);
+      } catch {
+        /* never captured or already released */
+      }
+      if (t1 != null && Math.abs(t1 - t0) >= MIN_TRACK_SPAN_S) {
+        downPos = null; // exactly one verdict per press→release pair
+        callTrimAdd(Math.min(t0, t1), Math.max(t0, t1));
+        return;
+      }
+    }
     if (!start || !start.primary) return;
     downPos = null; // exactly one verdict per press→release pair
     if (timelinePointerAction(start.x, e.clientX, start.edgeLeft, start.edgeRight, CLICK_SEEK_MAX_DRAG_PX) !== 'seek') {
@@ -1631,8 +1848,10 @@ export function mountEditor(els, hooks) {
   function onChipsPointerCancel() {
     // A canceled gesture (palm rejection, …) must leave NO residue: both the
     // trim drag and the pointerup anchor reset here, so a canceled press can
-    // never turn a later tap into a trim or a seek (v1.6.1 REG-1).
+    // never turn a later tap into a trim or a seek (v1.6.1 REG-1). v1.15.0:
+    // the create-drag ghost dies with it too.
     trimDrag = null;
+    dropGhost();
     downPos = null;
     resetChipCursor();
   }
@@ -1649,9 +1868,16 @@ export function mountEditor(els, hooks) {
     }
   }
 
-  /** col-resize over chip edge zones, pointer over chip bodies (REQ-103). */
+  /** col-resize over chip edge zones, pointer over chip bodies (REQ-103).
+   * v1.15.0: in trim mode the strip is crosshair (set in render) — the chip
+   * cursor overrides step aside; trim-region edges carry their own CSS
+   * col-resize affordance. */
   function updateChipCursor(e) {
     if (!chipsContainer) return;
+    if (getState().trimMode) {
+      resetChipCursor();
+      return;
+    }
     const p = chipsPos(e);
     const d = duration();
     let cursor = '';
@@ -1668,6 +1894,85 @@ export function mountEditor(els, hooks) {
       target.style.cursor = cursor;
       hoverChip = target;
     }
+  }
+
+  // --- Trim regions layer: edge drag + remove (v1.15.0 REQ-125) -------------
+
+  /**
+   * Region presses are consumed HERE (stopPropagation — the strip handlers
+   * must never read a region press as a chip-edge trim latch or a create-drag
+   * start). A press on a `.trim-cut` edge starts the edge drag (pointer
+   * captured on the LAYER, like the strip gesture); a press on the region
+   * body is inert (the ✕ click and double-click remove instead).
+   */
+  function onTrimRegionPointerDown(e) {
+    e.stopPropagation();
+    const target = e.target;
+    const region =
+      target && typeof target.closest === 'function' ? target.closest('.trim-region') : null;
+    if (!region || e.button !== 0) return;
+    const edge = typeof target.closest === 'function' ? target.closest('.trim-cut') : null;
+    if (!edge) return;
+    const id = Number(region.dataset.trimId);
+    const which = edge.dataset.which === 'end' ? 'end' : 'start';
+    if (!Number.isFinite(id)) return;
+    regionDrag = { id, which, pointerId: e.pointerId };
+    try {
+      trimRegions.setPointerCapture(e.pointerId);
+    } catch {
+      /* detached layer — capture is best-effort */
+    }
+    e.preventDefault();
+  }
+
+  function onTrimRegionPointerMove(e) {
+    if (!regionDrag || e.pointerId !== regionDrag.pointerId) return;
+    const t = trimTimeAtClientX(e.clientX);
+    if (t != null) {
+      callTrimEdge(regionDrag.id, regionDrag.which, t); // moveTrimEdge clamps
+    }
+    e.preventDefault();
+  }
+
+  /** End the region edge drag on any path (up / cancel). */
+  function endRegionDrag(e) {
+    if (!regionDrag) return;
+    regionDrag = null;
+    try {
+      trimRegions.releasePointerCapture(e.pointerId);
+    } catch {
+      /* never captured or already released */
+    }
+  }
+
+  function onTrimRegionPointerUp(e) {
+    endRegionDrag(e);
+  }
+  function onTrimRegionPointerCancel(e) {
+    endRegionDrag(e);
+  }
+
+  /** ✕ button click → onTrimRemove (stopPropagation: never a strip gesture). */
+  function onTrimRegionClick(e) {
+    const target = e.target;
+    const btn = target && typeof target.closest === 'function' ? target.closest('.trim-remove') : null;
+    if (!btn) return;
+    e.stopPropagation();
+    const id = Number(btn.dataset.trimId);
+    if (Number.isFinite(id)) callTrimRemove(id);
+  }
+
+  /** Double-click on a region → remove (REQ-125: "double-click or a
+   * per-region ✕"). The ✕'s own click already removed it — a double-click
+   * there is a harmless second remove of an unknown id. */
+  function onTrimRegionDblClick(e) {
+    const target = e.target;
+    const region =
+      target && typeof target.closest === 'function' ? target.closest('.trim-region') : null;
+    if (!region) return;
+    e.stopPropagation();
+    const id = Number(region.dataset.trimId);
+    if (Number.isFinite(id)) callTrimRemove(id);
   }
 
   // --- Scrub thumb: drag = throttled scrub seeks + exact endpoint (v1.7.0) --
@@ -2056,6 +2361,16 @@ export function mountEditor(els, hooks) {
     trackList.addEventListener('keydown', onListKeyDown);
     trackList.addEventListener('click', onListClick);
   }
+  if (trimRegions) {
+    // v1.15.0 REQ-125: the region layer consumes its own presses (edge drags,
+    // ✕ removal, double-click removal) — the strip handlers never see them.
+    trimRegions.addEventListener('pointerdown', onTrimRegionPointerDown);
+    trimRegions.addEventListener('pointermove', onTrimRegionPointerMove);
+    trimRegions.addEventListener('pointerup', onTrimRegionPointerUp);
+    trimRegions.addEventListener('pointercancel', onTrimRegionPointerCancel);
+    trimRegions.addEventListener('click', onTrimRegionClick);
+    trimRegions.addEventListener('dblclick', onTrimRegionDblClick);
+  }
   render(); // initial chips + track list (inert in node: doc is undefined)
 
   /** Immediate redraw at the current layout (fullscreen/zoom/resize seams). */
@@ -2101,8 +2416,18 @@ export function mountEditor(els, hooks) {
       trackList.removeEventListener('keydown', onListKeyDown);
       trackList.removeEventListener('click', onListClick);
     }
+    if (trimRegions) {
+      trimRegions.removeEventListener('pointerdown', onTrimRegionPointerDown);
+      trimRegions.removeEventListener('pointermove', onTrimRegionPointerMove);
+      trimRegions.removeEventListener('pointerup', onTrimRegionPointerUp);
+      trimRegions.removeEventListener('pointercancel', onTrimRegionPointerCancel);
+      trimRegions.removeEventListener('click', onTrimRegionClick);
+      trimRegions.removeEventListener('dblclick', onTrimRegionDblClick);
+    }
     if (disposeManual) disposeManual();
     trimDrag = null;
+    dropGhost(); // v1.15.0: no ghost residue past teardown
+    regionDrag = null;
     downPos = null;
     hoverChip = null;
     disarmBlurGuard(); // v1.9.0: blur guard dies with the editor

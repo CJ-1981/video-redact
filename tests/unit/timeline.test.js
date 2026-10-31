@@ -1697,3 +1697,234 @@ describe('mountEditor at READY with zero tracks (v1.10.0 pre-analyze editor)', (
     expect(handle.getGestureState()).toEqual({ dragging: false, pinRemainingMs: 0 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.15.0 REQ-125/126 — trim-region pure model (main.js) + region views
+// (editor.js). main.js pulls ingest/analyze (real-media modules) at import
+// time; both are mocked with the same shape main-wiring.test.js uses.
+// ---------------------------------------------------------------------------
+
+vi.mock('../../src/ingest.js', () => ({
+  openInput: vi.fn(async () => { throw new Error('unused in unit tests'); }),
+}));
+vi.mock('../../src/analyze.js', () => ({
+  runAnalyze: vi.fn(async () => { throw new Error('unused in unit tests'); }),
+  sampleFrameAt: vi.fn(async () => { throw new Error('unused in unit tests'); }),
+}));
+
+const {
+  MIN_TRIM_SPAN_S,
+  normalizeTrims,
+  addTrim,
+  moveTrimEdge,
+  removeTrim,
+  trimsAt,
+  keptSegments,
+} = await import('../../src/main.js');
+const { trimRegionViews } = await import('../../src/editor.js');
+
+describe('main.trim helpers (v1.15.0 REQ-125): MIN_TRIM_SPAN_S', () => {
+  it('is 0.1 s — the same floor as the chip-span trim', () => {
+    expect(MIN_TRIM_SPAN_S).toBe(0.1);
+  });
+});
+
+describe('main.normalizeTrims (v1.15.0)', () => {
+  it('sorts by start and clamps into [0, duration]', () => {
+    expect(
+      normalizeTrims(
+        [
+          { id: 2, start: 7, end: 12 },
+          { id: 1, start: -1, end: 3 },
+        ],
+        10,
+      ),
+    ).toEqual([
+      { id: 1, start: 0, end: 3 },
+      { id: 2, start: 7, end: 10 },
+    ]);
+  });
+
+  it('drops regions below the minimum span and non-array input → []', () => {
+    expect(normalizeTrims([{ id: 1, start: 2, end: 2.05 }], 10)).toEqual([]);
+    expect(normalizeTrims('nope', 10)).toEqual([]);
+    expect(normalizeTrims(null)).toEqual([]);
+  });
+});
+
+describe('main.addTrim (v1.15.0 REQ-125)', () => {
+  it('inserts a new region keeping the array sorted', () => {
+    const base = [{ id: 1, start: 4, end: 6 }];
+    const next = addTrim(base, 2, 1, 2, 10);
+    expect(next).toEqual([
+      { id: 2, start: 1, end: 2 },
+      { id: 1, start: 4, end: 6 },
+    ]);
+    expect(base).toEqual([{ id: 1, start: 4, end: 6 }]); // input untouched
+  });
+
+  it('clips a request whose start edge sits inside an existing region', () => {
+    // Drag [5,8] over region [4,6]: the region covers the drag's start edge →
+    // the start is pulled right to the region's end → kept [6,8].
+    expect(addTrim([{ id: 1, start: 4, end: 6 }], 2, 5, 8, 10)).toEqual([
+      { id: 1, start: 4, end: 6 },
+      { id: 2, start: 6, end: 8 },
+    ]);
+    // Same rule from the other side: drag [3,5] → end pulled left to 4
+    // (covered by the end-edge test below).
+    expect(addTrim([{ id: 1, start: 4, end: 6 }], 2, 1, 5, 10)).toEqual([
+      { id: 2, start: 1, end: 4 },
+      { id: 1, start: 4, end: 6 },
+    ]);
+  });
+
+  it('clips a request whose end edge sits inside an existing region', () => {
+    // Existing [4,6]; drag [3,5] → end pulled left to the region's start.
+    expect(addTrim([{ id: 1, start: 4, end: 6 }], 2, 3, 5, 10)).toEqual([
+      { id: 2, start: 3, end: 4 },
+      { id: 1, start: 4, end: 6 },
+    ]);
+  });
+
+  it('rejects a request fully covered by an existing region (identity)', () => {
+    const base = [{ id: 1, start: 4, end: 6 }];
+    expect(addTrim(base, 2, 4.5, 5.5, 10)).toBe(base);
+  });
+
+  it('rejects a request that would swallow an interior region (identity)', () => {
+    const base = [
+      { id: 1, start: 2, end: 3 },
+      { id: 2, start: 5, end: 6 },
+    ];
+    expect(addTrim(base, 3, 1, 8, 10)).toBe(base);
+  });
+
+  it('rejects a sub-minimum-span request (identity)', () => {
+    const base = [];
+    expect(addTrim(base, 1, 2, 2.05, 10)).toBe(base);
+  });
+
+  it('clamps bounds into [0, duration]', () => {
+    expect(addTrim([], 1, -5, 99, 10)).toEqual([{ id: 1, start: 0, end: 10 }]);
+  });
+});
+
+describe('main.moveTrimEdge (v1.15.0 REQ-125)', () => {
+  const base = [
+    { id: 1, start: 1, end: 2 },
+    { id: 2, start: 4, end: 6 },
+  ];
+
+  it('moves the start edge, clamped against the previous region + min span', () => {
+    // Start of region 2 cannot cross region 1's end (2) nor region 2's end − 0.1.
+    expect(moveTrimEdge(base, 2, 'start', 0.5, 10)).toEqual([
+      { id: 1, start: 1, end: 2 },
+      { id: 2, start: 2, end: 6 },
+    ]);
+    expect(moveTrimEdge(base, 2, 'start', 5.9, 10)).toEqual([
+      { id: 1, start: 1, end: 2 },
+      { id: 2, start: 5.9, end: 6 },
+    ]);
+  });
+
+  it('moves the end edge, clamped against the next region + duration', () => {
+    // Region 1's end can grow up to region 2's start (touching is allowed —
+    // the regions stay non-overlapping); never past it.
+    expect(moveTrimEdge(base, 1, 'end', 99, 10)).toEqual([
+      { id: 1, start: 1, end: 4 },
+      { id: 2, start: 4, end: 6 },
+    ]);
+    expect(moveTrimEdge(base, 1, 'end', 5, 10)).toEqual([
+      { id: 1, start: 1, end: 4 },
+      { id: 2, start: 4, end: 6 },
+    ]);
+    expect(moveTrimEdge(base, 2, 'end', 99, 10)).toEqual([
+      { id: 1, start: 1, end: 2 },
+      { id: 2, start: 4, end: 10 },
+    ]);
+  });
+
+  it('returns unchanged content for an unknown id or impossible move', () => {
+    expect(moveTrimEdge(base, 99, 'start', 3, 10)).toEqual(base);
+    // Squeezing below the min span: region [1,2] start pushed to 2.05 with
+    // end 2 → hi = end − 0.1 = 1.9, lo = 0 → start clamps to 1.9, never < 0.1 span.
+    const moved = moveTrimEdge(base, 1, 'start', 2.05, 10);
+    expect(moved[0].end - moved[0].start).toBeGreaterThanOrEqual(MIN_TRIM_SPAN_S);
+  });
+});
+
+describe('main.removeTrim / main.trimsAt (v1.15.0 REQ-125)', () => {
+  const base = [
+    { id: 1, start: 2, end: 4 },
+    { id: 2, start: 6, end: 8 },
+  ];
+
+  it('removeTrim drops the region by id (input untouched)', () => {
+    expect(removeTrim(base, 1)).toEqual([{ id: 2, start: 6, end: 8 }]);
+    expect(removeTrim(base, 99)).toEqual(base);
+    expect(base).toHaveLength(2);
+  });
+
+  it('trimsAt is inclusive on both bounds and false outside', () => {
+    expect(trimsAt(base, 2)).toBe(true);
+    expect(trimsAt(base, 4)).toBe(true);
+    expect(trimsAt(base, 3)).toBe(true);
+    expect(trimsAt(base, 1.99)).toBe(false);
+    expect(trimsAt(base, 4.01)).toBe(false);
+    expect(trimsAt(base, NaN)).toBe(false);
+    expect(trimsAt([], 3)).toBe(false);
+  });
+});
+
+describe('main.keptSegments (v1.15.0 REQ-126 export contract)', () => {
+  it('complements the trims: [{2,4}] on 10 s → [{0,2},{4,10}]', () => {
+    expect(keptSegments([{ id: 1, start: 2, end: 4 }], 10)).toEqual([
+      { start: 0, end: 2 },
+      { start: 4, end: 10 },
+    ]);
+  });
+
+  it('empty trims → the whole video is kept', () => {
+    expect(keptSegments([], 10)).toEqual([{ start: 0, end: 10 }]);
+  });
+
+  it('adjacent (touching) trims produce one merged kept tail, full coverage → []', () => {
+    expect(keptSegments([
+      { id: 1, start: 0, end: 2 },
+      { id: 2, start: 2, end: 4 },
+    ], 10)).toEqual([{ start: 4, end: 10 }]);
+    expect(keptSegments([{ id: 1, start: 0, end: 10 }], 10)).toEqual([]);
+  });
+
+  it('a trim covering the head leaves no leading segment', () => {
+    expect(keptSegments([{ id: 1, start: 0, end: 1 }], 5)).toEqual([{ start: 1, end: 5 }]);
+  });
+
+  it('degenerate duration → no segments', () => {
+    expect(keptSegments([{ id: 1, start: 0, end: 5 }], 0)).toEqual([]);
+  });
+});
+
+describe('editor.trimRegionViews (v1.15.0 REQ-125 view model)', () => {
+  it('maps regions to clamped percentages', () => {
+    expect(
+      trimRegionViews(
+        [
+          { id: 1, start: 0, end: 2.5 },
+          { id: 2, start: 5, end: 7.5 },
+        ],
+        10,
+      ),
+    ).toEqual([
+      { id: 1, startPct: 0, widthPct: 25 },
+      { id: 2, startPct: 50, widthPct: 25 },
+    ]);
+  });
+
+  it('degenerate duration → no views; out-of-range bounds clamp', () => {
+    expect(trimRegionViews([{ id: 1, start: 0, end: 5 }], 0)).toEqual([]);
+    expect(trimRegionViews([{ id: 1, start: -3, end: 99 }], 10)).toEqual([
+      { id: 1, startPct: 0, widthPct: 100 },
+    ]);
+  });
+});

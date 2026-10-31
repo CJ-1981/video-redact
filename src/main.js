@@ -1076,6 +1076,189 @@ export function setAllTrackStyles(tracks, style) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Trim regions — v1.15.0 REQ-125/126 pure model (main.js owns the state;
+// trims intentionally live OUTSIDE types.js: they are app-level review-step
+// markers, not tracked redaction Tracks).
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum trim-region span, seconds (REQ-125): a drag or edge move can never
+ * create/squeeze a region below this. Mirrors MIN_TRACK_SPAN_S in editor.js.
+ * @type {number}
+ */
+export const MIN_TRIM_SPAN_S = 0.1;
+
+/**
+ * One trim region: id + [start, end] seconds, kept sorted + non-overlapping
+ * in app state (structural — types.js intentionally untouched per v1.15.0:
+ * trims are app-level review markers, not tracked redaction Tracks).
+ * @typedef {{id: number, start: number, end: number}} TrimRegion
+ */
+
+/** @param {number} v @returns {number} v clamped into [0, dur] (dur finite > 0), else ≥ 0. */
+function clampTrimBound(v, dur) {
+  const x = Number.isFinite(v) ? v : 0;
+  return Number.isFinite(dur) && dur > 0 ? Math.min(Math.max(x, 0), dur) : Math.max(x, 0);
+}
+
+/**
+ * Normalize raw trim input: sort by start, clamp into [0, durationSec], drop
+ * regions below MIN_TRIM_SPAN_S. PURE (v1.15.0 REQ-125) — defensive entry
+ * for persisted/imported state; the mutation helpers below guarantee these
+ * invariants already.
+ *
+ * @param {unknown} raw Raw trim list (any shape).
+ * @param {number} [durationSec] Video duration; clamps when finite > 0.
+ * @returns {TrimRegion[]}
+ */
+export function normalizeTrims(raw, durationSec) {
+  if (!Array.isArray(raw)) return [];
+  /** @type {TrimRegion[]} */
+  const out = [];
+  for (const item of raw) {
+    const r = item && typeof item === 'object' ? /** @type {Partial<TrimRegion>} */ (item) : null;
+    if (!r) continue;
+    let a = clampTrimBound(Number(r.start), durationSec);
+    let b = clampTrimBound(Number(r.end), durationSec);
+    if (b < a) [a, b] = [b, a];
+    if (b - a < MIN_TRIM_SPAN_S) continue;
+    out.push({ id: Number(r.id), start: a, end: b });
+  }
+  out.sort((x, y) => x.start - y.start || x.end - y.end);
+  return out;
+}
+
+/**
+ * Insert a new trim region [start, end] (REQ-125). PURE. The bounds are
+ * ordered + clamped into [0, durationSec]; the region is then CLIPPED against
+ * the existing non-overlapping regions (an edge crossing into a region is
+ * pulled back to that region's boundary). A degenerate result — fully covered
+ * by an existing region, or span < MIN_TRIM_SPAN_S after clipping — is
+ * REJECTED: the input array is returned unchanged.
+ *
+ * @param {TrimRegion[]} trims Current regions (sorted, non-overlapping).
+ * @param {number} id Id for the new region (caller's nextTrimId counter).
+ * @param {number} start Requested start, seconds.
+ * @param {number} end Requested end, seconds.
+ * @param {number} [durationSec] Video duration; clamps when finite > 0.
+ * @returns {TrimRegion[]} New sorted array, or the INPUT array on rejection
+ *     (identity signals rejection so the caller can skip its id bump).
+ */
+export function addTrim(trims, id, start, end, durationSec) {
+  const source = Array.isArray(trims) ? trims : [];
+  let a = clampTrimBound(start, durationSec);
+  let b = clampTrimBound(end, durationSec);
+  if (b < a) [a, b] = [b, a];
+  // Clip against every existing region (sorted, disjoint): pull the left edge
+  // right past a region covering it, the right edge left past one covering it.
+  for (const r of source) {
+    if (r.end <= a || r.start >= b) continue; // disjoint
+    if (r.start <= a && r.end >= b) return source; // fully covered → reject
+    if (r.start > a && r.end < b) return source; // interior region would be swallowed → reject
+    if (r.start <= a) a = r.end;
+    else if (r.end >= b) b = r.start;
+  }
+  if (!(b - a >= MIN_TRIM_SPAN_S)) return source; // clipped to death / too small
+  /** @type {TrimRegion[]} */
+  const next = source.filter((r) => r.end <= a || r.start >= b);
+  next.push({ id: Number(id), start: a, end: b });
+  next.sort((x, y) => x.start - y.start || x.end - y.end);
+  return next;
+}
+
+/**
+ * Move one edge of a trim region (REQ-125 edge drag). PURE. The new value is
+ * clamped into [0, durationSec], kept clear of the NEIGHBORING regions (never
+ * crossing into them) and never allowed to squeeze the span below
+ * MIN_TRIM_SPAN_S. Unknown id / impossible move → unchanged content.
+ *
+ * @param {TrimRegion[]} trims Current regions (sorted, non-overlapping).
+ * @param {number} id Region id.
+ * @param {'start'|'end'} which Which edge moves.
+ * @param {number} value Requested edge time, seconds.
+ * @param {number} [durationSec] Video duration; clamps when finite > 0.
+ * @returns {TrimRegion[]} New array; unchanged content when nothing moved.
+ */
+export function moveTrimEdge(trims, id, which, value, durationSec) {
+  const source = Array.isArray(trims) ? trims : [];
+  const index = source.findIndex((r) => r.id === id);
+  if (index < 0) return source.slice();
+  const region = source[index];
+  const v = clampTrimBound(value, durationSec);
+  if (which === 'start') {
+    const prevEnd = index > 0 ? source[index - 1].end : 0;
+    const lo = Math.max(prevEnd, 0);
+    const hi = region.end - MIN_TRIM_SPAN_S;
+    if (lo > hi) return source.slice(); // no legal start position
+    const a = Math.min(Math.max(v, lo), hi);
+    return source.map((r) => (r.id === id ? { ...r, start: a } : r));
+  }
+  const nextStart = index < source.length - 1 ? source[index + 1].start : Infinity;
+  const hi = Math.min(nextStart, Number.isFinite(durationSec) && durationSec > 0 ? durationSec : Infinity);
+  const lo = region.start + MIN_TRIM_SPAN_S;
+  if (lo > hi) return source.slice(); // no legal end position
+  const b = Math.min(Math.max(v, lo), hi);
+  return source.map((r) => (r.id === id ? { ...r, end: b } : r));
+}
+
+/**
+ * Remove one trim region by id. PURE.
+ *
+ * @param {TrimRegion[]} trims Current regions.
+ * @param {number} id Region id.
+ * @returns {TrimRegion[]} New array without the region (unknown id → same
+ *     content, new array).
+ */
+export function removeTrim(trims, id) {
+  return (Array.isArray(trims) ? trims : []).filter((r) => r.id !== id);
+}
+
+/**
+ * Is time `t` inside any trim region? PURE — inclusive bounds (mirrors
+ * redact.tracksAt span semantics).
+ *
+ * @param {TrimRegion[]} trims Current regions.
+ * @param {number} t Time in seconds.
+ * @returns {boolean}
+ */
+export function trimsAt(trims, t) {
+  if (!Number.isFinite(t)) return false;
+  return (Array.isArray(trims) ? trims : []).some((r) => t >= r.start && t <= r.end);
+}
+
+/**
+ * Complement of the trim regions over [0, durationSec] — THE export contract
+ * (REQ-126): the segments that survive into the output, in order. Touching
+ * complement segments (two regions sharing a boundary) are merged. PURE.
+ *
+ * The exporter keeps its own private copy of this rule (keptSegmentsOf —
+ * importing main.js from exporter.js would be a module cycle); the unit
+ * suites pin both sides to the same fixtures.
+ *
+ * @param {TrimRegion[]} trims Current regions (sorted, non-overlapping).
+ * @param {number} durationSec Video duration (> 0).
+ * @returns {Array<{start: number, end: number}>} Kept segments; empty trims
+ *     → [{start: 0, end: durationSec}]; full coverage → [].
+ */
+export function keptSegments(trims, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return [];
+  /** @type {Array<{start: number, end: number}>} */
+  const kept = [];
+  let cursor = 0;
+  for (const r of Array.isArray(trims) ? trims : []) {
+    const a = Math.min(Math.max(r.start, 0), dur);
+    const b = Math.min(Math.max(r.end, 0), dur);
+    if (b <= cursor) continue; // region fully before the cursor
+    if (a > cursor) kept.push({ start: cursor, end: Math.min(a, dur) });
+    cursor = Math.max(cursor, b);
+    if (cursor >= dur) break;
+  }
+  if (cursor < dur) kept.push({ start: cursor, end: dur });
+  return kept;
+}
+
 /**
  * Diagnostics snapshot → the compact one-line JSON body of the `[diag]`
  * console line (v1.8.2). PURE. Keys emit in DIAG_KEY_ORDER first (unknown /
@@ -1317,6 +1500,10 @@ export async function mountApp(
     timeline: $('timeline'),
     chips: $('track-chips'),
     playhead: $('playhead'),
+    // v1.15.0 REQ-125: the greyed trim-region layer inside #timeline-track
+    // (rendered by the editor; null-guarded — missing markup disables only
+    // the trim UI).
+    trimRegions: $('trim-regions'),
     trackList: $('track-list'),
     trackListEmpty: $('track-list-empty'),
     analyzeButton: /** @type {HTMLButtonElement | null} */ ($('analyze-button')),
@@ -1362,6 +1549,9 @@ export async function mountApp(
     // separately) and the wiring must degrade to a no-op.
     bulkSolid: /** @type {HTMLButtonElement | null} */ ($('bulk-solid')),
     bulkPixelate: /** @type {HTMLButtonElement | null} */ ($('bulk-pixelate')),
+    // v1.15.0 REQ-125: ✂ trim-mode toggle (tracks panel header, next to
+    // #bulk-style). Null-guarded like the bulk buttons.
+    trimToggle: /** @type {HTMLButtonElement | null} */ ($('trim-toggle')),
   };
 
   // --- REQ-004 secure-context gate: block everything, wire nothing --------
@@ -1384,6 +1574,8 @@ export async function mountApp(
    *          caps: import('./types.js').CapabilityReport | null,
    *          tracks: import('./types.js').Track[], gen: number,
    *          manualNextId: number, objectUrl: string | null,
+   *          trims: Array<{id: number, start: number, end: number}>,
+   *          nextTrimId: number, trimMode: boolean,
    *          settings: {minSizePx: number, downscale: 'full' | '1080p' | '720p'}}} */
   const app = {
     step: 'gate',
@@ -1395,6 +1587,13 @@ export async function mountApp(
     gen: 0, // generation counter — stale async completions are dropped
     manualNextId: 1,
     objectUrl: null,
+    // v1.15.0 REQ-125: trim regions marked for deletion (sorted,
+    // non-overlapping, min span MIN_TRIM_SPAN_S via the pure helpers) + the
+    // ✂ trim-mode toggle + the region id counter (same pattern as
+    // manualNextId). Reset on file load + Clear.
+    trims: [],
+    nextTrimId: 1,
+    trimMode: false,
     // v1.12.0: the analyze-pass settings driven by the #size-filter button
     // group (REQ-120) and #downscale-select (REQ-117); reset per file load
     // and Clear (resetSizeFilter / resetDownscale).
@@ -1588,6 +1787,26 @@ export async function mountApp(
     if (els.trackListEmpty) els.trackListEmpty.hidden = app.tracks.length > 0;
   }
 
+  /**
+   * v1.15.0 REQ-125: mirror app.trimMode onto the ✂ toggle (aria-pressed +
+   * accent class). Null-guarded — the markup may not carry the button.
+   */
+  function syncTrimToggleUi() {
+    if (!els.trimToggle) return;
+    els.trimToggle.setAttribute('aria-pressed', app.trimMode ? 'true' : 'false');
+    els.trimToggle.classList.toggle('trim-mode', app.trimMode);
+  }
+
+  /** Reset ALL trim state (v1.15.0): regions, id counter, trim mode + the
+   * toggle UI. Shared by file load and Clear — a new video never inherits the
+   * previous one's delete marks. */
+  function resetTrimState() {
+    app.trims = [];
+    app.nextTrimId = 1;
+    app.trimMode = false;
+    syncTrimToggleUi();
+  }
+
   function resetAnalyzeUi() {
     setBar(els.analyzeBar, 0);
     if (els.analyzeFrames) els.analyzeFrames.textContent = '0';
@@ -1666,6 +1885,9 @@ export async function mountApp(
   // a file actually loads.
   resetSizeFilter();
   resetDownscale();
+  // v1.15.0 REQ-125: the ✂ toggle starts unpressed (aria-pressed is honest
+  // from the first paint; resetTrimState re-syncs it on load/clear).
+  syncTrimToggleUi();
   hideFileInfo();
   showIntake();
   void sweepExportTemps();
@@ -1837,6 +2059,8 @@ export async function mountApp(
     app.caps = null;
     app.tracks = [];
     app.manualNextId = 1;
+    // v1.15.0 REQ-125: trim regions + trim mode never survive a file load.
+    resetTrimState();
     // Transport resets with the fresh file (load() resets playbackRate; the
     // selectors must follow or they would show a rate the video no longer
     // has). v1.8.0: a fresh file also starts UNMUTED — mute is a per-video
@@ -2058,6 +2282,8 @@ export async function mountApp(
     app.caps = null;
     app.tracks = [];
     app.manualNextId = 1;
+    // v1.15.0 REQ-125: trim regions + trim mode reset with everything else.
+    resetTrimState();
 
     // (d) OPFS hygiene (REQ-019/AC-14 on explicit clear).
     void purgeExportTemps();
@@ -2101,6 +2327,17 @@ export async function mountApp(
   }
 
   els.clearFile?.addEventListener('click', () => clearAll());
+
+  // --- v1.15.0 REQ-125: ✂ trim-mode toggle (tracks panel header) ------------
+  // Toggling only flips app.trimMode (+ aria-pressed/accent via
+  // syncTrimToggleUi) and refreshes the editor so the timeline cursor and the
+  // region layer react. Region add/move/remove ride the editor hooks above.
+  els.trimToggle?.addEventListener('click', () => {
+    app.trimMode = !app.trimMode;
+    syncTrimToggleUi();
+    editor?.refresh();
+  });
+  blurAfterClick(els.trimToggle);
   blurAfterClick(els.clearFile);
 
   // --- Keyboard (design-direction: space / ← / → / B in review states) ------
@@ -2196,6 +2433,7 @@ export async function mountApp(
         chipsContainer: els.chips,
         playhead: els.playhead,
         trackList: els.trackList,
+        trimRegions: els.trimRegions, // v1.15.0 REQ-125
       },
       {
         // v1.8.1: `duration` is the editor's fallback when video.duration is
@@ -2205,6 +2443,10 @@ export async function mountApp(
           tracks: app.tracks,
           currentTime: els.video?.currentTime ?? 0,
           duration: app.meta?.duration,
+          // v1.15.0 REQ-125: trim regions + trim mode drive the greyed
+          // timeline overlays, the crosshair cursor and the preview veil.
+          trims: app.trims,
+          trimMode: app.trimMode,
         }),
         onToggle: (trackId, enabled) => {
           app.tracks = toggleTrack(app.tracks, trackId, enabled);
@@ -2235,6 +2477,26 @@ export async function mountApp(
           // REQ-101: per-track redaction style; the shared burn-in seam
           // (redact.pixelateFrame) dispatches on it for preview AND export.
           app.tracks = setTrackStyle(app.tracks, trackId, style);
+          refreshTrackUi();
+        },
+        // v1.15.0 REQ-125 trim hooks: drag-create, edge drag, per-region ✕ /
+        // double-click removal — all through the pure helpers (sorted,
+        // non-overlapping, min-span, duration-clamped), then a UI refresh.
+        // addTrim returns the INPUT array on rejection: the identity check
+        // keeps nextTrimId monotonic across rejected inserts.
+        onTrimAdd: (start, end) => {
+          const next = addTrim(app.trims, app.nextTrimId, start, end, app.meta?.duration);
+          if (next === app.trims) return; // rejected (overlap/full coverage/too small)
+          app.trims = next;
+          app.nextTrimId += 1;
+          refreshTrackUi();
+        },
+        onTrimEdge: (id, which, t) => {
+          app.trims = moveTrimEdge(app.trims, id, which, t, app.meta?.duration);
+          refreshTrackUi();
+        },
+        onTrimRemove: (id) => {
+          app.trims = removeTrim(app.trims, id);
           refreshTrackUi();
         },
         // v1.7.0: the timeline scrub thumb's ←/→ keys step ±1 frame through the
@@ -2685,6 +2947,9 @@ export async function mountApp(
       settings: {
         quality: els.quality?.value === 'balanced' ? 'balanced' : 'high',
         outputMode: 'stream', // OPFS staging; delivery handled inside runExport
+        // v1.15.0 REQ-126: trim regions to EXCLUDE from the output. Empty
+        // array → the exporter takes the unchanged single-pass path.
+        trims: app.trims.slice(),
       },
       signal: ctl.signal,
       onProgress: (p) => {

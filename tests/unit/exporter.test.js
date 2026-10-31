@@ -28,6 +28,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // mediabunny mock — pinned to the 1.63.0 surface exporter.js may use
 // ---------------------------------------------------------------------------
 
+/** Mutable fixture state shared with the mock classes (v1.15.0 trim path). */
+const { mbState } = vi.hoisted(() => ({
+  mbState: {
+    // Concat-phase fixtures: packets the mock segment Inputs yield.
+    segVideoPackets: [],
+    segAudioPackets: [],
+    segVideoCodec: 'avc',
+    segAudioCodec: 'aac',
+    segVideoDecoderConfig: { codec: 'avc1.640028' },
+    segAudioDecoderConfig: { codec: 'mp4a.40.2' },
+    // When true, the video packet source throws from its 2nd add (mux fail).
+    failVideoAdd: false,
+    // Every mock Output / Input instance, for assertions.
+    outputs: [],
+    inputs: [],
+  },
+}));
+
 vi.mock('mediabunny', () => {
   class ConversionCanceledError extends Error {
     constructor(message) {
@@ -62,7 +80,23 @@ vi.mock('mediabunny', () => {
     constructor(options) {
       this.format = options.format;
       this.target = options.target;
+      this.tracks = [];
+      this.started = false;
+      this.finalized = false;
+      mbState.outputs.push(this);
     }
+    addVideoTrack(source, metadata) {
+      this.tracks.push({ source, metadata, type: 'video' });
+      return { source };
+    }
+    addAudioTrack(source, metadata) {
+      this.tracks.push({ source, metadata, type: 'audio' });
+      return { source };
+    }
+    hasEnoughTracks() { return this.tracks.length > 0; }
+    async start() { this.started = true; }
+    async finalize() { this.finalized = true; }
+    async cancel() {}
   }
   class Conversion {
     constructor(options) {
@@ -75,6 +109,73 @@ vi.mock('mediabunny', () => {
     }
     static init = vi.fn(async (options) => new Conversion(options));
   }
+  // --- v1.15.0 trim-concat surface ---
+  const ALL_FORMATS = ['ALL_FORMATS'];
+  class BlobSource {
+    constructor(blob) { this.blob = blob; }
+  }
+  class EncodedPacket {
+    constructor(data, type, timestamp, duration, sequenceNumber, byteLength, sideData) {
+      this.data = data;
+      this.type = type;
+      this.timestamp = timestamp;
+      this.duration = duration;
+      this.sequenceNumber = sequenceNumber;
+      this.byteLength = byteLength;
+      this.sideData = sideData;
+    }
+  }
+  class EncodedVideoPacketSource {
+    constructor(codec) {
+      this.codec = codec;
+      this.added = [];
+    }
+    async add(packet) {
+      if (mbState.failVideoAdd && this.added.length >= 1) {
+        throw new Error('sink exploded');
+      }
+      this.added.push(packet);
+    }
+  }
+  class EncodedAudioPacketSource {
+    constructor(codec) {
+      this.codec = codec;
+      this.added = [];
+    }
+    async add(packet) {
+      this.added.push(packet);
+    }
+  }
+  class EncodedPacketSink {
+    constructor(track) { this.track = track; }
+    async *packets() {
+      for (const p of this.track.__packets ?? []) yield p;
+    }
+  }
+  /** Segment reopen (concat phase): yields the fixture tracks. */
+  class Input {
+    constructor(options) {
+      this.options = options;
+      mbState.inputs.push(this);
+    }
+    async getPrimaryVideoTrack() {
+      return {
+        codec: mbState.segVideoCodec,
+        getDecoderConfig: async () => mbState.segVideoDecoderConfig,
+        __packets: mbState.segVideoPackets,
+      };
+    }
+    async getAudioTracks() {
+      return [
+        {
+          codec: mbState.segAudioCodec,
+          getDecoderConfig: async () => mbState.segAudioDecoderConfig,
+          __packets: mbState.segAudioPackets,
+        },
+      ];
+    }
+    dispose() {}
+  }
   const canEncodeVideo = vi.fn();
   return {
     Conversion,
@@ -86,6 +187,13 @@ vi.mock('mediabunny', () => {
     Output,
     Quality,
     canEncodeVideo,
+    ALL_FORMATS,
+    BlobSource,
+    EncodedPacket,
+    EncodedVideoPacketSource,
+    EncodedAudioPacketSource,
+    EncodedPacketSink,
+    Input,
   };
 });
 
@@ -253,6 +361,12 @@ beforeEach(() => {
   mb.Conversion.init.mockClear();
   mb.canEncodeVideo.mockReset();
   mb.canEncodeVideo.mockResolvedValue(true);
+  // v1.15.0 mock-state reset (concat fixtures + instance logs).
+  mbState.segVideoPackets = [];
+  mbState.segAudioPackets = [];
+  mbState.failVideoAdd = false;
+  mbState.outputs.length = 0;
+  mbState.inputs.length = 0;
 });
 
 afterEach(() => {
@@ -1045,5 +1159,248 @@ describe('discardExportTemp — non-NotFound failure classification', () => {
       stage: 'io',
       message: 'Could not delete exports/x.mp4.',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.15.0 REQ-126 — trimmed export (multi-segment + packet concat)
+// ---------------------------------------------------------------------------
+
+/** Source input for the trimmed path: computeDuration + display size probe. */
+function fakeTrimInput({ duration = 10, w = 320, h = 180 } = {}) {
+  return {
+    computeDuration: vi.fn(async () => duration),
+    getPrimaryVideoTrack: vi.fn(async () => ({
+      getDisplayWidth: async () => w,
+      getDisplayHeight: async () => h,
+    })),
+  };
+}
+
+/** Raw packet fixture (EncodedPacket-shaped, pre-shift). */
+function rawPacket(t, kind = 'key') {
+  return {
+    data: u8(1, 2, 3),
+    type: kind,
+    timestamp: t,
+    duration: 1 / 30,
+    sequenceNumber: 7,
+    byteLength: 3,
+    sideData: undefined,
+  };
+}
+
+describe('runExport — trimmed path (v1.15.0 REQ-126)', () => {
+  /** Script every Conversion (segment + none) with the default happy path. */
+  function scriptAllConversions() {
+    const conversions = [];
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      const conv = new mb.Conversion(opts);
+      conversions.push(conv);
+      scriptExecute(conv, {});
+      return conv;
+    });
+    return conversions;
+  }
+
+  it('no trims → single conversion, no `trim` key, no concat inputs', async () => {
+    const opfs = installOpfs();
+    const conversions = scriptAllConversions();
+    await runExport({
+      input: fakeInput(),
+      tracks: [makeTrack()],
+      settings: { ...bufferSettings, trims: [] },
+    });
+    expect(mb.Conversion.init).toHaveBeenCalledTimes(1);
+    expect('trim' in conversions[0].opts).toBe(false);
+    expect(mbState.inputs).toHaveLength(0); // no segment reopen
+    expect(opfs.removed).toHaveLength(0); // buffer mode → no temps at all
+  });
+
+  it('2 trims → 3 kept segments → 3 Conversions with the right trim windows', async () => {
+    installOpfs();
+    const conversions = scriptAllConversions();
+    // trims [{2,4},{6,7}] on 10 s → kept [{0,2},{4,6},{7,10}].
+    const result = await runExport({
+      input: fakeTrimInput({ duration: 10 }),
+      tracks: [makeTrack()],
+      settings: {
+        ...bufferSettings,
+        trims: [
+          { id: 1, start: 2, end: 4 },
+          { id: 2, start: 6, end: 7 },
+        ],
+      },
+    });
+    expect(mb.Conversion.init).toHaveBeenCalledTimes(3);
+    expect(conversions.map((c) => c.opts.trim)).toEqual([
+      { start: 0, end: 2 },
+      { start: 4, end: 6 },
+      { start: 7, end: 10 },
+    ]);
+    // Same burn-in + NO audio options per segment (audio stays packet-copy).
+    for (const conv of conversions) {
+      expect(conv.opts.video.codec).toBe('avc');
+      expect('audio' in conv.opts).toBe(false);
+      expect(typeof conv.opts.video.process).toBe('function');
+    }
+    expect(result.blob).toBeInstanceOf(Blob);
+  });
+
+  it('concat: ONE final output, first-segment decoder meta, packets re-added with shifted timestamps', async () => {
+    installOpfs();
+    scriptAllConversions();
+    // Audio leads with a NEGATIVE priming packet (rebased trim temps) — the
+    // monotonic-key guard must skip it in every segment.
+    mbState.segVideoPackets = [rawPacket(0.5), rawPacket(1.2, 'delta')];
+    // Each reopened segment carries the SAME rebased packet set — like real
+    // trim temps: a negative PRIMING packet (covers the trimmed sliver just
+    // before trim.start) + content near the segment end (0.9863 of ~1.0 s).
+    mbState.segAudioPackets = [rawPacket(-0.0354), rawPacket(0.9863)];
+    // trims [{1,2},{3,4}] on 10 → kept [{0,1},{2,3},{4,10}]. Segment temps are
+    // rebased to ~0 by the trim, so offsets are the running kept duration:
+    // seg1: 0; seg2: 1; seg3: 2.
+    await runExport({
+      input: fakeTrimInput({ duration: 10 }),
+      tracks: [],
+      settings: {
+        ...bufferSettings,
+        trims: [
+          { id: 1, start: 1, end: 2 },
+          { id: 2, start: 3, end: 4 },
+        ],
+      },
+    });
+    // 3 segment Outputs + 1 final Output.
+    expect(mbState.outputs).toHaveLength(4);
+    const final = mbState.outputs[3];
+    expect(final.started).toBe(true);
+    expect(final.finalized).toBe(true);
+    expect(final.tracks.map((t) => t.type)).toEqual(['video', 'audio']);
+    const [videoTrack, audioTrack] = final.tracks;
+    expect(videoTrack.source.codec).toBe('avc');
+    expect(videoTrack.metadata).toEqual({ decoderConfig: { codec: 'avc1.640028' } });
+    expect(audioTrack.source.codec).toBe('aac');
+    expect(audioTrack.metadata).toEqual({ decoderConfig: { codec: 'mp4a.40.2' } });
+    // 3 segments × 2 video packets, timestamps: [0.5,1.2] + [1.5,2.2] + [2.5,3.2].
+    expect(videoTrack.source.added.map((p) => +p.timestamp.toFixed(6))).toEqual([
+      0.5, 1.2, 1.5, 2.2, 2.5, 3.2,
+    ]);
+    // Audio rides the SAME offsets per segment (A/V sync contract); the
+    // negative priming packets are skipped by the monotonic-key guard.
+    expect(audioTrack.source.added.map((p) => +p.timestamp.toFixed(6))).toEqual([
+      0.9863, 1.9863, 2.9863,
+    ]);
+    // The priming packet (−0.0354) never reaches the audio source in any
+    // segment: ts < 0 for seg1, ts ≤ the previous segment's last for the rest.
+    // Packets are FRESH EncodedPacket instances carrying original side data.
+    expect(videoTrack.source.added[0]).toBeInstanceOf(mb.EncodedPacket);
+    expect(videoTrack.source.added[0].sequenceNumber).toBe(7);
+    expect(videoTrack.source.added[0].type).toBe('key');
+  });
+
+  it('success cleans every segment temp (stream mode)', async () => {
+    const opfs = installOpfs();
+    scriptAllConversions();
+    await runExport({
+      input: fakeTrimInput({ duration: 10 }),
+      tracks: [],
+      settings: {
+        outputMode: 'stream',
+        trims: [{ id: 1, start: 2, end: 4 }],
+      },
+    });
+    // 2 kept segments (stream-staged) + 1 final staging; deliver removed the
+    // final temp and the exporter removed both segment temps.
+    expect(opfs.removed).toHaveLength(3);
+    expect(mbState.inputs).toHaveLength(2); // both segments reopened for concat
+  });
+
+  it('concat failure → ExportError("mux") with cause, ALL temps cleaned', async () => {
+    const opfs = installOpfs();
+    scriptAllConversions();
+    mbState.segVideoPackets = [rawPacket(0.5)];
+    mbState.failVideoAdd = true;
+    await expect(
+      runExport({
+        input: fakeTrimInput({ duration: 10 }),
+        tracks: [],
+        settings: {
+          outputMode: 'stream',
+          trims: [{ id: 1, start: 2, end: 4 }],
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'ExportError', stage: 'mux' });
+    // 2 segment temps + 1 final temp, all removed (REQ-021).
+    expect(opfs.removed).toHaveLength(3);
+  });
+
+  it('abort between segments → ExportError("cancelled"), segment temps cleaned', async () => {
+    const opfs = installOpfs();
+    const ctl = new AbortController();
+    const conversions = [];
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      const conv = new mb.Conversion(opts);
+      conversions.push(conv);
+      scriptExecute(conv, {});
+      if (conversions.length === 2) ctl.abort(); // die after segment 2
+      return conv;
+    });
+    await expect(
+      runExport({
+        input: fakeTrimInput({ duration: 10 }),
+        tracks: [],
+        settings: {
+          outputMode: 'stream',
+          trims: [
+            { id: 1, start: 1, end: 2 },
+            { id: 2, start: 3, end: 4 },
+            { id: 3, start: 5, end: 6 },
+          ],
+        },
+        signal: ctl.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'ExportError', stage: 'cancelled' });
+    expect(mb.Conversion.init).toHaveBeenCalledTimes(2);
+    expect(opfs.removed).toHaveLength(2);
+  });
+
+  it('every second trimmed → ExportError("io"), nothing exported', async () => {
+    const opfs = installOpfs();
+    scriptAllConversions();
+    await expect(
+      runExport({
+        input: fakeTrimInput({ duration: 10 }),
+        tracks: [],
+        settings: {
+          outputMode: 'stream',
+          trims: [{ id: 1, start: 0, end: 10 }],
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'ExportError', stage: 'io' });
+    expect(opfs.removed).toHaveLength(0); // failed before any staging
+  });
+
+  it('progress crosses the segments (ratio monotonic, ≤ 1)', async () => {
+    installOpfs();
+    scriptAllConversions();
+    const ratios = [];
+    await runExport({
+      input: fakeTrimInput({ duration: 10 }),
+      tracks: [],
+      settings: {
+        ...bufferSettings,
+        trims: [
+          { id: 1, start: 2, end: 4 },
+          { id: 2, start: 6, end: 7 },
+        ],
+      },
+      onProgress: (p) => ratios.push(p.ratio),
+    });
+    expect(ratios.length).toBeGreaterThan(0);
+    for (let i = 1; i < ratios.length; i++) {
+      expect(ratios[i]).toBeGreaterThanOrEqual(ratios[i - 1]);
+    }
+    expect(ratios[ratios.length - 1]).toBeLessThanOrEqual(1);
   });
 });

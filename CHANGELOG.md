@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-10-31
+
+### Added
+- Timeline TRIM (REQ-125): a ✂ Trim toggle (Tracks panel header) activates trim mode — drag anywhere on the timeline to mark regions for deletion. Each region renders as a greyed-out overlay with ✂ marks at its draggable edges and a ✕ (or double-click) to remove; multiple regions are supported, edges never cross a neighbor, and the minimum region is 0.1 s. While the playhead is inside a region the preview frame renders under a grey veil (and skips the pixelation burn — trimmed frames never export).
+- Trimmed export (REQ-126): export excludes every trimmed region — one native mediabunny trim conversion per kept segment (pixelation burn-in per segment, audio packet-copied), then the segments' encoded packets are concatenated into a single file with continuous timestamps and intact A/V sync (no re-encode). With no trims the export path is byte-for-byte unchanged. Progress, cancellation and temp cleanup cover the multi-segment pipeline; all segment temps are removed after delivery.
+
 ## [1.14.1] — 2026-10-31
 
 ### Fixed

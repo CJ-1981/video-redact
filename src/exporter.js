@@ -36,12 +36,29 @@
  * `await source.add(sample); sample.close()`). A returned canvas is wrapped
  * into a fresh VideoSample carrying the source sample's timestamp.
  *
+ * Trimmed export (v1.15.0 REQ-126): with non-empty `settings.trims`, the
+ * export EXCLUDES every trimmed region. One native mediabunny `trim`
+ * Conversion runs per KEPT segment (burn-in applies per segment; audio
+ * packet-copies per segment — same invariants as the single pass), then the
+ * segments' ENCODED packets are concatenated into ONE final Output via
+ * EncodedVideoPacketSource/EncodedAudioPacketSource with shifted timestamps
+ * (no re-encode of already-encoded segments). Segment temps + the final temp
+ * are deleted in every path (REQ-021/AC-14). With no trims the single-pass
+ * path below runs byte-for-byte unchanged.
+ *
  * Depends on: mediabunny Conversion, redact.js, OPFS / File System Access.
  */
 import {
+  ALL_FORMATS,
+  BlobSource,
   BufferTarget,
   Conversion,
   ConversionCanceledError,
+  EncodedAudioPacketSource,
+  EncodedPacket,
+  EncodedPacketSink,
+  EncodedVideoPacketSource,
+  Input,
   Mp4OutputFormat,
   Output,
   Quality,
@@ -424,6 +441,389 @@ async function deliver(staging, blob, settings, bytes, ext, mime) {
   return { blob: safeBlob, handle: null, opfsPath: undefined, bytes };
 }
 
+// ---------------------------------------------------------------------------
+// Trimmed export (v1.15.0 REQ-126)
+// ---------------------------------------------------------------------------
+
+/** Progress split: the per-segment Conversions own 0–0.85, concat 0.85–1. */
+const SEGMENT_PROGRESS_SHARE = 0.85;
+
+/**
+ * Shape-check one raw trim entry (defensive — main.js's pure model guarantees
+ * this, but the settings object crosses a boundary).
+ * @param {unknown} t
+ * @returns {boolean}
+ */
+function isValidTrim(t) {
+  if (!t || typeof t !== 'object') return false;
+  const r = /** @type {{start?: unknown, end?: unknown}} */ (t);
+  return (
+    Number.isFinite(Number(r.start)) &&
+    Number.isFinite(Number(r.end)) &&
+    Number(r.end) > Number(r.start)
+  );
+}
+
+/**
+ * Complement of the trim regions over [0, durationSec] — the kept segments
+ * that survive into the output, in order. Private mirror of main.js's
+ * exported `keptSegments` (importing main.js here would be a module cycle;
+ * the unit suites pin BOTH sides to the same fixtures).
+ *
+ * @param {Array<{start: number, end: number}>} trims Sorted, non-overlapping.
+ * @param {number} durationSec Video duration (> 0).
+ * @returns {Array<{start: number, end: number}>} Empty trims → [{0, dur}];
+ *     full coverage → [].
+ */
+function keptSegmentsOf(trims, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return [];
+  /** @type {Array<{start: number, end: number}>} */
+  const kept = [];
+  let cursor = 0;
+  for (const r of Array.isArray(trims) ? trims : []) {
+    const a = Math.min(Math.max(Number(r.start), 0), dur);
+    const b = Math.min(Math.max(Number(r.end), 0), dur);
+    if (b <= cursor) continue;
+    if (a > cursor) kept.push({ start: cursor, end: Math.min(a, dur) });
+    cursor = Math.max(cursor, b);
+    if (cursor >= dur) break;
+  }
+  if (cursor < dur) kept.push({ start: cursor, end: dur });
+  return kept;
+}
+
+/**
+ * Throw ExportError('cancelled') when the abort signal has fired.
+ * @param {AbortSignal} [signal]
+ * @returns {void}
+ */
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw new ExportError('cancelled', 'Export cancelled.');
+  }
+}
+
+/**
+ * Concatenate the encoded packets of the per-segment temp files into ONE
+ * final output (REQ-126): each segment temp is reopened as a mediabunny
+ * Input, its video/audio packets are pulled in decode order via
+ * EncodedPacketSink, timestamp-shifted by the running kept duration (the
+ * segment temps are rebased to ~0 by mediabunny's trim — see the loop below)
+ * and re-added through ONE EncodedVideoPacketSource / EncodedAudioPacketSource
+ * pair — no re-encode of already-encoded segments. The FIRST segment's
+ * decoder config rides the track metadata (the container needs it exactly
+ * once; segments written by the same Conversion ladder share the codec).
+ * A/V sync holds because video and audio packets of a segment get the SAME
+ * offset. Delivery + final-temp cleanup ride the shared deliver().
+ *
+ * @param {Awaited<ReturnType<typeof stageInOpfs>>[]} segStagings
+ * @param {typeof LADDER[number]} rung
+ * @param {object} settings runExport settings.
+ * @param {Array<{start: number, end: number}>} kept Kept segments (same
+ *     order as segStagings).
+ * @param {(progress: {ratio: number, bytesWritten?: number}) => void} [onProgress]
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<{blob?: Blob, handle: object|null, opfsPath: undefined, bytes: number}>}
+ * @throws {ExportError} 'mux' for any assembly failure (terminal — no ladder
+ *     retry), 'cancelled' on abort; delivery errors propagate as-is.
+ */
+async function concatKeptSegments(segStagings, rung, settings, kept, onProgress, signal) {
+  /** @type {object[]} */
+  const segInputs = [];
+  /** @type {{kind:'buffer', target: BufferTarget} | Awaited<ReturnType<typeof stageInOpfs>> | null} */
+  let finalStaging = null;
+  /** @type {{writable?: WritableStream<object>, bytes?: () => number, ioError?: () => unknown} | null} */
+  let stream = null;
+  try {
+    for (const staging of segStagings) {
+      const file = await staging.handle.getFile();
+      segInputs.push(new Input({ source: new BlobSource(file), formats: ALL_FORMATS }));
+    }
+
+    // Codec identity + decoder configs come from the FIRST segment.
+    const firstVideo = await segInputs[0].getPrimaryVideoTrack();
+    if (!firstVideo) throw new Error('The first kept segment has no video track.');
+    const videoConfig = await firstVideo.getDecoderConfig();
+    const firstAudio = (await segInputs[0].getAudioTracks())[0] ?? null;
+    const audioConfig = firstAudio ? await firstAudio.getDecoderConfig() : null;
+
+    if (settings.outputMode === 'buffer') {
+      finalStaging = { kind: 'buffer', target: new BufferTarget() };
+    } else {
+      finalStaging = await stageInOpfs(rung.ext);
+    }
+    /** @type {Output} */
+    let output;
+    if (finalStaging.kind === 'buffer') {
+      output = new Output({ format: new rung.Format(), target: finalStaging.target });
+    } else {
+      stream = await countingWritable(finalStaging.handle);
+      output = new Output({
+        format: new rung.Format(),
+        target: new StreamTarget(stream.writable, { chunked: true }),
+      });
+    }
+
+    const videoSource = new EncodedVideoPacketSource(firstVideo.codec);
+    output.addVideoTrack(
+      videoSource,
+      videoConfig ? { decoderConfig: videoConfig } : undefined,
+    );
+    /** @type {EncodedAudioPacketSource | null} */
+    let audioSource = null;
+    if (firstAudio) {
+      audioSource = new EncodedAudioPacketSource(firstAudio.codec);
+      output.addAudioTrack(
+        audioSource,
+        audioConfig ? { decoderConfig: audioConfig } : undefined,
+      );
+    }
+    await output.start();
+
+    /**
+     * Shift one packet's timestamps by `offset` — a fresh EncodedPacket
+     * (constructor: data, type, timestamp, duration, sequenceNumber?,
+     * byteLength?, sideData?) carrying the ORIGINAL side data.
+     * @param {object} packet
+     * @param {number} offset
+     * @returns {EncodedPacket}
+     */
+    const shifted = (packet, offset) =>
+      new EncodedPacket(
+        packet.data,
+        packet.type,
+        packet.timestamp + offset,
+        packet.duration,
+        packet.sequenceNumber,
+        packet.byteLength,
+        packet.sideData,
+      );
+
+    let cumulative = 0;
+    const total = segInputs.length;
+    // Per-track guard state for the muxer's monotonic key-packet rule
+    // (muxer.js: a key packet's timestamp must not undercut the largest
+    // timestamp before the previous key packet). Segment temps are REBASED by
+    // the trim region to start at ~0 (verified against mediabunny 1.63.0:
+    // transcode AND copy tracks alike), so the concat offset is simply the
+    // running kept duration — uniform per segment, which preserves A/V sync.
+    // Copied audio may carry a few PRIMING packets with slightly negative
+    // rebased timestamps (they cover the trimmed region just before
+    // trim.start) — those are skipped so each seam stays monotonic.
+    let lastVideoTs = -Infinity;
+    let lastAudioTs = -Infinity;
+    for (let i = 0; i < total; i++) {
+      throwIfAborted(signal);
+      const seg = kept[i];
+      const offset = cumulative;
+      const vin = i === 0 ? firstVideo : await segInputs[i].getPrimaryVideoTrack();
+      if (!vin) throw new Error(`Kept segment ${i} has no video track.`);
+      const vsink = new EncodedPacketSink(vin);
+      for await (const packet of vsink.packets()) {
+        const ts = packet.timestamp + offset;
+        // Delta (B-frame) packets may legally dip below the running max —
+        // only KEY packets are guarded (mirrors the muxer rule exactly).
+        if (packet.type === 'key' && (ts <= lastVideoTs || ts < 0)) continue;
+        lastVideoTs = Math.max(lastVideoTs, ts);
+        await videoSource.add(shifted(packet, offset));
+      }
+      const ain = firstAudio
+        ? i === 0
+          ? firstAudio
+          : ((await segInputs[i].getAudioTracks())[0] ?? null)
+        : null;
+      if (ain && audioSource) {
+        const asink = new EncodedPacketSink(ain);
+        for await (const packet of asink.packets()) {
+          const ts = packet.timestamp + offset;
+          if (packet.type === 'key' && (ts <= lastAudioTs || ts < 0)) continue;
+          lastAudioTs = Math.max(lastAudioTs, ts);
+          await audioSource.add(shifted(packet, offset));
+        }
+      }
+      cumulative += seg.end - seg.start;
+      onProgress?.({
+        ratio: SEGMENT_PROGRESS_SHARE + ((i + 1) / total) * (1 - SEGMENT_PROGRESS_SHARE),
+        bytesWritten: stream ? stream.bytes() : undefined,
+      });
+    }
+
+    await output.finalize();
+    const bytes = finalStaging.kind === 'buffer'
+      ? Number(finalStaging.target.buffer?.byteLength ?? 0)
+      : stream ? stream.bytes() : 0;
+    const blob = finalStaging.kind === 'buffer'
+      ? new Blob([finalStaging.target.buffer ?? new Uint8Array(0)], { type: rung.mime })
+      : await finalStaging.handle.getFile();
+    return await deliver(finalStaging, blob, settings, bytes, rung.ext, rung.mime);
+  } catch (err) {
+    if (finalStaging) await removeTemp(finalStaging);
+    if (err instanceof ExportError) throw err;
+    if (err instanceof ConversionCanceledError || signal?.aborted) {
+      throw new ExportError('cancelled', 'Export cancelled.', { cause: err });
+    }
+    // REQ-021: a concat/mux failure is terminal — the encoded segments are
+    // fine, retrying the ladder cannot help. Never a silent corrupt file.
+    throw new ExportError(
+      'mux',
+      `Concatenating the kept segments failed: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  } finally {
+    for (const input of segInputs) {
+      try {
+        input.dispose?.();
+      } catch {
+        /* already disposed / racing teardown — the drop is what matters */
+      }
+    }
+  }
+}
+
+/**
+ * Multi-segment trimmed export (v1.15.0 REQ-126): one trimmed Conversion per
+ * kept segment (burn-in + packet-copied audio, identical settings to the
+ * single pass), then packet concatenation into one output. Same ladder
+ * semantics as the single pass: a segment ENCODE failure advances the rung;
+ * mux/io/cancelled are terminal. ALL temps (segments + final) are removed on
+ * every failure path (REQ-021/AC-14).
+ *
+ * @param {object} args
+ * @param {object} args.input Mediabunny `Input`.
+ * @param {import('./types.js').Track[]} args.tracks Enabled tracks (burn-in).
+ * @param {object} args.settings runExport settings (trims already validated).
+ * @param {Array<{start: number, end: number}>} args.trims Validated trims.
+ * @param {(progress: {ratio: number, bytesWritten?: number}) => void} [args.onProgress]
+ * @param {AbortSignal} [args.signal]
+ * @param {typeof LADDER} args.rungs Viable ladder rungs.
+ * @param {number} args.width Display px.
+ * @param {number} args.height Display px.
+ * @returns {Promise<{blob?: Blob, handle: object|null, opfsPath: undefined, bytes: number}>}
+ */
+async function runTrimmedExport({
+  input,
+  tracks,
+  settings,
+  trims,
+  onProgress,
+  signal,
+  rungs,
+  width,
+  height,
+}) {
+  let durationSec = 0;
+  try {
+    durationSec = await input.computeDuration();
+  } catch (err) {
+    throw new ExportError('io', 'Could not read the source duration for the trimmed export.', { cause: err });
+  }
+  if (!(Number.isFinite(durationSec) && durationSec > 0)) {
+    throw new ExportError('io', 'The source duration is unusable for the trimmed export.');
+  }
+  const kept = keptSegmentsOf(trims, durationSec);
+  if (kept.length === 0) {
+    throw new ExportError('io', 'Every part of the video is trimmed — there is nothing left to export.');
+  }
+
+  /** @type {unknown} */
+  let lastError = null;
+  let lastStage = rungs[0].stage;
+
+  for (const rung of rungs) {
+    /** @type {Awaited<ReturnType<typeof stageInOpfs>>[]} */
+    const segStagings = [];
+    try {
+      // -- Phase 1: one trimmed Conversion per kept segment ----------------
+      let bytesSoFar = 0;
+      for (let i = 0; i < kept.length; i++) {
+        throwIfAborted(signal);
+        const seg = kept[i];
+        const staging = await stageInOpfs(rung.ext);
+        segStagings.push(staging);
+        const segStream = await countingWritable(staging.handle);
+        const output = new Output({
+          format: new rung.Format(),
+          target: new StreamTarget(segStream.writable, { chunked: true }),
+        });
+        const burn = createBurnIn(tracks, width, height, rung.stage);
+        // Same invariant as the single pass: NO `audio` options and NO `copy`
+        // override — the audio track packet-copies within the segment window
+        // (REQ-017 / AC-08).
+        const conversion = await Conversion.init({
+          input,
+          output,
+          trim: { start: seg.start, end: seg.end },
+          video: {
+            codec: rung.codec,
+            quality: mapQuality(settings.quality),
+            hardwareAcceleration: rung.hw,
+            process: burn.process,
+          },
+        });
+        if (!conversion.isValid) {
+          const reasons = (conversion.discardedTracks ?? [])
+            .map((d) => `${d.track?.type ?? 'track'}: ${d.reason}`)
+            .join('; ');
+          throw new Error(`Conversion configuration is invalid (${reasons || 'no usable tracks'}).`);
+        }
+        const segIndex = i;
+        conversion.onProgress = (ratio) => {
+          onProgress?.({
+            ratio:
+              ((segIndex + (Number.isFinite(ratio) ? ratio : 0)) / kept.length) *
+              SEGMENT_PROGRESS_SHARE,
+            bytesWritten: bytesSoFar + segStream.bytes(),
+          });
+        };
+        const onAbort = () => void conversion.cancel();
+        signal?.addEventListener('abort', onAbort, { once: true });
+        try {
+          await conversion.execute();
+        } finally {
+          signal?.removeEventListener('abort', onAbort);
+        }
+        bytesSoFar += segStream.bytes();
+      }
+
+      // -- Phase 2: concat the encoded packets into ONE output -------------
+      const result = await concatKeptSegments(
+        segStagings,
+        rung,
+        settings,
+        kept,
+        onProgress,
+        signal,
+      );
+      // Delivered — the per-segment temps are dead weight now. removeTemp is
+      // best-effort and never masks the result.
+      for (const staging of segStagings) await removeTemp(staging);
+      return result;
+    } catch (err) {
+      for (const staging of segStagings) await removeTemp(staging);
+
+      if (err instanceof ExportError) {
+        // Our own classification (mux / io / cancelled / burn-in): final.
+        throw err;
+      }
+      if (err instanceof ConversionCanceledError || signal?.aborted) {
+        throw new ExportError('cancelled', 'Export cancelled.', { cause: err });
+      }
+      // Encode/pipeline failure at runtime — try the next rung (AC-12).
+      lastError = err;
+      lastStage = rung.stage;
+    }
+  }
+
+  throw new ExportError(
+    lastStage,
+    `All encode paths failed (deepest: ${lastStage}): ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }. No output file was delivered.`,
+    { cause: lastError },
+  );
+}
+
 /**
  * Run the burn-in export.
  *
@@ -433,11 +833,15 @@ async function deliver(staging, blob, settings, bytes, ext, mime) {
  *     burn-in asks redact.tracksAt(t) per sample; disabled tracks are ignored.
  * @param {{quality?: 'high'|'balanced', outputMode?: 'stream'|'buffer',
  *           saveHandle?: object, forceWebM?: boolean,
- *           dashcamMode?: boolean, padSeconds?: number}} [opts.settings]
+ *           dashcamMode?: boolean, padSeconds?: number,
+ *           trims?: Array<{id?: number, start: number, end: number}>}} [opts.settings]
  *     `outputMode` 'stream' (default) stages into OPFS via chunked
  *     StreamTarget; 'buffer' holds the whole file in a BufferTarget (small
  *     clips only). `saveHandle` delivers directly into that handle. See
- *     probeLadder for `forceWebM`.
+ *     probeLadder for `forceWebM`. v1.15.0 REQ-126: non-empty `trims` switches
+ *     to the multi-segment trimmed export — the output contains only the kept
+ *     segments, concatenated with continuous timestamps; empty/undefined
+ *     trims run the single-pass path byte-for-byte unchanged.
  * @param {(progress: {ratio: number, bytesWritten?: number}) => void} [opts.onProgress]
  *     `ratio` 0–1 from Conversion.onProgress; `bytesWritten` is the staged
  *     byte count so far (stream mode).
@@ -463,6 +867,24 @@ export async function runExport(opts) {
 
   const { width, height } = await primaryFrameSize(input);
   const rungs = await probeLadder(width, height, settings);
+
+  // v1.15.0 REQ-126: non-empty trims → multi-segment export (kept segments
+  // only, concatenated). Empty/undefined → the single-pass path below runs
+  // byte-for-byte unchanged (regression-critical).
+  const trims = (Array.isArray(settings.trims) ? settings.trims : []).filter(isValidTrim);
+  if (trims.length > 0) {
+    return runTrimmedExport({
+      input,
+      tracks,
+      settings,
+      trims,
+      onProgress,
+      signal,
+      rungs,
+      width,
+      height,
+    });
+  }
 
   /** @type {unknown} */
   let lastError = null;

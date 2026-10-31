@@ -6,6 +6,15 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-10-31
+
+### Added
+- Draggable width handle between the capability panel and the preview (desktop): the panel's right edge follows the pointer (240–480px, keyboard + double-click reset, like the other handles).
+
+### Fixed
+- Right-rail width handle moved in the opposite direction: the handle is the rail's LEFT edge and now follows the pointer (drag right = narrower rail). Direction pinned by unit tests.
+- Compare-thresholds now sits UNDER the Tracks panel (stacked), per field request.
+
 ## [1.13.1] — 2026-10-31
 
 ### Fixed

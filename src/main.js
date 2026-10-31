@@ -490,6 +490,25 @@ export function nextRailWidth(px, deltaPx) {
  * @returns {number} Unclamped new rail width.
  */
 export function dragRailWidth(startX, clientX, startW) {
+  // v1.14.0 direction fix: the handle is the rail's LEFT edge — the edge
+  // follows the pointer, so dragging RIGHT (clientX > startX) makes the rail
+  // NARROWER (startW - dx). The old `+ dx` read inverted on screen.
+  const dx = Number.isFinite(clientX) && Number.isFinite(startX) ? clientX - startX : 0;
+  const from = Number.isFinite(startW) ? startW : DEFAULT_RAIL_WIDTH_PX;
+  return from - dx;
+}
+
+/**
+ * Pointer-drag width for the INTAKE-panel handle (v1.14.0): the handle is
+ * the intake panel's RIGHT edge — dragging RIGHT (clientX > startX) widens
+ * the panel (startW + dx). PURE; the caller clamps via clampIntakeWidth.
+ *
+ * @param {number} startX Pointer X at drag start (CSS px).
+ * @param {number} clientX Current pointer X (CSS px).
+ * @param {number} startW Intake width at drag start (CSS px).
+ * @returns {number} Unclamped new intake width.
+ */
+export function dragIntakeWidth(startX, clientX, startW) {
   const dx = Number.isFinite(clientX) && Number.isFinite(startX) ? clientX - startX : 0;
   const from = Number.isFinite(startW) ? startW : DEFAULT_RAIL_WIDTH_PX;
   return from + dx;
@@ -1333,6 +1352,7 @@ export async function mountApp(
     // its use — the markup may not carry the element (Agent-HTML lands
     // separately) and the wiring must degrade to a no-op.
     railResize: /** @type {HTMLElement | null} */ ($('rail-resize')),
+    intakeResize: /** @type {HTMLElement | null} */ ($('intake-resize')),
     themeToggle: /** @type {HTMLButtonElement | null} */ ($('theme-toggle')),
     fileInfo: $('file-info'),
     sizeFilter: $('size-filter'),
@@ -3291,8 +3311,8 @@ export async function mountApp(
     });
     railHandle.addEventListener('pointermove', (e) => {
       if (!railDrag) return;
-      // The handle is the rail's LEFT edge: drag RIGHT = wider rail
-      // (dragRailWidth is direction-pinned by unit test).
+      // The handle is the rail's LEFT edge: it follows the pointer —
+      // drag RIGHT = narrower rail (direction-pinned by unit test).
       applyRailWidth(dragRailWidth(railDrag.startX, e.clientX, railDrag.startW));
     });
     const endRailDrag = (e) => {
@@ -3332,6 +3352,73 @@ export async function mountApp(
     // Initial application so the CSS var exists even before the first drag
     // (a no-op when index.html already carries the same default).
     applyRailWidth(railWidth);
+  }
+
+  // --- v1.14.0: intake-panel resize handle (capability column width) ------
+  const intakeHandle = els.intakeResize;
+  if (intakeHandle) {
+    let intakeW = DEFAULT_RAIL_WIDTH_PX;
+    /** Clamp + set --intake-w on #app-main (consumed by #intake-panel). */
+    function applyIntakeWidth(px) {
+      intakeW = clampRailWidth(px);
+      // Defensive guards: fake elements in tests (and detached nodes) may
+      // lack parentElement/style.setProperty/setAttribute.
+      const host = els.intakePanel?.parentElement ?? doc.body;
+      if (host?.style && typeof host.style.setProperty === 'function') {
+        host.style.setProperty('--intake-w', `${intakeW}px`);
+      }
+      if (typeof intakeHandle.setAttribute === 'function') {
+        intakeHandle.setAttribute('aria-valuenow', String(intakeW));
+      }
+    }
+    let intakeDrag = /** @type {{startX: number, startW: number} | null} */ (null);
+    intakeHandle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      intakeDrag = { startX: e.clientX, startW: intakeW };
+      try {
+        intakeHandle.setPointerCapture(e.pointerId);
+      } catch {
+        /* detached handle — capture is best-effort */
+      }
+      e.preventDefault();
+    });
+    intakeHandle.addEventListener('pointermove', (e) => {
+      if (!intakeDrag) return;
+      // The handle is the intake panel's RIGHT edge: it follows the pointer —
+      // drag RIGHT = wider panel (direction-pinned by unit test).
+      applyIntakeWidth(dragIntakeWidth(intakeDrag.startX, e.clientX, intakeDrag.startW));
+    });
+    const endIntakeDrag = (e) => {
+      if (!intakeDrag) return;
+      intakeDrag = null;
+      try {
+        intakeHandle.releasePointerCapture(e.pointerId);
+      } catch {
+        /* never captured or already released */
+      }
+      applyIntakeWidth(intakeW); // drag end: final clamp
+    };
+    intakeHandle.addEventListener('pointerup', endIntakeDrag);
+    intakeHandle.addEventListener('pointercancel', endIntakeDrag);
+    intakeHandle.addEventListener('pointerup', () => {
+      if (intakeHandle.blur) intakeHandle.blur();
+    });
+    intakeHandle.addEventListener('dblclick', () => {
+      applyIntakeWidth(DEFAULT_RAIL_WIDTH_PX);
+    });
+    intakeHandle.addEventListener('keydown', (e) => {
+      const step =
+        e.key === 'ArrowRight'
+          ? RAIL_WIDTH_STEP_PX
+          : e.key === 'ArrowLeft'
+            ? -RAIL_WIDTH_STEP_PX
+            : 0;
+      if (step === 0) return;
+      e.preventDefault();
+      e.stopPropagation(); // the handle's arrows must not also seek the video
+      applyIntakeWidth(nextRailWidth(intakeW, step));
+    });
+    applyIntakeWidth(intakeW);
   }
 
   return null;

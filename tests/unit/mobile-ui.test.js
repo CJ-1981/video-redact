@@ -233,16 +233,17 @@ function cssRule(selector) {
 // ---------------------------------------------------------------------------
 
 describe('v1.12.0 REQ-116: #below-timeline bottom flow (compare + tracks)', () => {
-  it('the section sits AFTER #timeline and holds #threshold-compare before #track-list', () => {
+  it('the section sits AFTER #timeline and holds #tracks-panel before #threshold-compare (v1.14.0: compare under tracks)', () => {
     const timeline = HTML.indexOf('id="timeline"');
     const below = HTML.indexOf('id="below-timeline"');
     expect(timeline).toBeGreaterThan(-1);
     expect(below).toBeGreaterThan(timeline);
     const region = HTML.slice(below, HTML.indexOf('</main>', below));
     const compare = region.indexOf('id="threshold-compare"');
-    const tracks = region.indexOf('id="track-list"');
+    const tracks = region.indexOf('id="tracks-panel"');
     expect(compare).toBeGreaterThan(-1);
-    expect(tracks).toBeGreaterThan(compare);
+    expect(tracks).toBeGreaterThan(-1);
+    expect(tracks).toBeLessThan(compare); // tracks first, compare UNDER tracks
   });
 
   it('moved OUT of the right rail — the rail keeps only sensitivity + export', () => {
@@ -280,11 +281,11 @@ describe('v1.12.0 REQ-116: #below-timeline bottom flow (compare + tracks)', () =
     expect(cssRule('.threshold-panel')).toContain('flex: 0 0 240px');
   });
 
-  it('side by side on wide screens (grid-column 1/-1, two columns), stacked ≤820px', () => {
+  it('stacked single column (v1.14.0: compare under tracks), grid-column 1/-1', () => {
     const rule = cssRule('#below-timeline');
     expect(rule).toContain('grid-column: 1 / -1');
-    expect(rule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/);
-    expect(mediaBlock()).toMatch(/#below-timeline\s*{[^}]*grid-template-columns:\s*1fr/);
+    expect(rule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)/);
+    expect(rule).not.toMatch(/minmax\(0, 1fr\)\s+minmax\(0, 1fr\)/);
   });
 });
 
@@ -325,7 +326,7 @@ describe('v1.12.0 REQ-118: #rail-resize separator', () => {
 
   it('mobile ≤820px: handle hidden, workspace back to a single column', () => {
     const block = mediaBlock();
-    expect(block).toMatch(/#rail-resize\s*{[^}]*display:\s*none/);
+    expect(block).toMatch(/#rail-resize,\s*#intake-resize\s*{[^}]*display:\s*none/);
     expect(block).toMatch(/#workspace\s*{[^}]*grid-template-columns:\s*1fr/);
   });
 });

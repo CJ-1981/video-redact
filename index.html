@@ -231,7 +231,7 @@
        (a hard 320px flex-basis = fixed HEIGHT in the mobile column layout,
        which left a large empty area under a collapsed Capability report). */
     #intake-panel.intake-mode { flex: 1 1 100%; }
-    #intake-panel.workspace-mode { flex: 0 0 320px; }
+    #intake-panel.workspace-mode { flex: 0 0 var(--intake-w, 320px); }
     #workspace {
       flex: 1;
       min-width: 0;
@@ -250,6 +250,15 @@
        between the preview column and the side panel. Drag ↔ / ArrowLeft /
        ArrowRight adjust --rail-w; double-click resets (wired by main.js). ── */
     #rail-resize {
+      align-self: stretch;
+      width: 10px;
+      border-radius: 5px;
+      cursor: col-resize;
+      touch-action: none;
+      user-select: none;
+      background: transparent;
+    }
+    #intake-resize {
       align-self: stretch;
       width: 10px;
       border-radius: 5px;
@@ -533,7 +542,9 @@
     #below-timeline {
       grid-column: 1 / -1;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      /* v1.14.0: compare thresholds now sits UNDER tracks (user request) —
+         stacked single column. */
+      grid-template-columns: minmax(0, 1fr);
       gap: 16px;
       align-items: start;
       min-width: 0;
@@ -914,7 +925,7 @@
          report left a huge empty area before the preview on phones. */
       #app-main { align-items: flex-start; }
       #workspace { grid-template-columns: 1fr; }
-      #rail-resize { display: none; } /* no draggable split on one column */
+      #rail-resize, #intake-resize { display: none; } /* no draggable splits on one column */
       #below-timeline { grid-template-columns: 1fr; } /* REQ-116: stacked */
       #app-header { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
       #stepper { flex-wrap: wrap; }
@@ -1000,7 +1011,8 @@
     </section>
 
     <!-- Steps ②–④: preview + timeline (left), pass/track/export rail (right) -->
-    <div id="workspace" hidden>
+
+    <div id="intake-resize" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Adjust capability panel width" aria-valuemin="240" aria-valuemax="480" aria-valuenow="320"></div>    <div id="workspace" hidden>
       <section id="stage-column">
         <div id="preview-stage">
           <video id="preview-video" playsinline></video>
@@ -1161,6 +1173,19 @@
         <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
              decode + one inference per model, five fixed-level panels.
              Clicking a panel applies that level to BOTH sensitivity sliders. -->
+
+        <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
+          <summary>Tracks</summary>
+          <!-- v1.13.0: bulk style buttons — IDs are the contract (main.js
+               wires the clicks); segmented styling mirrors #size-filter. -->
+          <div id="bulk-style" role="group" aria-label="Set all tracks style">
+            <button id="bulk-solid" type="button">All solid</button>
+            <button id="bulk-pixelate" type="button">All pixelate</button>
+          </div>
+          <ul id="track-list"></ul>
+          <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
+        </details>
+
         <details id="threshold-compare" class="panel-collapse" open role="group" aria-label="Single-frame threshold comparison">
           <summary>Compare thresholds</summary>
           <label class="slider-row" for="compare-time">
@@ -1173,18 +1198,6 @@
           <button id="compare-button" type="button">Compare thresholds</button>
           <p id="compare-status" class="stat-line" role="status"></p>
           <div id="threshold-panels"></div>
-        </details>
-
-        <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
-          <summary>Tracks</summary>
-          <!-- v1.13.0: bulk style buttons — IDs are the contract (main.js
-               wires the clicks); segmented styling mirrors #size-filter. -->
-          <div id="bulk-style" role="group" aria-label="Set all tracks style">
-            <button id="bulk-solid" type="button">All solid</button>
-            <button id="bulk-pixelate" type="button">All pixelate</button>
-          </div>
-          <ul id="track-list"></ul>
-          <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
         </details>
       </section>
     </div>

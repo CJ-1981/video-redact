@@ -1411,13 +1411,20 @@ describe('main-wiring: rail width model (v1.12.0 REQ-118)', () => {
     expect(main.nextRailWidth(320, NaN)).toBe(320); // dead step
   });
 
-  it('dragRailWidth pins the direction: pointer RIGHT widens the rail', () => {
-    expect(main.dragRailWidth(300, 420, 320)).toBe(440);
-    expect(main.dragRailWidth(300, 250, 320)).toBe(270); // left = narrower
+  it('dragRailWidth pins the direction: the rail LEFT edge follows the pointer (pointer RIGHT = narrower rail)', () => {
+    expect(main.dragRailWidth(300, 420, 320)).toBe(200); // right = narrower (v1.14.0 fix)
+    expect(main.dragRailWidth(300, 250, 320)).toBe(370); // left = wider
     // Degradations: non-finite pointer coords → no movement; bad start → default.
     expect(main.dragRailWidth(NaN, 420, 320)).toBe(320);
     expect(main.dragRailWidth(300, NaN, 320)).toBe(320);
-    expect(main.dragRailWidth(300, 420, NaN)).toBe(440); // default 320 + 120
+    expect(main.dragRailWidth(300, 420, NaN)).toBe(200); // default 320 - 120
+  });
+
+  it('dragIntakeWidth pins the direction: the intake RIGHT edge follows the pointer (pointer RIGHT = wider panel)', () => {
+    expect(main.dragIntakeWidth(300, 420, 320)).toBe(440);
+    expect(main.dragIntakeWidth(300, 250, 320)).toBe(270); // left = narrower
+    expect(main.dragIntakeWidth(NaN, 420, 320)).toBe(320);
+    expect(main.dragIntakeWidth(300, NaN, 320)).toBe(320);
   });
 });
 
@@ -1597,9 +1604,9 @@ describe('mountApp (v1.12.0): theme, rail, size filter, cancel, file-info', () =
         button: 0, clientX: 300, pointerId: 1, preventDefault: () => {},
       });
       handle.dispatch('pointermove', { clientX: 420, pointerId: 1 });
-      expect(workspace.style['--rail-w']).toBe('440px'); // drag right = wider
-      handle.dispatch('pointermove', { clientX: 900, pointerId: 1 });
-      expect(workspace.style['--rail-w']).toBe('480px'); // clamped
+      expect(workspace.style['--rail-w']).toBe('240px'); // v1.14.0: right = narrower, floor-clamped at 240
+      handle.dispatch('pointermove', { clientX: -100, pointerId: 1 });
+      expect(workspace.style['--rail-w']).toBe('480px'); // far left = clamped wider
       handle.dispatch('pointerup', { pointerId: 1 });
       expect(workspace.style['--rail-w']).toBe('480px'); // final clamp holds
 

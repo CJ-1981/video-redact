@@ -1541,7 +1541,11 @@ export async function mountApp(
   function showIntake() {
     if (els.intakePanel) {
       els.intakePanel.hidden = false;
-      els.intakePanel.style.flex = '1 1 100%';
+      // v1.13.1: class-based sizing (inline flex-basis broke mobile — see
+      // index.html .intake-mode/.workspace-mode).
+      els.intakePanel.classList.add('intake-mode');
+      els.intakePanel.classList.remove('workspace-mode');
+      els.intakePanel.style.flex = '';
     }
     if (els.dropZone) els.dropZone.hidden = false;
     if (els.workspace) els.workspace.hidden = true;
@@ -1551,7 +1555,9 @@ export async function mountApp(
   function showWorkspace() {
     if (els.intakePanel) {
       els.intakePanel.hidden = false;
-      els.intakePanel.style.flex = '0 0 320px';
+      els.intakePanel.classList.add('workspace-mode');
+      els.intakePanel.classList.remove('intake-mode');
+      els.intakePanel.style.flex = '';
     }
     if (els.dropZone) els.dropZone.hidden = true;
     if (els.workspace) els.workspace.hidden = false;

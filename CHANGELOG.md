@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.13.1] — 2026-10-31
+
+### Fixed
+- Mobile: collapsing the Capability report left a large empty area underneath — the intake panel carried a hard 320px flex-basis (meant for the desktop side-column) which becomes a fixed HEIGHT in the mobile column layout. Replaced inline flex styles with viewport-aware CSS classes (content-sized on phones; desktop unchanged).
+
 ## [1.13.0] — 2026-10-31
 
 ### Added

@@ -227,6 +227,11 @@
        body instead of overflowing through the footer. */
     #app-main { flex: 1 1 auto; min-height: 0; display: flex; padding: 20px; }
     #intake-panel { width: 100%; display: flex; flex-direction: column; gap: 16px; }
+    /* v1.13.1: viewport-aware sizing replaces the old inline `style.flex`
+       (a hard 320px flex-basis = fixed HEIGHT in the mobile column layout,
+       which left a large empty area under a collapsed Capability report). */
+    #intake-panel.intake-mode { flex: 1 1 100%; }
+    #intake-panel.workspace-mode { flex: 0 0 320px; }
     #workspace {
       flex: 1;
       min-width: 0;
@@ -901,6 +906,13 @@
          column makes that inline basis a height, so the workspace takes the
          full width without fighting the runtime style. */
       #app-main { flex-direction: column; padding: 12px; }
+      /* v1.13.1: content-sized intake column on phones — no fixed basis. */
+      #intake-panel.workspace-mode,
+      #intake-panel.intake-mode { flex: 0 0 auto; }
+      /* v1.13.1: without this the intake panel stretches to the workspace's
+         full height (flex align-items default) — a collapsed Capability
+         report left a huge empty area before the preview on phones. */
+      #app-main { align-items: flex-start; }
       #workspace { grid-template-columns: 1fr; }
       #rail-resize { display: none; } /* no draggable split on one column */
       #below-timeline { grid-template-columns: 1fr; } /* REQ-116: stacked */

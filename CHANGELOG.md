@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.17.1] — 2026-10-31
+
+### Fixed
+- Export resolution and audio removal did not apply (field report with an affected export): clicking Export called resetExportUi() FIRST, which reset the resolution select to Full and re-checked audio BEFORE the settings were read — every export ran with defaults. Choices now reset only on file load and Clear; an export click keeps them. Verified with a real-browser probe: a 2560×1440 source exported at 720p with audio off produces exactly 1280×720 with 0 audio tracks (tools/debug-export-settings.mjs).
+
 ## [1.17.0] — 2026-10-31
 
 ### Fixed

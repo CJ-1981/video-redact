@@ -2081,10 +2081,18 @@ export async function mountApp(
   }
 
   function resetExportUi() {
+    // v1.17.1 CRITICAL FIX: this used to ALSO reset the export choices
+    // (resolution → 'full', audio → checked) — and startExport() calls it
+    // BEFORE reading the settings, so every export ran with defaults no
+    // matter what the user chose (field report: resolution/audio removal
+    // 'not working'). Choices now reset ONLY on file load and Clear via
+    // resetExportChoices(); an export click keeps them.
     setBar(els.exportBar, 0);
     if (els.exportStatus) els.exportStatus.textContent = '';
-    // v1.16.0: resolution + audio reset with every export-panel reset
-    // (file load, Clear, re-export).
+  }
+
+  /** Choice reset (resolution + audio) — file load and Clear ONLY. */
+  function resetExportChoices() {
     if (els.exportResolution) els.exportResolution.value = 'full';
     if (els.exportAudio) els.exportAudio.checked = true;
   }
@@ -2342,6 +2350,7 @@ export async function mountApp(
     syncSpeedSelects();
     resetAnalyzeUi();
     resetExportUi();
+    resetExportChoices(); // v1.17.1: file load resets the export choices
     refreshTrackUi();
     // v1.12.0: the REQ-117/120 analyze settings reset per file (consistent
     // with the other analyze-panel controls), and the REQ-119 file-info
@@ -2582,6 +2591,7 @@ export async function mountApp(
     hideFileInfo(); // v1.12.0 REQ-119: the file-info block goes away
     resetAnalyzeUi();
     resetExportUi();
+    resetExportChoices(); // v1.17.1: Clear resets the export choices
     if (els.trackList) els.trackList.textContent = '';
     if (els.chips) els.chips.replaceChildren();
     if (els.playhead) els.playhead.style.left = '0%';

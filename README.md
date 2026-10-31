@@ -12,10 +12,10 @@ Local, in-browser video redaction: faces and license plates are detected automat
 | --- | --- |
 | ![Review — pixel-truthful preview, transport bar, timeline chips, track list](docs/screenshots/03-review.png) | ![Export — download started, all steps done](docs/screenshots/04-export.png) |
 
-1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export) and the footer version badge (`v1.10.0 · built <build date>`).
-2. **Capability** — after opening a file, the app reports container/codec/resolution/fps/audio plus decode and encode probes *before* Analyze is offered. Undecodable files are blocked here, with guidance. The Analyze panel carries the detection-sensitivity sliders and a single-frame "Compare thresholds" preview.
-3. **Review** — detected tracks render as colored chips over their redacted span; the preview is pixel-truthful (it draws the exact redaction the export burns in). Toggle any track, switch its style (pixelate/solid), trim its span, scrub with the transport bar, or draw manual regions (`B`).
-4. **Export** — re-encoded H.264/MP4 (VP9/WebM fallback) with redactions burned in; original audio is packet-copied bit-for-bit.
+1. **Landing** — drop a video; the four-step stepper (Capability check → Analyze → Review → Export), the header actions (light/dark theme toggle, Save/Load project) and the footer version badge (`v1.17.0 · built <build date>`).
+2. **Capability** — after opening a file, the app reports container/codec/resolution/fps/audio plus decode and encode probes *before* Analyze is offered. Undecodable files are blocked here, with guidance. The Analyze panel carries the detection-sensitivity sliders, a minimum-object-size filter (Any / ≥24 / ≥48 / ≥96 px), a detection-detail selector (analysis speed only), and a single-frame "Compare thresholds" preview.
+3. **Review** — detected tracks render as colored chips over their redacted span; the preview is pixel-truthful (it draws the exact redaction the export burns in). Toggle any track, switch its style (pixelate/solid, or restyle all at once), trim its span, scrub with the transport bar, draw manual regions (`B`), or mark trim regions (✂) to delete from the export.
+4. **Export** — re-encoded H.264/MP4 (VP9/WebM fallback) with redactions burned in; original audio is packet-copied bit-for-bit, or dropped entirely via the "Include audio" checkbox; export resolution is Full (match source) / 1080p / 720p.
 
 ## Quick start
 
@@ -35,12 +35,15 @@ Then open <http://localhost:8000/dist/index.html>. Or skip the local setup entir
 
 - **Ingest** — demuxes `.mov` / MP4 / WebM locally via mediabunny 1.63.0, including iPhone HEVC `.mov` (hardware decode required) and ProRes via the `@mediabunny/prores` extension. Metadata and rotation are reported before any processing.
 - **Capability gate** — per-track decode probes (`track.canDecode()`) and export-encode probes (WebCodecs `isConfigSupported`, H.264 level ladder + VP9) are shown as a report; undecodable input is blocked with actionable guidance and no partial processing.
-- **Detection** — YuNet face detection (2023mar, 640×640 letterboxed) and YOLOv9-t-640 end-to-end license-plate detection, running via onnxruntime-web 1.31.1 with a WebGPU → WASM execution-provider ladder. "Dashcam mode" adds a second tiled pass for small/distant faces and plates — tiles split along the dominant axis, so portrait frames tile vertically into stacked rows. Face/plate confidence thresholds are configurable via sensitivity sliders, and a single-frame comparison shows five fixed threshold levels side by side before you commit to a full analysis.
+- **Detection** — YuNet face detection (2023mar, 640×640 letterboxed) and YOLOv9-t-640 end-to-end license-plate detection, running via onnxruntime-web 1.31.1 with a WebGPU → WASM execution-provider ladder. "Dashcam mode" adds a second tiled pass for small/distant faces and plates — tiles split along the dominant axis, so portrait frames tile vertically into stacked rows. Face/plate confidence thresholds are configurable via sensitivity sliders, and a single-frame comparison shows five fixed threshold levels side by side before you commit to a full analysis — the comparison honors your dashcam-mode, minimum-object-size and detection-detail settings, so panels show what a real analyze would find.
 - **Tracking** — detections are linked into persistent labeled tracks ("Face #1", "Plate #4") with IoU-gated association and a constant-velocity Kalman filter; gaps are interpolated, and every span is padded ±5 frame periods and dilated 15% (7.5% per side) so no unredacted frame of a detected object survives (privacy-critical AC-05).
 - **Review** — timeline chips with draggable edge handles, per-track redact/keep-visible toggles, and a per-track redaction style (pixelate or solid black), plus a visible draggable scrub handle on the timeline (drag it to scrub — reliably with a desktop mouse too — tap the track to jump, arrow-key steppable when focused). The timeline, scrub handle and Space playback are live the moment a video is loaded — before any analysis — and manual regions drawn pre-analysis are preserved through it. The scrub thumb follows playback even where the frame loop never fires (a `timeupdate` fallback carries it), keyboard shortcuts keep working after clicking any control, and editor mount/tick failures stay isolated (a readable toast — the rest of the app keeps working). Manual regions drawn on the video (`B`) span the whole clip by default and are trimmed via chip edges or per-track start/end inputs. The preview is pixel-truthful (preview and export share the same render code path) with a transport bar (frame stepping, 0.25×–4× speed, audio mute mirrored into the enlarged-preview controls), fullscreen/enlarge mode with auto-hiding overlay controls, and a draggable preview-height handle.
-- **Trim (v1.15.0)** — toggle ✂ Trim and drag on the timeline to mark regions for deletion: greyed-out overlays with draggable ✂ edges, multiple regions supported, and the export ships only the kept segments concatenated with continuous timestamps (no re-encode; no trims → unchanged single-pass export).
+- **Trim (v1.15.0–v1.15.2)** — toggle ✂ Trim (timeline area) and drag on the timeline to mark regions for deletion: greyed-out overlays with draggable ✂ edges, multiple regions supported, and the export ships only the kept segments concatenated with continuous timestamps (no re-encode; no trims → unchanged single-pass export). Analysis skips frames inside trim regions entirely — large trims make the detect pass proportionally faster and keep ghost tracks out of the list.
+- **Pixelation strength (v1.17.0)** — Fine / Normal / Coarse / Max block-size multiplier (×1–×4; Normal doubles the original block size), applied identically in preview and export.
+- **Project save/load (v1.17.0)** — 💾 Save project downloads a `.vrproj` (JSON: settings, trim regions, tracks incl. manual regions, video identity — no video bytes); 📂 Load project restores it, re-associating the video file with readable mismatch warnings and typed errors for corrupt projects.
+- **Workspace layout (v1.11.0–v1.14.0)** — keyboard transport (`←`/`→` jump ±5 s, `Shift+←/→` frame-step, `F` fullscreen/enlarge, `M` mute, `Space` play/pause, `B` draw box), light theme via a header toggle (persisted), file-info block above the capability report, optional analysis downscale (Full / 1080p / 720p) for faster 4K passes, bulk "All solid" / "All pixelate" restyle buttons, collapsible panels, the Models panel under the footer, compare-thresholds + track list stacked below the timeline, a "Use preview time" button in the compare panel, and draggable resize handles for the preview-stage height, the right rail width, and the intake-panel width (keyboard + double-click reset on each).
 - **Mobile** — at viewport widths ≤ 820 px the app collapses to a single column with ≥ 40 px touch targets; timeline chip-edge grab zones widen on touch pointers and tap-to-seek fires on pointerup (works on iOS Safari/WebKit).
-- **Export** — every frame is decoded, redactions burned into the pixels, and the video re-encoded (H.264/MP4 primary → software H.264 → VP9/WebM fallback ladder); audio packets are copied without re-encoding (AAC → MP4, Opus/Vorbis → WebM). Output streams to disk-backed storage (OPFS / File System Access) with progress and cancellation.
+- **Export** — every frame is decoded, redactions burned into the pixels, and the video re-encoded (H.264/MP4 primary → software H.264 → VP9/WebM fallback ladder); audio packets are copied without re-encoding (AAC → MP4, Opus/Vorbis → WebM) or dropped entirely. Export resolution (Full / 1080p / 720p) scales the burn-in canvas, redaction boxes and encoder hints together. Output streams to disk-backed storage (OPFS / File System Access) with progress and cancellation.
 - **Clear** — the header "✕ Clear" button (styled red as a destructive action) aborts any in-flight pass, unloads the video (blob URL, decoder, export temps) and resets every panel to the landing view; the model cache and your preview-stage height survive.
 
 ## Privacy
@@ -85,7 +88,7 @@ npm run dev           # static server on 127.0.0.1:8000 (no-store; serves src/ E
 npm test              # vitest unit suite (node environment)
 npm run test:coverage # v8 coverage; >= 85% line gate on the 8 logic modules
 npm run test:e2e      # Playwright, Chromium, serial workers (needs: npx playwright install chromium)
-npm run build         # tools/inline.mjs -> single-file dist/index.html (~200 KiB)
+npm run build         # tools/inline.mjs -> single-file dist/index.html (~281 KiB)
 npm run lint          # eslint (flat config)
 npm run typecheck     # tsc --noEmit (checkJs over JSDoc types)
 npm run gate          # lint && typecheck && test && build
@@ -93,18 +96,19 @@ npm run gate          # lint && typecheck && test && build
 
 - **Layout** — `index.html` (dev shell: importmap pins, CSP, UI), `src/` (one module per pipeline stage; JSDoc-typed via `src/types.js`), `tools/` (dev server, inliner, fixture/screenshot/debug scripts), `tests/unit/`, `tests/e2e/`, `tests/fixtures/`, `docs/screenshots/`.
 - **Single-file build** — `tools/inline.mjs` bundles `src/main.js` with esbuild (CDN bare specifiers stay external and resolve through the dist importmap), inlines the bundle into `index.html`, stamps `__APP_VERSION__`/`__BUILD_DATE__`, and fails the build if any `src/` reference leaks.
-- **Testing** — TDD per module: pure logic (tracker, redact geometry, timeline model, detector decode, exporter ladder) is unit-tested in node with seams/mocks; the browser stack (decode, inference, export burn-in) is covered by Playwright end-to-end tests (5 spec files, incl. an auto-detect journey with a real YuNet detection and an offline-models run).
-- **Specs** — requirements and architecture live under `.moai/specs/SPEC-VID-001/` (base app) and `.moai/specs/SPEC-VID-002/` (review UX & manual redaction amendments, v1.1.0–v1.5.0).
+- **Testing** — TDD per module: pure logic (tracker, redact geometry + strength, timeline model incl. trims, detector decode, exporter ladder + geometry scaling, project serialize/parse) is unit-tested in node with seams/mocks; the browser stack (decode, inference, export burn-in) is covered by Playwright end-to-end tests (5 spec files, incl. an auto-detect journey with a real YuNet detection and an offline-models run).
+- **Specs** — requirements and architecture live under `.moai/specs/SPEC-VID-001/` (base app) and `.moai/specs/SPEC-VID-002/` (review UX & manual redaction amendments, v1.1.0–v1.17.0, REQ-101…130).
 
 ## Versioning
 
-Current version: **1.10.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.10.0 · built <date>`) and in the console at boot; with `?debug=1` every diagnostic line also carries the running bundle identity. Dev mode (unbuilt) shows `dev build (unbuilt)`.
+Current version: **1.17.0** (see [CHANGELOG.md](CHANGELOG.md)). The version lives in `package.json` (single source of truth); `npm run build` stamps it — with the build date (UTC calendar date of the build) — into the dist bundle. At runtime it appears in the footer badge (`v1.17.0 · built <date>`) and in the console at boot; with `?debug=1` every diagnostic line also carries the running bundle identity. Dev mode (unbuilt) shows `dev build (unbuilt)`.
 
 ## Known limitations (v1)
 
-- Pixelate and solid black are the only redaction styles (no blur).
+- Pixelate and solid black are the only redaction styles (no blur) — pixelation *strength* (v1.17.0) varies the block size, not the style.
 - No plate OCR / character reading and no face recognition — detection + redaction only.
-- No audio redaction or audio editing; audio is copied as-is.
+- No partial audio editing; the audio track is copied as-is or dropped whole (v1.16.0 "Include audio" checkbox) — no per-region audio redaction.
 - iPhone HDR/Dolby Vision footage exports tone-mapped to SDR (warned in the UI).
 - One file per session — no batch processing.
+- A saved `.vrproj` project holds settings/tracks/trims and video identity only — the video file itself is re-associated on load, not embedded.
 - Pixelation is obfuscation, not cryptography (the app says so; the minimum block-size rule keeps regions practically unreadable).

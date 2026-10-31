@@ -228,11 +228,6 @@ function cssRule(selector) {
   return '';
 }
 
-/** All id="…" values inside a source slice, in order. */
-function idsIn(slice) {
-  return [...slice.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
-}
-
 // ---------------------------------------------------------------------------
 // v1.12.0 REQ-116: below-timeline bottom flow
 // ---------------------------------------------------------------------------
@@ -401,21 +396,8 @@ describe('v1.12.0: panel markup + styling contracts', () => {
     expect(rule).toMatch(/grid-template-columns:\s*max-content 1fr/);
   });
 
-  it('REQ-123: #model-attribution moved into the intake column, right after #cap-report', () => {
-    const cap = HTML.indexOf('id="cap-report"');
-    const attribution = HTML.indexOf('id="model-attribution"');
-    const workspace = HTML.indexOf('id="workspace"');
-    expect(attribution).toBeGreaterThan(cap);
-    expect(attribution).toBeLessThan(workspace); // left column, before the workspace
-    // "immediately after": between the two ids there are only cap-report's
-    // own children — no other panel slipped in. (The slice ends where
-    // `id="model-attribution"` starts, so the target id itself is excluded.)
-    expect(idsIn(HTML.slice(cap, attribution))).toEqual([
-      'cap-report',
-      'cap-report-body',
-      'cap-guidance',
-    ]);
-  });
+  // REQ-123 (v1.12.0 placement: intake column) was superseded in v1.13.0 —
+  // #model-attribution moved BELOW the footer; see the v1.13.0 describe.
 });
 
 // ---------------------------------------------------------------------------
@@ -497,5 +479,172 @@ describe('v1.12.0: footer keyboard hints', () => {
   it('replaces the old hint text (manual-box wording gone)', () => {
     expect(hints).not.toContain('draw manual box');
     expect(hints).not.toContain('drag a chip edge to trim');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.13.0 item 1: #model-attribution below the footer
+// ---------------------------------------------------------------------------
+
+describe('v1.13.0: #model-attribution is a full-width section below the footer', () => {
+  it('sits AFTER the </footer> element in DOM order', () => {
+    const footerEnd = HTML.indexOf('</footer>');
+    const attribution = HTML.indexOf('id="model-attribution"');
+    expect(footerEnd).toBeGreaterThan(-1);
+    expect(attribution).toBeGreaterThan(footerEnd);
+  });
+
+  it('no longer lives inside #intake-panel', () => {
+    const intake = HTML.slice(
+      HTML.indexOf('id="intake-panel"'),
+      HTML.indexOf('id="workspace"'),
+    );
+    expect(intake).not.toContain('id="model-attribution"');
+  });
+
+  it('keeps the ID contract (main.js populates the <ul> inside it)', () => {
+    const at = HTML.indexOf('id="model-attribution"');
+    const block = HTML.slice(at, HTML.indexOf('</details>', at));
+    expect(block).toContain('<ul>');
+    expect(HTML.split('id="model-attribution"').length - 1).toBe(1);
+  });
+
+  it('carries its own panel chrome CSS (styled like a panel)', () => {
+    const rule = cssRule('#model-attribution');
+    expect(rule).toContain('background: var(--bg-panel)');
+    expect(rule).toContain('border: 1px solid var(--line)');
+    expect(rule).toContain('border-radius: var(--radius)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.13.0 item 2: #bulk-style segmented buttons in #tracks-panel
+// ---------------------------------------------------------------------------
+
+describe('v1.13.0: #bulk-style bulk track-style buttons', () => {
+  const trackStart = HTML.indexOf('id="tracks-panel"');
+  const trackBlock = HTML.slice(trackStart, HTML.indexOf('</details>', trackStart));
+
+  it('lives inside #tracks-panel, above #track-list', () => {
+    expect(trackBlock).toContain('id="bulk-style"');
+    expect(trackBlock.indexOf('id="bulk-style"')).toBeLessThan(trackBlock.indexOf('id="track-list"'));
+  });
+
+  it('exposes the two contract button IDs with the right labels', () => {
+    const group = HTML.slice(
+      HTML.indexOf('id="bulk-style"'),
+      HTML.indexOf('</div>', HTML.indexOf('id="bulk-style"')),
+    );
+    expect(group).toContain('id="bulk-solid"');
+    expect(group).toContain('id="bulk-pixelate"');
+    expect(group).toContain('All solid');
+    expect(group).toContain('All pixelate');
+    expect(group).toContain('role="group"');
+    expect(group).toContain('aria-label="Set all tracks style"');
+    expect(HTML.split('id="bulk-solid"').length - 1).toBe(1);
+    expect(HTML.split('id="bulk-pixelate"').length - 1).toBe(1);
+  });
+
+  it('is styled like the size-btn segmented control (joined, small, subtle)', () => {
+    const rule = cssRule('#bulk-style button');
+    expect(rule).toContain('flex: 1 1 0');
+    expect(rule).toContain('margin-left: -1px');
+    expect(rule).toContain('border-radius: 0');
+    expect(cssRule('#bulk-style')).toContain('display: flex');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.13.0 item 3: collapsible panels (native details.panel-collapse)
+// ---------------------------------------------------------------------------
+
+describe('v1.13.0: collapsible panels (details.panel-collapse, open by default)', () => {
+  // [panel id, summary text] — summary replaces the old h2/h3 heading.
+  const CASES = [
+    ['threshold-compare', 'Compare thresholds'],
+    ['tracks-panel', 'Tracks'],
+    ['sensitivity', 'Detection settings'],
+    ['export-panel', 'Export'],
+    ['model-attribution', 'Models'],
+  ];
+
+  function openTagOf(id) {
+    const at = HTML.indexOf(`id="${id}"`);
+    return HTML.slice(HTML.lastIndexOf('<details', at), HTML.indexOf('>', at) + 1);
+  }
+
+  it.each(CASES)('#%s is a details.panel-collapse with summary "%s"', (id, summaryText) => {
+    const tag = openTagOf(id);
+    expect(tag).toContain('<details');
+    expect(tag).toContain('class="panel-collapse"');
+    expect(tag).toMatch(/\bopen\b/);
+    const summary = HTML.slice(
+      HTML.indexOf('<summary>', HTML.indexOf(`id="${id}"`)),
+      HTML.indexOf('</summary>', HTML.indexOf(`id="${id}"`)),
+    );
+    expect(summary).toContain(summaryText);
+  });
+
+  it('the #cap-report wrapper is a details.panel-collapse; the dynamic section inside is untouched', () => {
+    const capAt = HTML.indexOf('id="cap-report"');
+    const wrapAt = HTML.lastIndexOf('<details', capAt);
+    const tag = HTML.slice(wrapAt, HTML.indexOf('>', capAt) + 1);
+    expect(tag).toContain('class="panel-collapse"');
+    expect(tag).toMatch(/\bopen\b/);
+    expect(HTML.slice(wrapAt, capAt)).toContain('<summary>Capability report</summary>');
+    // Inner dynamic ids survive exactly once (main.js re-render targets).
+    expect(HTML.split('id="cap-report-body"').length - 1).toBe(1);
+    expect(HTML.split('id="cap-guidance"').length - 1).toBe(1);
+    // #file-info is NOT collapsible (too small).
+    const infoAt = HTML.indexOf('id="file-info"');
+    expect(HTML.slice(infoAt, HTML.indexOf('>', infoAt) + 1)).not.toContain('<details');
+  });
+
+  it('the old headings are gone (the summaries replaced them)', () => {
+    expect(HTML).not.toContain('<h2>Capability report</h2>');
+    expect(HTML).not.toContain('<h2>Tracks</h2>');
+    expect(HTML).not.toContain('<h2>Export</h2>');
+    expect(HTML).not.toContain('<h2>Models</h2>');
+    expect(HTML).not.toContain('<h3>Compare thresholds</h3>');
+  });
+
+  it('summary styling exists: no UA marker, pointer cursor, ▸/▾ rotation', () => {
+    const rule = cssRule('details.panel-collapse > summary');
+    expect(rule).toContain('list-style: none');
+    expect(rule).toContain('cursor: pointer');
+    expect(HTML).toContain('details.panel-collapse > summary::-webkit-details-marker');
+    expect(cssRule('details.panel-collapse > summary::before')).toContain("content: '▸'");
+    expect(HTML).toMatch(
+      /details\.panel-collapse\[open\] > summary::before\s*{[^}]*rotate\(90deg\)/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.13.0 item 4: detection-detail wording (option VALUES unchanged)
+// ---------------------------------------------------------------------------
+
+describe('v1.13.0: "Detection detail (analysis only)" wording', () => {
+  it('renames the "Processing resolution" h3', () => {
+    expect(HTML).toContain('<h3>Detection detail (analysis only)</h3>');
+    expect(HTML).not.toContain('<h3>Processing resolution</h3>');
+  });
+
+  it('ships the new option labels with UNCHANGED values full/1080p/720p', () => {
+    const sel = HTML.slice(
+      HTML.indexOf('id="downscale-select"'),
+      HTML.indexOf('</select>', HTML.indexOf('id="downscale-select"')),
+    );
+    expect(sel).toContain('<option value="full" selected>Full detail (slowest)</option>');
+    expect(sel).toContain('<option value="1080p">Balanced — 1080p</option>');
+    expect(sel).toContain('<option value="720p">Fast — 720p (lower detail)</option>');
+  });
+
+  it('adds the one-line analysis-only hint under the select', () => {
+    const selEnd = HTML.indexOf('</select>', HTML.indexOf('id="downscale-select"'));
+    const after = HTML.slice(selEnd, HTML.indexOf('</details>', selEnd));
+    expect(after).toContain(
+      '<p class="stat-line">Affects analysis speed only — the export always uses the full-resolution source.</p>',
+    );
   });
 });

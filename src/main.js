@@ -70,6 +70,9 @@
  *   DOWNSCALE_VALUES / normalizeDownscale(value)
  *                                      processing-downscale model (v1.12.0 REQ-117)
  *   SEEK_STEP_S                        keyboard seek step ±5 s (v1.12.0 REQ-122)
+ *   setAllTrackStyles(tracks, style)   bulk restyle model (v1.13.0): every
+ *                                      track → 'solid' | 'pixelate' in a NEW
+ *                                      array (invalid style → unchanged)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -1029,6 +1032,32 @@ export function mergeManualTracks(existingTracks, analyzedTracks) {
 }
 
 /**
+ * Bulk-restyle EVERY track to one redaction style (v1.13.0 — #bulk-solid /
+ * #bulk-pixelate). PURE: returns a NEW array; the input array and its track
+ * objects are never mutated (each track is copied only when its style
+ * changes, so enabled/keyframes/timings stay shared). Only the two contract
+ * literals are accepted — any other style leaves the content unchanged (the
+ * redaction must never degrade to an unrenderable style, same rule as
+ * editor.setTrackStyle).
+ *
+ * @param {import('./types.js').Track[] | null | undefined} tracks
+ *     The app's current tracks (manual + auto alike — the bulk action is
+ *     deliberately style-blind).
+ * @param {'solid'|'pixelate'} style Target style for every track.
+ * @returns {import('./types.js').Track[]} New array; empty/degenerate input
+ *     → empty; invalid style → unchanged content (still a new array).
+ */
+export function setAllTrackStyles(tracks, style) {
+  const valid = style === 'pixelate' || style === 'solid';
+  const source = Array.isArray(tracks) ? tracks : [];
+  return source.map((track) =>
+    valid && track?.style !== style
+      ? /** @type {import('./types.js').Track} */ ({ ...track, style })
+      : track,
+  );
+}
+
+/**
  * Diagnostics snapshot → the compact one-line JSON body of the `[diag]`
  * console line (v1.8.2). PURE. Keys emit in DIAG_KEY_ORDER first (unknown /
  * future keys follow in their own insertion order); numbers are
@@ -1308,6 +1337,11 @@ export async function mountApp(
     fileInfo: $('file-info'),
     sizeFilter: $('size-filter'),
     downscaleSelect: /** @type {HTMLSelectElement | null} */ ($('downscale-select')),
+    // v1.13.0: bulk track-style buttons. Every ref is null-guarded at its
+    // use — the markup may not carry the element yet (Agent-HTML lands
+    // separately) and the wiring must degrade to a no-op.
+    bulkSolid: /** @type {HTMLButtonElement | null} */ ($('bulk-solid')),
+    bulkPixelate: /** @type {HTMLButtonElement | null} */ ($('bulk-pixelate')),
   };
 
   // --- REQ-004 secure-context gate: block everything, wire nothing --------
@@ -1498,6 +1532,10 @@ export async function mountApp(
     // step (nothing to clear), shown whenever a file is loaded so a click
     // can also abort an in-flight analyze/export.
     if (els.clearFile) els.clearFile.hidden = app.step === 'gate';
+    // v1.13.0: the bulk restyle buttons are only meaningful with tracks —
+    // disabled (never hidden) while the tracks list is empty.
+    if (els.bulkSolid) els.bulkSolid.disabled = app.tracks.length === 0;
+    if (els.bulkPixelate) els.bulkPixelate.disabled = app.tracks.length === 0;
   }
 
   function showIntake() {
@@ -2156,6 +2194,9 @@ export async function mountApp(
           const track = manualTrackFromBox(app.manualNextId, t, box, app.meta?.duration);
           app.manualNextId += 1;
           app.tracks = [...app.tracks, track];
+          // v1.13.0: the first track enables the bulk restyle buttons
+          // (their disabled state is re-derived from the tracks length).
+          updateButtons();
           refreshTrackUi();
         },
         onTrimTrack: (trackId, start, end) => {
@@ -2406,6 +2447,35 @@ export async function mountApp(
     applyDownscale(els.downscaleSelect?.value);
   });
   blurAfterChange(els.downscaleSelect);
+
+  // --- v1.13.0: bulk track-style buttons (#bulk-solid / #bulk-pixelate) ------
+  //
+  // One click restyles EVERY track (manual + auto alike) to 'solid' or
+  // 'pixelate' via the pure setAllTrackStyles model, then refreshTrackUi()
+  // re-renders the list + preview through editor.refresh(). The disabled
+  // state (empty tracks list) lives in updateButtons; a click with zero
+  // tracks (race between render and state) still degrades to a readable
+  // toast instead of a silent no-op.
+
+  /** Apply one style to all tracks; empty list → subtle toast, no-op. */
+  function applyAllTrackStyles(style) {
+    if (app.tracks.length === 0) {
+      toast('No tracks to restyle.');
+      return;
+    }
+    app.tracks = setAllTrackStyles(app.tracks, style);
+    refreshTrackUi();
+  }
+
+  if (els.bulkSolid) {
+    els.bulkSolid.addEventListener('click', () => applyAllTrackStyles('solid'));
+  }
+  if (els.bulkPixelate) {
+    els.bulkPixelate.addEventListener('click', () => applyAllTrackStyles('pixelate'));
+  }
+  // REG-2 (v1.6.1): pointer-activated controls release focus.
+  blurAfterClick(els.bulkSolid);
+  blurAfterClick(els.bulkPixelate);
 
   /**
    * Apply a clicked panel's level to BOTH sliders (REQ-114), readouts

@@ -1722,3 +1722,252 @@ describe('mountApp (v1.12.0): theme, rail, size filter, cancel, file-info', () =
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.13.0 — bulk track style (#bulk-solid / #bulk-pixelate): the pure model
+// plus the real wiring through the fake-DOM mountApp harness.
+// ---------------------------------------------------------------------------
+
+describe('main-wiring: setAllTrackStyles (v1.13.0 bulk restyle model)', () => {
+  it('returns a NEW array with every track flipped to solid / pixelate', () => {
+    const tracks = [manualTrack(1), autoTrack(2)];
+    const solid = main.setAllTrackStyles(tracks, 'solid');
+    expect(solid).not.toBe(tracks); // new array
+    expect(solid.map((t) => t.style)).toEqual(['solid', 'solid']);
+    expect(solid.map((t) => t.id)).toEqual([1, 2]);
+    const pixelate = main.setAllTrackStyles(tracks, 'pixelate');
+    expect(pixelate.map((t) => t.style)).toEqual(['pixelate', 'pixelate']);
+  });
+
+  it('is non-mutating: input array and track objects stay untouched', () => {
+    const tracks = [manualTrack(1, { style: 'pixelate' }), autoTrack(2)];
+    const snapshot = tracks.map((t) => ({ ...t, keyframes: new Map(t.keyframes) }));
+    const out = main.setAllTrackStyles(tracks, 'solid');
+    expect(tracks.map((t) => ({ ...t, keyframes: new Map(t.keyframes) }))).toEqual(snapshot);
+    // The changed tracks are copies — the originals keep their identity.
+    expect(out[0]).not.toBe(tracks[0]);
+    expect(tracks[0].style).toBe('pixelate');
+    expect(tracks[1].style).toBe('pixelate');
+  });
+
+  it('mixed manual + auto tracks ALL get the style (style-blind bulk action)', () => {
+    const tracks = [
+      manualTrack(1, { style: 'pixelate' }),
+      autoTrack(2, { style: 'solid' }),
+      manualTrack(3, { style: 'pixelate', enabled: false }),
+    ];
+    const out = main.setAllTrackStyles(tracks, 'pixelate');
+    expect(out).toHaveLength(3);
+    expect(out.every((t) => t.style === 'pixelate')).toBe(true);
+    // Everything except the style survives verbatim.
+    expect(out[2].enabled).toBe(false);
+    expect(out.map((t) => t.source)).toEqual(['manual', 'auto', 'manual']);
+  });
+
+  it('invalid style → unchanged content (still a new array, originals shared)', () => {
+    const tracks = [manualTrack(1, { style: 'solid' }), autoTrack(2, { style: 'pixelate' })];
+    const out = main.setAllTrackStyles(tracks, 'blur');
+    expect(out).not.toBe(tracks);
+    expect(out[0]).toBe(tracks[0]); // untouched object identity
+    expect(out[1]).toBe(tracks[1]);
+    expect(out.map((t) => t.style)).toEqual(['solid', 'pixelate']);
+    // Degenerate inputs degrade to empty, never throw.
+    expect(main.setAllTrackStyles([], 'solid')).toEqual([]);
+    expect(main.setAllTrackStyles(null, 'solid')).toEqual([]);
+    expect(main.setAllTrackStyles(undefined, 'pixelate')).toEqual([]);
+  });
+});
+
+describe('mountApp (v1.13.0): #bulk-solid / #bulk-pixelate wiring', () => {
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  /** Editor handle that counts refresh() calls (the bulk click must refresh). */
+  function refreshCountingHandle(refreshes) {
+    return {
+      destroy() {},
+      refresh: () => {
+        refreshes.push('refresh');
+      },
+      redraw() {},
+      getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+    };
+  }
+
+  it('#bulk-solid click → every track style becomes solid + editor refresh', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, editorHooks) => {
+          hooks = editorHooks;
+          return refreshCountingHandle(refreshes);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // solid (manual default)
+      hooks.onManualBox({ x: 2, y: 2, w: 4, h: 4 }, 2);
+      hooks.onSetStyle(1, 'pixelate'); // make the starting styles mixed
+      const before = hooks.getState().tracks;
+      expect(before.map((t) => t.style)).toEqual(['pixelate', 'solid']);
+
+      const solidBtn = fakeDoc.getElementById('bulk-solid');
+      solidBtn.dispatch('click');
+      const st = hooks.getState();
+      expect(st.tracks).toHaveLength(2);
+      expect(st.tracks.every((t) => t.style === 'solid')).toBe(true);
+      expect(refreshes.length).toBeGreaterThanOrEqual(1);
+      expect(solidBtn.disabled).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('#bulk-pixelate click → every track style becomes pixelate + editor refresh', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, editorHooks) => {
+          hooks = editorHooks;
+          return refreshCountingHandle(refreshes);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // solid (manual default)
+      const pixelateBtn = fakeDoc.getElementById('bulk-pixelate');
+      pixelateBtn.dispatch('click');
+      const st = hooks.getState();
+      expect(st.tracks).toHaveLength(1);
+      expect(st.tracks[0].style).toBe('pixelate');
+      expect(refreshes.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('#bulk-solid flips a MIXED manual/auto set (styles land on every track)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, editorHooks) => {
+          hooks = editorHooks;
+          return refreshCountingHandle(refreshes);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // manual → solid
+      runAnalyzeMock.mockResolvedValueOnce({
+        tracks: [autoTrack(1, { style: 'pixelate' })], // id collides → re-issued
+        frameCount: 4,
+        effectiveEp: 'webgpu',
+        cancelled: false,
+      });
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+      const before = hooks.getState().tracks;
+      expect(before.map((t) => t.source)).toEqual(['manual', 'auto']);
+
+      fakeDoc.getElementById('bulk-solid').dispatch('click');
+      const st = hooks.getState();
+      expect(st.tracks).toHaveLength(2);
+      expect(st.tracks.every((t) => t.style === 'solid')).toBe(true);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('buttons are disabled with zero tracks and enable once a track exists', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, editorHooks) => {
+          hooks = editorHooks;
+          return refreshCountingHandle(refreshes);
+        },
+      });
+      const solidBtn = fakeDoc.getElementById('bulk-solid');
+      const pixelateBtn = fakeDoc.getElementById('bulk-pixelate');
+      // At the gate (0 tracks): disabled, never hidden.
+      expect(solidBtn.disabled).toBe(true);
+      expect(pixelateBtn.disabled).toBe(true);
+      expect(solidBtn.hidden).toBe(false);
+
+      await openFile(fakeDoc); // still 0 tracks at ready
+      expect(solidBtn.disabled).toBe(true);
+
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // first track
+      expect(solidBtn.disabled).toBe(false);
+      expect(pixelateBtn.disabled).toBe(false);
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('zero tracks + a forced click degrades to the "No tracks to restyle." toast', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      await main.mountApp(fakeDoc, {
+        mountEditor: () => refreshCountingHandle(refreshes),
+      });
+      fakeDoc.getElementById('bulk-solid').dispatch('click');
+      expect(toastTexts(fakeDoc)).toContain('No tracks to restyle.');
+      expect(refreshes).toEqual([]); // no refresh without tracks
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('blur-after-click is registered on both bulk buttons', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => refreshCountingHandle([]) });
+      const blurred = [];
+      for (const id of ['bulk-solid', 'bulk-pixelate']) {
+        const btn = fakeDoc.getElementById(id);
+        btn.blur = () => blurred.push(id);
+      }
+      fakeDoc.getElementById('bulk-solid').dispatch('click');
+      fakeDoc.getElementById('bulk-pixelate').dispatch('click');
+      expect(blurred).toEqual(['bulk-solid', 'bulk-pixelate']);
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+

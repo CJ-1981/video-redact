@@ -6,6 +6,14 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-10-31
+
+### Added
+- Bulk restyle: "All solid" / "All pixelate" buttons in the Tracks panel restyle every track at once.
+- All panels (Capability, Detection settings, Compare thresholds, Tracks, Export, Models) are collapsible via their headers (native details, open by default).
+- Models/attribution panel moved below the footer as its own full-width section.
+- Detection detail wording clarified: "Detection detail (analysis only)" with a hint that analysis speed is affected but export always uses the full-resolution source.
+
 ## [1.12.0] — 2026-10-31
 
 ### Added

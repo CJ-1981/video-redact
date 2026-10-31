@@ -297,12 +297,9 @@
     #file-info .label { color: var(--ink); }
     #file-info .value { color: var(--ink-hi); font-family: var(--font-num); overflow-wrap: anywhere; }
 
-    #cap-report {
-      background: var(--bg-panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 16px 18px;
-    }
+    /* v1.13.0: panel chrome moved to the static <details> wrapper around
+       #cap-report — the inner section keeps only the table/guidance styling
+       so main.js re-renders never touch the toggle. */
     #cap-report table { width: 100%; border-collapse: collapse; }
     #cap-report td { padding: 4px 8px 4px 0; color: var(--ink); }
     #cap-report td:last-child { text-align: right; color: var(--ink-hi); font-family: var(--font-num); }
@@ -551,7 +548,9 @@
       gap: 12px;
       min-width: 0;
     }
-    #right-rail section {
+    /* v1.13.0: panels are native <details class="panel-collapse"> now. */
+    #right-rail section,
+    #right-rail details.panel-collapse {
       background: var(--bg-panel);
       border: 1px solid var(--line);
       border-radius: var(--radius);
@@ -583,6 +582,60 @@
       cursor: pointer;
     }
     label.toggle input { accent-color: var(--accent); }
+
+    /* ── Collapsible panels (v1.13.0): native <details class="panel-collapse">
+       toggles, all `open` by default (zero behavior change). The summary
+       replaces the panel's h2/h3 heading; the ▸ glyph rotates to ▾ when open
+       (no UA marker). ── */
+    details.panel-collapse > summary {
+      list-style: none;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--ink);
+    }
+    details.panel-collapse > summary::-webkit-details-marker { display: none; }
+    details.panel-collapse > summary::before {
+      content: '▸';
+      display: inline-block;
+      margin-right: 7px;
+      transition: transform 120ms ease;
+    }
+    details.panel-collapse[open] > summary::before { transform: rotate(90deg); }
+    details.panel-collapse > summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    /* Intake-column details (#cap-report wrapper) get the same panel chrome
+       the right-rail / below-timeline panels carry. */
+    #intake-panel > details.panel-collapse {
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+
+    /* ── Bulk track-style buttons (v1.13.0): segmented control like
+       #size-filter — small, subtle, joined borders; Agent-MAIN wires the
+       clicks (IDs are the contract). ── */
+    #bulk-style {
+      display: flex;
+      margin-top: 8px;
+      max-width: 320px;
+    }
+    #bulk-style button {
+      flex: 1 1 0;
+      min-width: 0;
+      margin-left: -1px;
+      border-radius: 0;
+      padding: 6px 4px;
+      font-size: 12.5px;
+      min-height: 32px;
+    }
+    #bulk-style button:first-child { margin-left: 0; border-radius: 8px 0 0 8px; }
+    #bulk-style button:last-child { border-radius: 0 8px 8px 0; }
 
     /* ── Detection sensitivity + threshold compare (v1.5.0 REQ-113/114) ── */
     #sensitivity h3, #threshold-compare h3 {
@@ -777,6 +830,15 @@
     #export-status { min-height: 1.2em; color: var(--ink); font-size: 12.5px; }
     #export-button { width: 100%; margin-top: 4px; }
 
+    /* v1.13.0: #model-attribution is its own full-width section BELOW the
+       footer — same panel chrome as the rail panels. */
+    #model-attribution {
+      margin: 16px 20px 20px;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
     #model-attribution ul { margin: 0; padding: 0 0 0 16px; color: var(--ink); font-size: 12px; }
     #model-attribution li { margin-bottom: 6px; overflow-wrap: anywhere; }
 
@@ -913,21 +975,16 @@
            label/value pairs land in the two-column grid from the CSS. -->
       <div id="file-info" hidden></div>
 
-      <section id="cap-report" hidden aria-live="polite">
-        <h2>Capability report</h2>
-        <table id="cap-report-body"></table>
-        <p id="cap-guidance" hidden></p>
-      </section>
-
-      <!-- v1.12.0 REQ-123: Models/attribution moved out of the right rail
-           into the left column, immediately after the capability report. -->
-      <section id="model-attribution" aria-label="Model attribution">
-        <h2>Models</h2>
-        <ul>
-          <li>YuNet face detection (2023mar, 232 KB) — MIT — huggingface.co/opencv/face_detection_yunet</li>
-          <li>YOLOv9-t license plates (640 end-to-end, 7.8 MB) — MIT — github.com/ankandrew/open-image-models</li>
-        </ul>
-      </section>
+      <!-- v1.13.0: the static <details> wrapper supplies the collapsible
+           toggle; the dynamic #cap-report section inside is untouched so
+           main.js re-renders never touch the toggle. -->
+      <details class="panel-collapse" open>
+        <summary>Capability report</summary>
+        <section id="cap-report" hidden aria-live="polite">
+          <table id="cap-report-body"></table>
+          <p id="cap-guidance" hidden></p>
+        </section>
+      </details>
     </section>
 
     <!-- Steps ②–④: preview + timeline (left), pass/track/export rail (right) -->
@@ -1020,7 +1077,9 @@
                The slider values flow into settings.confFace / settings.confPlate
                on every analyze / re-analyze (defaults = the pre-1.5.0 baked
                gates: face 0.60, plate 0.25). -->
-          <div id="sensitivity" role="group" aria-label="Detection sensitivity">
+          <details id="sensitivity" class="panel-collapse" open>
+            <summary>Detection settings</summary>
+            <div role="group" aria-label="Detection sensitivity">
             <h3>Detection sensitivity</h3>
             <label class="slider-row" for="conf-face">
               <span class="slider-name">Face</span>
@@ -1046,13 +1105,18 @@
             <!-- REQ-117 (v1.12.0): optional processing downscale — caps the
                  frame size used during analyze (detections are rescaled to
                  native display coordinates before tracking). -->
-            <h3>Processing resolution</h3>
+            <!-- v1.13.0 REQ wording: "Processing resolution" → "Detection
+                 detail (analysis only)" — option VALUES (full/1080p/720p)
+                 are unchanged (normalizeDownscale contract). -->
+            <h3>Detection detail (analysis only)</h3>
             <select id="downscale-select" aria-label="Processing resolution">
-              <option value="full" selected>Full (slowest, most detail)</option>
-              <option value="1080p">Downscale to 1080p</option>
-              <option value="720p">Downscale to 720p (fastest)</option>
+              <option value="full" selected>Full detail (slowest)</option>
+              <option value="1080p">Balanced — 1080p</option>
+              <option value="720p">Fast — 720p (lower detail)</option>
             </select>
+            <p class="stat-line">Affects analysis speed only — the export always uses the full-resolution source.</p>
           </div>
+          </details>
 
           <!-- REQ-114 (v1.5.0) / REQ-116 (v1.12.0): the threshold-compare
                section moved to #below-timeline under the timeline. -->
@@ -1060,8 +1124,8 @@
           <button id="analyze-cancel" type="button" hidden>Cancel analysis</button>
         </section>
 
-        <section id="export-panel" aria-label="Export settings">
-          <h2>Export</h2>
+        <details id="export-panel" class="panel-collapse" open aria-label="Export settings">
+          <summary>Export</summary>
           <label for="export-quality">Quality</label>
           <select id="export-quality">
             <option value="high" selected>High — match source resolution</option>
@@ -1074,7 +1138,7 @@
           <button id="export-button" type="button" class="primary">Export redacted video</button>
           <button id="export-cancel" type="button" hidden style="width:100%">Cancel export</button>
           <p id="export-status" class="num" role="status"></p>
-        </section>
+        </details>
       </aside>
 
       <!-- v1.12.0 REQ-116: bottom flow under the timeline — threshold
@@ -1085,8 +1149,8 @@
         <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
              decode + one inference per model, five fixed-level panels.
              Clicking a panel applies that level to BOTH sensitivity sliders. -->
-        <div id="threshold-compare" role="group" aria-label="Single-frame threshold comparison">
-          <h3>Compare thresholds</h3>
+        <details id="threshold-compare" class="panel-collapse" open role="group" aria-label="Single-frame threshold comparison">
+          <summary>Compare thresholds</summary>
           <label class="slider-row" for="compare-time">
             <span class="slider-name">Frame&nbsp;time&nbsp;(s)</span>
             <input type="number" id="compare-time" class="num" min="0" max="0" step="0.1" value="0" />
@@ -1097,13 +1161,19 @@
           <button id="compare-button" type="button">Compare thresholds</button>
           <p id="compare-status" class="stat-line" role="status"></p>
           <div id="threshold-panels"></div>
-        </div>
+        </details>
 
-        <section id="tracks-panel" aria-label="Detected tracks">
-          <h2>Tracks</h2>
+        <details id="tracks-panel" class="panel-collapse" open aria-label="Detected tracks">
+          <summary>Tracks</summary>
+          <!-- v1.13.0: bulk style buttons — IDs are the contract (main.js
+               wires the clicks); segmented styling mirrors #size-filter. -->
+          <div id="bulk-style" role="group" aria-label="Set all tracks style">
+            <button id="bulk-solid" type="button">All solid</button>
+            <button id="bulk-pixelate" type="button">All pixelate</button>
+          </div>
           <ul id="track-list"></ul>
           <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
-        </section>
+        </details>
       </section>
     </div>
   </main>
@@ -1113,6 +1183,17 @@
     <span class="hints"><kbd>←</kbd>/<kbd>→</kbd> jump 5s&ensp;·&ensp;<kbd>shift+←</kbd>/<kbd>shift+→</kbd> frame step&ensp;·&ensp;<kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>F</kbd> fullscreen&ensp;·&ensp;<kbd>M</kbd> mute&ensp;·&ensp;<kbd>B</kbd> draw box</span>
     <span id="app-version" class="num"></span>
   </footer>
+
+  <!-- v1.13.0: Models/attribution moved to its own full-width section at the
+       very bottom of the page (below the footer); main.js still populates
+       the <ul> via the #model-attribution ID. -->
+  <details id="model-attribution" class="panel-collapse" open aria-label="Model attribution">
+    <summary>Models</summary>
+    <ul>
+      <li>YuNet face detection (2023mar, 232 KB) — MIT — huggingface.co/opencv/face_detection_yunet</li>
+      <li>YOLOv9-t license plates (640 end-to-end, 7.8 MB) — MIT — github.com/ankandrew/open-image-models</li>
+    </ul>
+  </details>
 
   <div id="toast-region" role="status" aria-live="polite"></div>
 

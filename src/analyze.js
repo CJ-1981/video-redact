@@ -97,6 +97,21 @@ export function scaleFactorFor(downscale, displayW, displayH) {
  * @param {number} minPx Minimum min(w, h) in display px (0 = no filter).
  * @returns {import('./types.js').Detection[]} New filtered array.
  */
+/**
+ * Is `t` inside any trim region? PURE (v1.15.2): the analyze loop skips
+ * decode + inference entirely for frames inside trimmed regions — they are
+ * removed at export, so detecting them wastes time and creates ghost tracks.
+ *
+ * @param {number} t Presentation time in seconds.
+ * @param {Array<{start: number, end: number}> | undefined} [trims] Sorted, non-overlapping regions.
+ * @returns {boolean} True when t falls inside any region (boundaries inclusive).
+ */
+export function inTrims(t, trims) {
+  if (!Array.isArray(trims) || trims.length === 0) return false;
+  if (!Number.isFinite(t)) return false;
+  return trims.some((r) => t >= r.start && t <= r.end);
+}
+
 export function filterByMinSize(detections, minPx) {
   if (!Array.isArray(detections)) return [];
   if (!Number.isFinite(minPx) || minPx <= 0) return [...detections];
@@ -148,7 +163,8 @@ function defaultYieldNow() {
  * @param {import('./types.js').MediaMeta} [opts.meta] Display size / fps / duration.
  * @param {{dashcamMode?: boolean, plateStride?: number, padSeconds?: number,
  *          confFace?: number, confPlate?: number, epPolicy?: string[],
- *          downscale?: 'full'|'1080p'|'720p', minSizePx?: number}} [opts.settings]
+ *          downscale?: 'full'|'1080p'|'720p', minSizePx?: number,
+ *          trims?: Array<{start: number, end: number}>}} [opts.settings]
  *     Analysis settings. `plateStride` (default 2) is the full-pass plate
  *     cadence; `padSeconds` overrides the finalize padding (default 5/fps,
  *     REQ-007); `confFace` / `confPlate` (REQ-113, defaults 0.6 / 0.25 —
@@ -178,7 +194,7 @@ function defaultYieldNow() {
  * @param {() => number} [opts.now] Test seam — monotonic ms clock for the
  *     rolling fps/ETA estimate (default performance.now).
  * @returns {Promise<{tracks: import('./types.js').Track[], frameCount: number,
- *                    cancelled: boolean, effectiveEp: string | null}>}
+ *                    skippedCount: number, cancelled: boolean, effectiveEp: string | null}>}
  *     Review-ready tracks (interpolated, padded, labeled). `effectiveEp` is
  *     the ORT execution provider the detector sessions actually created with
  *     (createDetectors' resolve value) — surfaced by the UI after analyze
@@ -256,6 +272,7 @@ export async function runAnalyze({
     const tracker = new Tracker();
     const frameTimes = []; // rolling clock stamps for the fps estimate
     let frameCount = 0;
+    let skippedCount = 0; // v1.15.2: frames inside trimmed regions
     let cancelled = false;
 
     for await (const sample of sink.samples()) {
@@ -263,6 +280,14 @@ export async function runAnalyze({
         if (signal?.aborted) {
           cancelled = true;
           break;
+        }
+        // v1.15.2: trimmed regions are skipped entirely — no draw, no
+        // inference, no tracker update (their frames never export). The
+        // frame still counts toward progress so the ETA stays honest.
+        if (inTrims(sample.timestamp, settings?.trims)) {
+          skippedCount += 1;
+          frameCount += 1;
+          continue;
         }
         sample.draw(ctx, 0, 0, analysisW, analysisH);
         const frame = ctx.getImageData(0, 0, analysisW, analysisH);
@@ -349,7 +374,7 @@ export async function runAnalyze({
 
     // Runs on completion AND cancellation — partial tracks stay usable (AC-03).
     const tracks = tracker.finalize(padSeconds);
-    return { tracks, frameCount, cancelled, effectiveEp: detectors.effectiveEp ?? null };
+    return { tracks, frameCount, skippedCount, cancelled, effectiveEp: detectors.effectiveEp ?? null };
   } finally {
     detectors.close();
   }

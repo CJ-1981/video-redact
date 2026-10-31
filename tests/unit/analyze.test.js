@@ -514,7 +514,7 @@ describe('cancellation — AbortSignal mid-stream (AC-03)', () => {
 
     // The mock createDetectors has no effectiveEp, so the resolve value
     // normalizes it to null (AC-17 active-provider notice field).
-    expect(result).toEqual({ tracks: [], frameCount: 0, cancelled: true, effectiveEp: null });
+    expect(result).toEqual({ tracks: [], frameCount: 0, skippedCount: 0, cancelled: true, effectiveEp: null });
     expect(samples).toHaveLength(1);
     expect(samples[0].close).toHaveBeenCalledTimes(1);
     expect(yieldNow).not.toHaveBeenCalled();
@@ -824,5 +824,49 @@ describe('minimum-size filter (REQ-120) — applied BEFORE the tracker', () => {
       }),
     );
     expect(dropped.tracks).toHaveLength(0);
+  });
+});
+
+describe('runAnalyze — trimmed regions skipped (v1.15.2)', () => {
+  it('skips draw + inference for frames inside trim regions; analyzed frames still track', async () => {
+    // 6 frames at t = 0..0.5; trim [0.15, 0.35] → 0.2 and 0.3 skipped.
+    const samples = installSink([0, 0.1, 0.2, 0.3, 0.4, 0.5]);
+    const canvas = installCanvas();
+    const faceFrames = [];
+    detState.detectFace.mockImplementation(async (frame) => {
+      faceFrames.push(frame.width); // raster seen by the detector
+      return fullFaceDet();
+    });
+
+    const result = await runAnalyze(
+      baseOpts({ canvasFactory: canvas, settings: { trims: [{ start: 0.15, end: 0.35 }] } }),
+    );
+
+    expect(result.cancelled).toBe(false);
+    expect(result.frameCount).toBe(6); // every frame counts toward progress
+    expect(result.skippedCount).toBe(2); // 0.2 and 0.3 were inside the region
+    expect(samples).toHaveLength(6); // all samples pulled + closed
+    // detector saw only the 4 kept frames' rasters
+    expect(faceFrames).toHaveLength(4);
+    // the real tracker produced a track only from kept frames
+    expect(result.tracks.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reports zero skipped frames when no trims are set (unchanged path)', async () => {
+    installSink([0, 0.1, 0.2]);
+    const result = await runAnalyze(baseOpts({ canvasFactory: installCanvas() }));
+    expect(result.skippedCount).toBe(0);
+    expect(result.frameCount).toBe(3);
+  });
+
+  it('inTrims is boundary-inclusive and ignores empty/invalid input', async () => {
+    const { inTrims } = await import('../../src/analyze.js');
+    const trims = [{ start: 0.15, end: 0.35 }];
+    expect(inTrims(0.15, trims)).toBe(true);
+    expect(inTrims(0.35, trims)).toBe(true);
+    expect(inTrims(0.36, trims)).toBe(false);
+    expect(inTrims(0.2, [])).toBe(false);
+    expect(inTrims(0.2, undefined)).toBe(false);
+    expect(inTrims(Number.NaN, trims)).toBe(false);
   });
 });

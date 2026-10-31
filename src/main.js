@@ -2543,6 +2543,11 @@ export async function mountApp(
     // REQ-113: the sensitivity sliders drive the analyze pass (and every
     // re-analyze); absent/invalid sliders → omitted → detector defaults.
     const settings = { dashcamMode: els.dashcamToggle?.checked === true };
+    // v1.15.2: trimmed regions are skipped during analysis (their frames
+    // never export) — a snapshot at pass start; edits mid-pass don't apply.
+    if (app.trims?.length) {
+      settings.trims = app.trims.map((r) => ({ start: r.start, end: r.end }));
+    }
     const confFace = Number(els.confFace?.value);
     const confPlate = Number(els.confPlate?.value);
     if (Number.isFinite(confFace)) settings.confFace = confFace;
@@ -2651,6 +2656,7 @@ export async function mountApp(
     const ep = epLabel(result?.effectiveEp);
     const summary =
       `${app.tracks.length} track(s) from ${result?.frameCount ?? 0} frames` +
+      (result?.skippedCount > 0 ? ` · ${result.skippedCount} trimmed frame(s) skipped` : '') +
       (ep ? ` · ${ep}` : '');
     if (els.analyzeStatus) {
       els.analyzeStatus.textContent = result?.cancelled ? `Cancelled — ${summary}` : summary;

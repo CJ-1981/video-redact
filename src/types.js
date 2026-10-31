@@ -111,7 +111,8 @@ export {};
  * @property {{dashcamMode: boolean, padSeconds: number,
  *             quality: 'high'|'balanced',
  *             confFace?: number, confPlate?: number,
- *             downscale?: 'full'|'1080p'|'720p', minSizePx?: number}} settings
+ *             downscale?: 'full'|'1080p'|'720p', minSizePx?: number,
+ *             trims?: Array<{start: number, end: number}>}} settings
  *     `confFace`/`confPlate` (v1.5.0 REQ-113): detection confidence
  *     thresholds from the Analyze-panel sensitivity sliders (face default
  *     0.6, plate 0.25); undefined → detector defaults.

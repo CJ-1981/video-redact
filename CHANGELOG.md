@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.15.2] — 2026-10-31
+
+### Added
+- Trimmed regions are now skipped during analysis: frames inside trim regions cost no draw, no inference, and no tracking — large trims make analysis proportionally faster and keep ghost tracks out of the list. The analyze status reports how many trimmed frames were skipped, and the trim hint documents the behavior.
+
 ## [1.15.1] — 2026-10-31
 
 ### Fixed

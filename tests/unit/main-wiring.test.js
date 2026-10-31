@@ -2806,3 +2806,27 @@ describe('mountApp (v1.17.0): project save/load (REQ-130)', () => {
     }
   });
 });
+
+describe('skip trimmed frames during playback (v1.20.0)', () => {
+  it('skipTarget returns the containing region end when inside one', () => {
+    const trims = [{ start: 0.5, end: 1.5 }, { start: 2, end: 2.5 }];
+    expect(main.skipTarget(0.7, trims)).toBe(1.5);
+    expect(main.skipTarget(1.49, trims)).toBe(1.5);
+    expect(main.skipTarget(2.1, trims)).toBe(2.5);
+  });
+
+  it('skipTarget returns null outside regions, at the exact end, or with no trims', () => {
+    const trims = [{ start: 0.5, end: 1.5 }];
+    expect(main.skipTarget(0.3, trims)).toBeNull();
+    expect(main.skipTarget(1.5, trims)).toBeNull(); // end boundary exclusive
+    expect(main.skipTarget(0.7, [])).toBeNull();
+    expect(main.skipTarget(0.7, undefined)).toBeNull();
+    expect(main.skipTarget(Number.NaN, trims)).toBeNull();
+  });
+
+  it('the skip checkbox exists and defaults UNCHECKED (opt-in)', () => {
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+    expect(html).toMatch(/<input type="checkbox" id="skip-trims-toggle" \/>/); // no checked attr
+    expect(html).toContain('Skip trimmed parts during playback');
+  });
+});

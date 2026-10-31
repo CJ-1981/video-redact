@@ -1220,6 +1220,10 @@
              tracks — the toggle lives here, right above the strip. -->
         <div id="trim-bar">
           <button id="trim-toggle" type="button" aria-pressed="false" title="Trim mode: drag on the timeline to mark regions for deletion — greyed-out regions are removed at export">✂ Trim</button>
+          <label class="toggle" for="skip-trims-toggle" style="display: flex; align-items: center; gap: 6px;">
+            <input type="checkbox" id="skip-trims-toggle" />
+            Skip trimmed parts during playback
+          </label>
           <!-- v1.17.0: pixelation strength — segmented control mirroring
                #size-filter (selected segment = accent fill). data-strength
                keys the pixel block size; main.js owns aria-pressed and the
@@ -1300,7 +1304,8 @@
           <p id="analyze-status" class="stat-line" role="status"></p>
           <label class="toggle" for="dashcam-toggle">
             <input type="checkbox" id="dashcam-toggle" />
-            Dashcam mode <span style="color: var(--ink)">(tiled pass for small plates)</span>
+            Enhanced scan
+            <span style="color: var(--ink)">(finds small or distant faces &amp; plates — 3&times; slower)</span>
           </label>
 
           <!-- REQ-113 (v1.5.0): configurable detection confidence thresholds.

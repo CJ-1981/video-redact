@@ -703,6 +703,23 @@ export const DOWNSCALE_VALUES = ['full', '1080p', '720p', '480p'];
  * @param {unknown} value Raw select value.
  * @returns {'full' | '1080p' | '720p'}
  */
+/**
+ * Playback skip target (v1.20.0): when `t` falls inside a trim region,
+ * playback jumps to that region's end. PURE — returns the region end, or
+ * null when t is not inside one. Exported for unit tests.
+ *
+ * @param {number} t Current playback time (seconds).
+ * @param {Array<{start: number, end: number}> | undefined} [trims]
+ * @returns {number | null}
+ */
+export function skipTarget(t, trims) {
+  if (!Array.isArray(trims) || trims.length === 0 || !Number.isFinite(t)) return null;
+  for (const r of trims) {
+    if (t >= r.start && t < r.end) return r.end;
+  }
+  return null;
+}
+
 export function normalizeDownscale(value) {
   const v = String(value ?? '');
   return /** @type {'full' | '1080p' | '720p'} */ (
@@ -1793,6 +1810,7 @@ export async function mountApp(
     bulkSolid: /** @type {HTMLButtonElement | null} */ ($('bulk-solid')),
     bulkPixelate: /** @type {HTMLButtonElement | null} */ ($('bulk-pixelate')),
     trimHint: $('trim-hint'),
+    skipTrimsToggle: /** @type {HTMLInputElement | null} */ ($('skip-trims-toggle')),
     // v1.15.0 REQ-125: ✂ trim-mode toggle (tracks panel header, next to
     // #bulk-style). Null-guarded like the bulk buttons.
     trimToggle: /** @type {HTMLButtonElement | null} */ ($('trim-toggle')),
@@ -2095,6 +2113,7 @@ export async function mountApp(
   function resetExportChoices() {
     if (els.exportResolution) els.exportResolution.value = 'full';
     if (els.exportAudio) els.exportAudio.checked = true;
+    if (els.skipTrimsToggle) els.skipTrimsToggle.checked = false; // v1.20.0
   }
 
   function requestPersistentStorage() {
@@ -3808,6 +3827,16 @@ export async function mountApp(
   // can never be entangled with UI refresh behavior.
   els.video?.addEventListener('timeupdate', () => {
     VR_DIAG.tu += 1;
+    // v1.20.0: optional skip-trimmed-frames playback — when the playhead
+    // enters a trim region, jump to the region's end (opt-in checkbox in
+    // the trim bar). Only while playing, so paused inspection keeps the veil.
+    const v = els.video;
+    if (els.skipTrimsToggle?.checked && v && !v.paused) {
+      const target = skipTarget(v.currentTime, app.trims);
+      if (target != null && target < (v.duration || Infinity)) {
+        v.currentTime = Math.min(target + 0.001, v.duration || target);
+      }
+    }
   });
 
   // --- ?debug=1 runtime diagnostics (remote support; v1.8.2 + v1.9.0) --------

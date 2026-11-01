@@ -3766,3 +3766,42 @@ describe('export before analysis (v1.34.0)', () => {
     // exported reducer and the existing fake harness in the next block.
   });
 });
+
+describe('v1.37.0 — grey pre-analysis export + explicit open label', () => {
+  const g = wave3Globals();
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  it('open button reads "Open new video" and grey export styling exists', () => {
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+    expect(html).toContain('>Open new video</button>');
+    expect(html).toMatch(/#export-button\.export-unanalyzed\s*{[^}]*background:\s*var\(--bg-inset\)/);
+  });
+
+  it('export label greys + reads "Export (not analyzed)" only at READY', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => ({
+        destroy() {}, refresh() {}, redraw() {},
+        getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+        setRescanBusy() {},
+      }) });
+      await flushApp();
+      // GATE (no file): the toggle must not claim "not analyzed".
+      const btnAtGate = fakeDoc.getElementById('export-button');
+      expect(btnAtGate.textContent).toBe('Export redacted video');
+      expect(btnAtGate.classList.contains('export-unanalyzed')).toBe(false);
+
+      await openFile(fakeDoc); // → READY: pre-analysis export legal
+      const btn = fakeDoc.getElementById('export-button');
+      expect(btn.textContent).toBe('Export (not analyzed)');
+      expect(btn.classList.contains('export-unanalyzed')).toBe(true);
+    } finally {
+      g.restore();
+    }
+  });
+});

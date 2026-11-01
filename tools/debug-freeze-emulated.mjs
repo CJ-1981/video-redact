@@ -54,6 +54,12 @@ try {
   await page.waitForSelector('#serve-gate', { state: 'hidden' });
   await page.setInputFiles('#file-input', FIXTURE);
   await page.waitForSelector('#analyze-button:not([disabled])', { timeout: 60000 });
+  const expBtn = await page.evaluate(() => ({
+    text: document.querySelector('#export-button')?.textContent ?? null,
+    cls: document.querySelector('#export-button')?.className ?? null,
+    disabled: document.querySelector('#export-button')?.disabled ?? null,
+  }));
+  console.log(`P0 EXPORT at ready: text="${expBtn.text}" cls="${expBtn.cls}" disabled=${expBtn.disabled}`);
 
   // Error capture from the very start (covers P0, not just P-C).
   const pageErrors = [];

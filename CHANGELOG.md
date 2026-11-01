@@ -6,6 +6,17 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.37.0] — 2026-11-01
+
+### Changed
+- "Open video" renamed to "Open new video" — the header action now reads unambiguously next to Save/Load project.
+- The pre-analysis export button is GREY instead of accent-colored (field feedback: accent read as ready-to-go). Grey is the "not analyzed yet" signal; at READY the button also labels itself "Export (not analyzed)" in text, flipping back to "Export redacted video" once analysis completes.
+
+## [1.35.0] — 2026-11-01
+
+### Added
+- Export without analysis (field request): at READY — before any analysis — Export is enabled so a manual-regions-only redaction (plus watermark and export settings) can be exported without running detection. The pre-analysis state is visually distinct so it can't be mistaken for an analyzed export.
+
 ## [1.24.1] — 2026-11-01
 
 ### Fixed

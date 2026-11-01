@@ -1067,10 +1067,12 @@
     /* v1.34.0: pre-analysis export — accent-colored so the user can tell
        this run carries NO auto-detected redactions (manual regions,
        watermark and export settings only). */
+    /* v1.37.0: pre-analysis export is GREY — a deliberate "not analyzed
+       yet" signal, per field feedback (accent read as ready-to-go). */
     #export-button.export-unanalyzed {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #14100A;
+      background: var(--bg-inset);
+      border-color: var(--line);
+      color: var(--ink);
     }
     #export-button { width: 100%; margin-top: 4px; }
     /* v1.22.0 REQ-133: watermark controls (above #export-quality). */
@@ -1249,7 +1251,7 @@
          the far edge. Labels stay on desktop, glyph-only on mobile. -->
     <div id="header-actions">
       <div class="ha-group" id="ha-video">
-        <button id="change-file" type="button" class="ha-primary" hidden>Open video</button>
+        <button id="change-file" type="button" class="ha-primary" hidden>Open new video</button>
         <button id="clear-file" type="button" class="ha-danger" hidden>Clear</button>
       </div>
       <div class="ha-group" id="ha-project">

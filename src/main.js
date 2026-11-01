@@ -2649,6 +2649,9 @@ export async function mountApp(
       // redactions (manual regions/watermark/export settings only).
       const unanalyzed = app.step === 'ready';
       els.exportButton.classList.toggle('export-unanalyzed', unanalyzed);
+      els.exportButton.textContent = unanalyzed
+        ? 'Export (not analyzed)'
+        : 'Export redacted video';
       els.exportButton.title = unanalyzed
         ? 'Export without analysis — only manual regions, watermark and your export settings apply'
         : 'Export redacted video';

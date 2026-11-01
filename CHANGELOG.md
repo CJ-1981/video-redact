@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.39.3] — 2026-11-01
+
+### Changed
+- The audio waveform strip now decodes at FILE LOAD instead of after the first analysis (field question: "why is the wave track shown only after analysis done?"). The peaks decode was deliberately review-gated in v1.22.0 so the ready workspace never paid a full audio decode — but that left the strip hidden through the whole ready phase. It now fires fire-and-forget on open (generation-guarded, cached per "name:size", silent-degrade preserved): the strip unhides as soon as peaks land, before any analysis. The review-entry call remains as an ordering fallback; re-opens and re-analyzes stay instant via the cache.
+
 ## [1.39.2] — 2026-11-01
 
 ### Fixed

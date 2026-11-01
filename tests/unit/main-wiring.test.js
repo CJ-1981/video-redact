@@ -71,6 +71,15 @@ vi.mock('../../src/ingest.js', () => ({
   openInput: async () => ({ input: FAKE_INPUT, meta: FAKE_META }),
 }));
 
+// v1.39.3: the waveform decode fires at FILE LOAD now (was review-gated).
+// Mocked so tests never run a real audio decode against the fake input.
+const { decodeWaveformMock } = vi.hoisted(() => ({
+  decodeWaveformMock: vi.fn(async () => null),
+}));
+vi.mock('../../src/audio.js', () => ({
+  decodeWaveform: decodeWaveformMock,
+}));
+
 vi.mock('../../src/analyze.js', () => ({
   runAnalyze: runAnalyzeMock,
   sampleFrameAt: async () => {
@@ -4009,6 +4018,53 @@ describe('v1.39.2: the analyze counter reads "N / M (−K trimmed)" — no doubl
 
       expect(frames.textContent).toBe('12');
       expect(total.textContent).toBe(' / 12');
+    } finally {
+      g.restore();
+    }
+  });
+});
+
+describe('v1.39.3: the waveform decodes at FILE LOAD (not first review)', () => {
+  const g = wave3Globals();
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  it('opening a file triggers the peaks decode with the per-file cache key', async () => {
+    decodeWaveformMock.mockClear();
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      expect(decodeWaveformMock).not.toHaveBeenCalled(); // gate: nothing loaded
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      expect(decodeWaveformMock).not.toHaveBeenCalled();
+      await openFile(fakeDoc); // → ready: the strip decode fires here
+      expect(decodeWaveformMock).toHaveBeenCalledTimes(1);
+      const [input, opts] = decodeWaveformMock.mock.calls[0];
+      expect(input).toBe(FAKE_INPUT);
+      expect(opts.cacheKey).toBe('clip.mp4:3');
+      expect(opts.bars).toBe(240);
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('a silent result (no audio) keeps the strip flow working — no crash, no toast', async () => {
+    decodeWaveformMock.mockClear();
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      // decodeWaveform resolves null on no-audio/undecodable (it never
+      // rejects — the catch-all is inside); the app must sail through.
+      decodeWaveformMock.mockResolvedValueOnce(null);
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      await flushApp();
+      expect(
+        toastTexts(fakeDoc).some((t) => t.toLowerCase().includes('waveform')),
+      ).toBe(false);
     } finally {
       g.restore();
     }

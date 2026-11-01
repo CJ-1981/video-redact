@@ -1,6 +1,6 @@
 {
   "name": "video-redact",
-  "version": "1.39.2",
+  "version": "1.39.3",
   "private": true,
   "type": "module",
   "description": "SPEC-VID-001 \u2014 client-side video redaction web app (single-file build; faces/plates pixelated, burned in at export, nothing leaves the machine).",

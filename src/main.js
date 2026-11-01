@@ -3292,6 +3292,11 @@ export async function mountApp(
       // pre-analyze. A mount failure stays contained (mountEditorLive →
       // mountEditorSafe): readable toast, everything else keeps working.
       mountEditorLive();
+      // v1.39.3: the waveform peaks decode at FILE LOAD now (fire-and-forget,
+      // generation-guarded, cached per "name:size") — the strip unhides the
+      // moment peaks land instead of waiting for the first analyze. The
+      // review-entry call below stays as an ordering fallback.
+      void loadWaveform();
       // v1.22.0 REQ-138: a fresh open starts CLEAN — the resets above AND the
       // editor mount trip the dirty hooks (refreshTrackUi), so the flag only
       // clears once the whole load path has settled. A loaded .vrproj or a
@@ -3933,15 +3938,16 @@ export async function mountApp(
    * step → review. Re-mounting here used to be the reason the whole workspace
    * stayed dead until the first analyze finished.
    */
-  // --- Waveform decode (v1.22.0 REQ-206) --------------------------------------
+  // --- Waveform decode (v1.22.0 REQ-206; load-time since v1.39.3) ------------
   //
-  // LAZY: the peaks decode only after the FIRST review entry (an analyze
-  // pass completed) — the ready-state workspace never pays a full audio
-  // decode. The per-file cache (audio.js, keyed "name:size") makes
-  // re-reviews and re-opens of the same file instant; a null result (no
-  // audio / undecodable) is cached too, so a silent-degrade file costs one
-  // decode attempt, ever. Errors never surface (REQ-206: the waveform is an
-  // amenity — the strip just stays hidden).
+  // The peaks decode now fires at FILE OPEN (fire-and-forget, generation-
+  // guarded, cached per "name:size") — originally it was review-gated so the
+  // ready-state workspace never paid a full audio decode, but the strip then
+  // stayed hidden until the first analyze completed, which read as a bug in
+  // the field. The per-file cache makes re-opens and re-analyzes instant; a
+  // null result (no audio / undecodable) is cached too, so a silent-degrade
+  // file costs one decode attempt, ever. Errors never surface (REQ-206: the
+  // waveform is an amenity — the strip just stays hidden).
 
   async function loadWaveform() {
     if (!app.input || !app.file) return;

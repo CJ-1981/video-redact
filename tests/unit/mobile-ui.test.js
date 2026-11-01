@@ -573,8 +573,8 @@ describe('v1.13.0: #bulk-style bulk track-style buttons', () => {
 });
 
 // ---------------------------------------------------------------------------
-// v1.17.0: #bulk-style moves to its own full-width row above #track-list;
-// #pixel-strength segmented group joins #trim-toggle inside #trim-bar
+// v1.38.0: the timeline zoom/peek buttons join #trim-toggle inside #trim-bar
+// (moved from the transport bar); #pixel-strength moves to the analyze panel
 // ---------------------------------------------------------------------------
 
 describe('v1.17.0: #bulk-style is its own row between the summary and #track-list', () => {
@@ -614,19 +614,42 @@ describe('v1.17.0: #bulk-style is its own row between the summary and #track-lis
   });
 });
 
-describe('v1.17.0: #pixel-strength segmented group inside #trim-bar', () => {
+describe('v1.38.0: zoom/peek in #trim-bar; #pixel-strength in the analyze panel', () => {
   // The single #trim-bar instance is the one wrapping #trim-toggle.
   const barStart = HTML.indexOf('id="trim-bar"');
   const barEnd = HTML.indexOf('</div>', HTML.indexOf('id="trim-hint"', barStart));
   const bar = HTML.slice(barStart, barEnd);
 
-  it('exactly one #trim-bar exists and it holds #trim-toggle + #pixel-strength', () => {
+  it('exactly one #trim-bar exists: #trim-toggle with the zoom/peek buttons right of it', () => {
     expect(HTML.split('id="trim-bar"').length - 1).toBe(1);
     expect(bar).toContain('id="trim-toggle"');
-    expect(bar).toContain('id="pixel-strength"');
-    // #bulk-style moved out — it is NOT a trim-bar child anymore.
-    expect(bar).not.toContain('id="bulk-style"');
+    // v1.38.0: zoom + peek moved here from the transport bar.
+    const ids = ['id="zoom-out"', 'id="zoom-in"', 'id="zoom-fit"', 'id="peek-button"'];
+    const toggleAt = bar.indexOf('id="trim-toggle"');
+    for (const id of ids) {
+      expect(bar).toContain(id);
+      // ...and each sits AFTER the trim toggle in DOM order.
+      expect(bar.indexOf(id)).toBeGreaterThan(toggleAt);
+    }
+    // The transport bar no longer carries them.
+    const transport = HTML.slice(HTML.indexOf('id="transport-bar"'), HTML.indexOf('id="trim-bar"'));
+    for (const id of ids) expect(transport).not.toContain(id);
+  });
+
+  it('#pixel-strength moved out of #trim-bar into the analyze panel', () => {
+    // #bulk-style moved out in v1.17.0; #pixel-strength in v1.38.0.
+    expect(bar).not.toContain('id="pixel-strength"');
     expect(HTML.split('id="pixel-strength"').length - 1).toBe(1);
+    // Inside #analyze-panel, within the #sensitivity details.
+    const panelStart = HTML.indexOf('id="analyze-panel"');
+    const panelEnd = HTML.indexOf('</section>', panelStart);
+    const at = HTML.indexOf('id="pixel-strength"');
+    expect(at).toBeGreaterThan(panelStart);
+    expect(at).toBeLessThan(panelEnd);
+    const detStart = HTML.indexOf('id="sensitivity"');
+    const detEnd = HTML.indexOf('</details>', detStart);
+    expect(at).toBeGreaterThan(detStart);
+    expect(at).toBeLessThan(detEnd);
   });
 
   it('is a labeled group with the pixel-block tooltip', () => {
@@ -775,15 +798,16 @@ describe('v1.13.0: "Detection detail (analysis only)" wording', () => {
 // v1.22.0 REQ-204/205/206: zoom controls, peek button, waveform strip
 // ---------------------------------------------------------------------------
 
-describe('v1.22.0 REQ-204: timeline zoom controls in the transport bar', () => {
-  it('ships #zoom-out / #zoom-in / #zoom-fit inside #transport-bar', () => {
+describe('v1.22.0 REQ-204: timeline zoom controls (in #trim-bar since v1.38.0)', () => {
+  it('ships #zoom-out / #zoom-in / #zoom-fit inside #trim-bar, right of the toggle', () => {
     const bar = HTML.slice(
-      HTML.indexOf('id="transport-bar"'),
-      HTML.indexOf('</div>', HTML.indexOf('id="transport-bar"')),
+      HTML.indexOf('id="trim-bar"'),
+      HTML.indexOf('</div>', HTML.indexOf('id="trim-hint"', HTML.indexOf('id="trim-bar"'))),
     );
-    expect(bar).toContain('id="zoom-out"');
-    expect(bar).toContain('id="zoom-in"');
-    expect(bar).toContain('id="zoom-fit"');
+    const toggleAt = bar.indexOf('id="trim-toggle"');
+    for (const id of ['id="zoom-out"', 'id="zoom-in"', 'id="zoom-fit"']) {
+      expect(bar.indexOf(id)).toBeGreaterThan(toggleAt);
+    }
   });
 
   it('the zoom buttons carry accessible names + zoom hints', () => {

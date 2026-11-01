@@ -691,10 +691,10 @@
       pointer-events: none;
     }
 
-    /* ── Timeline header row (v1.15.0): the ✂ trim toggle + the v1.17.0
-       pixelation-strength segmented group share #trim-bar; #trim-hint is
-       hidden by default. v1.17.0: the 320px cap is gone so the strength
-       group has room (it fills the row up to 320px). ── */
+    /* ── Timeline header row (v1.15.0): #trim-bar sits right above the
+       strip. v1.38.0: the timeline zoom/peek buttons moved here from the
+       transport bar, right of the toggle; the pixelation-strength group
+       moved to the analyze panel. #trim-hint is hidden by default. ── */
     #trim-bar {
       display: flex;
       align-items: stretch;
@@ -708,6 +708,13 @@
       padding: 6px 10px;
       font-size: 12.5px;
     }
+    /* v1.38.0: zoom/peek buttons sized to match the trim toggle's height
+       (their old #transport-bar button padding no longer applies here). */
+    #trim-bar button:not(#trim-toggle) {
+      padding: 4px 10px;
+      font-size: 12.5px;
+      min-height: 32px;
+    }
     #trim-toggle[aria-pressed='true'] {
       background: var(--accent);
       color: var(--bg-panel);
@@ -716,11 +723,11 @@
     }
     /* v1.17.0: pixelation strength — segmented control mirroring #size-filter
        (joined borders, accent fill on the pressed segment). data-strength
-       values: fine / normal / coarse / max ('normal' ships pressed). */
+       values: fine / normal / coarse / max ('normal' ships pressed).
+       v1.38.0: lives in the analyze panel now, sized like #size-filter. */
     #pixel-strength {
       display: flex;
-      flex: 1 1 240px;
-      min-width: 0;
+      margin-top: 8px;
       max-width: 320px;
     }
     .strength-btn {
@@ -1351,35 +1358,26 @@
             <option value="4">4×</option>
           </select>
           <span id="transport-time" class="num">0:00.0 / 0:00.0</span>
-          <!-- v1.22.0 REQ-204: timeline view zoom (buttons + ctrl-wheel on the
-               strip; shift-drag pans). Fit resets the window to the whole
-               clip. The editor owns the gestures; main.js owns the window. -->
-          <button id="zoom-out" type="button" title="Zoom out the timeline view" aria-label="Zoom out timeline">🔍−</button>
-          <button id="zoom-in" type="button" title="Zoom in on the timeline view (ctrl+wheel zooms at the cursor)" aria-label="Zoom in timeline">🔍+</button>
-          <button id="zoom-fit" type="button" title="Fit the whole clip in the timeline view" aria-label="Fit timeline view">⤢ Fit</button>
-          <!-- v1.22.0 REQ-205: hold-to-peek — HOLD (pointer or the A key) to
-               see the RAW frame with no redactions; release restores. -->
-          <button id="peek-button" type="button" title="Hold to peek at the raw, unredacted frame (hold A)" aria-label="Hold to peek at raw frame">👁 Peek</button>
         </div>
         <p id="manual-hint" class="manual-hint">Missed a face? Pause (<kbd>Space</kbd>) and drag a box on the video — it becomes a solid redaction over the whole clip.</p>
         <!-- v1.15.1: trim mode belongs to the TIMELINE, not the redaction
              tracks — the toggle lives here, right above the strip. -->
         <div id="trim-bar">
           <button id="trim-toggle" type="button" aria-pressed="false" title="Trim mode: drag on the timeline to mark regions for deletion — greyed-out regions are removed at export">✂ Trim</button>
+          <!-- v1.38.0: timeline view zoom (v1.22.0 REQ-204: buttons + ctrl-wheel
+               on the strip; shift-drag pans; Fit resets the window to the
+               whole clip — the editor owns the gestures, main.js owns the
+               window) and hold-to-peek (v1.22.0 REQ-205: HOLD pointer or the
+               A key to see the RAW frame; release restores) moved here from
+               the transport bar, right of the trim toggle (field request). -->
+          <button id="zoom-out" type="button" title="Zoom out the timeline view" aria-label="Zoom out timeline">🔍−</button>
+          <button id="zoom-in" type="button" title="Zoom in on the timeline view (ctrl+wheel zooms at the cursor)" aria-label="Zoom in timeline">🔍+</button>
+          <button id="zoom-fit" type="button" title="Fit the whole clip in the timeline view" aria-label="Fit timeline view">⤢ Fit</button>
+          <button id="peek-button" type="button" title="Hold to peek at the raw, unredacted frame (hold A)" aria-label="Hold to peek at raw frame">👁 Peek</button>
           <label class="toggle" for="skip-trims-toggle" style="display: flex; align-items: center; gap: 6px;">
             <input type="checkbox" id="skip-trims-toggle" />
             Skip trimmed parts during playback
           </label>
-          <!-- v1.17.0: pixelation strength — segmented control mirroring
-               #size-filter (selected segment = accent fill). data-strength
-               keys the pixel block size; main.js owns aria-pressed and the
-               setting ('normal' is the shipped default). -->
-          <div id="pixel-strength" role="group" aria-label="Pixelation strength" title="Pixel block size for redaction — larger blocks hide more">
-            <button type="button" class="strength-btn" data-strength="fine" aria-pressed="false">Fine</button>
-            <button type="button" class="strength-btn" data-strength="normal" aria-pressed="true">Normal</button>
-            <button type="button" class="strength-btn" data-strength="coarse" aria-pressed="false">Coarse</button>
-            <button type="button" class="strength-btn" data-strength="max" aria-pressed="false">Max</button>
-          </div>
           <span id="trim-hint" class="stat-line" hidden>Drag on the timeline to mark a region to cut. Drag a ✂ edge to adjust; ✕ removes it. Trimmed regions are skipped during analysis and removed at export.</span>
         </div>
         <section id="timeline" aria-label="Track timeline — click a chip to scrub and toggle its redaction; drag a chip edge to trim its span">
@@ -1509,6 +1507,21 @@
               <option value="720p">Fast — 720p (lower detail)</option>
             </select>
             <p class="stat-line">Affects analysis speed only — the export always uses the full-resolution source.</p>
+          </div>
+          <!-- v1.38.0: pixelation strength moved here from #trim-bar (field
+               request). It is a redaction-appearance setting (preview AND
+               export share the same pixel block size), not an analyze-pass
+               parameter — it lives beside the other detection/output knobs.
+               Segmented control mirroring #size-filter (selected segment =
+               accent fill). data-strength keys the pixel block size; main.js
+               owns aria-pressed and the setting ('normal' is the shipped
+               default). -->
+          <h3>Pixelation strength</h3>
+          <div id="pixel-strength" role="group" aria-label="Pixelation strength" title="Pixel block size for redaction — larger blocks hide more">
+            <button type="button" class="strength-btn" data-strength="fine" aria-pressed="false">Fine</button>
+            <button type="button" class="strength-btn" data-strength="normal" aria-pressed="true">Normal</button>
+            <button type="button" class="strength-btn" data-strength="coarse" aria-pressed="false">Coarse</button>
+            <button type="button" class="strength-btn" data-strength="max" aria-pressed="false">Max</button>
           </div>
           </details>
 

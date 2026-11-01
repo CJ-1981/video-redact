@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.38.0] — 2026-11-01
+
+### Changed
+- Timeline toolbar regrouped (field request): the timeline zoom controls (🔍− / 🔍+ / ⤢ Fit) and the 👁 hold-to-peek button moved from the transport bar to the trim bar, directly right of the ✂ Trim toggle — all timeline-view gestures now live in one row above the strip. Ids and behavior are unchanged (ctrl+wheel zoom, shift-drag pan, hold A to peek).
+- The pixelation-strength selector (Fine / Normal / Coarse / Max) moved from the trim bar into the Analyze panel's Detection settings, beside the minimum-object-size and detection-detail controls. Same ids, same wiring — preview and export still share the identical block size.
+
 ## [1.37.0] — 2026-11-01
 
 ### Changed

@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.38.1] — 2026-11-01
+
+### Fixed
+- Pixelation-strength changes now apply to the preview INSTANTLY (field report: "i need to press peek once then it applies"). The strength click (and every track-affecting action — per-row style flips, bulk All-solid/All-pixelate, enable/disable) only re-rendered the timeline/track-list DOM; the preview canvas redraws on the frame loop, which delivers nothing while the video is paused — so the new block size or style stayed invisible until Peek or playback forced a draw. `refreshTrackUi` and the strength handler now kick an immediate `editor.redraw()` after the DOM render. Reproduced with an rVFC-registered-but-never-fires probe (the reporting machine's exact frame-loop behavior): canvas hash was unchanged after a paused strength click before the fix and flips immediately after.
+
 ## [1.38.0] — 2026-11-01
 
 ### Changed

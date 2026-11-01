@@ -2715,6 +2715,11 @@ export async function mountApp(
     markDirty(); // v1.22.0 REQ-138: every track/trim mutation rides through here
     updateTrackSummary();
     editor?.refresh();
+    // v1.38.1: refresh() re-renders chips/rows DOM only — the CANVAS needs an
+    // explicit redraw or rVFC-dead machines (paused video, no frame loop,
+    // no timeupdate) keep showing the previous redaction (style flips, bulk
+    // restyle, enable/disable, strength all land stale until Peek/timeupdate).
+    editor?.redraw();
     if (els.trackListEmpty) els.trackListEmpty.hidden = app.tracks.length > 0;
   }
 
@@ -4118,7 +4123,10 @@ export async function mountApp(
     const btn = target?.closest?.('.strength-btn');
     if (!btn) return;
     applyPixelStrength(btn.getAttribute?.('data-strength'));
-    editor?.refresh(); // the preview re-renders at the new block size
+    // v1.38.1: redraw (not refresh) — strength changes pixels only, no
+    // chips/rows DOM; refresh() left rVFC-dead machines on the old block
+    // size until Peek or the next timeupdate (field report).
+    editor?.redraw();
   });
 
   // --- v1.21.0: track-list class filter (#track-filter) ----------------------

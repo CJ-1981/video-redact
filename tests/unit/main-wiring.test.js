@@ -1883,14 +1883,18 @@ describe('mountApp (v1.13.0): #bulk-solid / #bulk-pixelate wiring', () => {
     await flushApp();
   }
 
-  /** Editor handle that counts refresh() calls (the bulk click must refresh). */
-  function refreshCountingHandle(refreshes) {
+  /** Editor handle that counts refresh() calls (the bulk click must refresh).
+   *  Pass `redraws` to also record immediate canvas redraws (v1.38.1: style
+   *  changes must kick redraw, not just the chips/rows render). */
+  function refreshCountingHandle(refreshes, redraws = null) {
     return {
       destroy() {},
       refresh: () => {
         refreshes.push('refresh');
       },
-      redraw() {},
+      redraw: () => {
+        if (redraws) redraws.push('redraw');
+      },
       getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
     };
   }
@@ -1900,11 +1904,12 @@ describe('mountApp (v1.13.0): #bulk-solid / #bulk-pixelate wiring', () => {
     armGlobals(fakeView);
     try {
       const refreshes = [];
+      const redraws = [];
       let hooks = null;
       await main.mountApp(fakeDoc, {
         mountEditor: (_els, editorHooks) => {
           hooks = editorHooks;
-          return refreshCountingHandle(refreshes);
+          return refreshCountingHandle(refreshes, redraws);
         },
       });
       await openFile(fakeDoc);
@@ -1920,6 +1925,10 @@ describe('mountApp (v1.13.0): #bulk-solid / #bulk-pixelate wiring', () => {
       expect(st.tracks).toHaveLength(2);
       expect(st.tracks.every((t) => t.style === 'solid')).toBe(true);
       expect(refreshes.length).toBeGreaterThanOrEqual(1);
+      // v1.38.1: a canvas-affecting style change must kick an immediate
+      // redraw too (rVFC-dead machines otherwise show the old style until
+      // the next timeupdate / peek).
+      expect(redraws.length).toBeGreaterThanOrEqual(1);
       expect(solidBtn.disabled).toBe(false);
     } finally {
       restoreGlobals();
@@ -1931,11 +1940,12 @@ describe('mountApp (v1.13.0): #bulk-solid / #bulk-pixelate wiring', () => {
     armGlobals(fakeView);
     try {
       const refreshes = [];
+      const redraws = [];
       let hooks = null;
       await main.mountApp(fakeDoc, {
         mountEditor: (_els, editorHooks) => {
           hooks = editorHooks;
-          return refreshCountingHandle(refreshes);
+          return refreshCountingHandle(refreshes, redraws);
         },
       });
       await openFile(fakeDoc);
@@ -1946,6 +1956,7 @@ describe('mountApp (v1.13.0): #bulk-solid / #bulk-pixelate wiring', () => {
       expect(st.tracks).toHaveLength(1);
       expect(st.tracks[0].style).toBe('pixelate');
       expect(refreshes.length).toBeGreaterThanOrEqual(1);
+      expect(redraws.length).toBeGreaterThanOrEqual(1); // v1.38.1 canvas kick
     } finally {
       restoreGlobals();
     }
@@ -2453,13 +2464,13 @@ describe('mountApp (v1.17.0): #pixel-strength wiring + strength in the seams', (
     return { group, buttons };
   }
 
-  function hooksHandle(refreshes, sink) {
+  function hooksHandle(events, sink) {
     return (_els, editorHooks) => {
       sink.hooks = editorHooks;
       return {
         destroy() {},
-        refresh: () => refreshes.push('refresh'),
-        redraw() {},
+        refresh: () => events.push('refresh'),
+        redraw: () => events.push('redraw'),
         getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
       };
     };
@@ -2470,9 +2481,9 @@ describe('mountApp (v1.17.0): #pixel-strength wiring + strength in the seams', (
     armGlobals(fakeView);
     try {
       const { group, buttons } = seedStrengthGroup(elsById);
-      const refreshes = [];
+      const events = [];
       const sink = {};
-      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(refreshes, sink) });
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(events, sink) });
       await openFile(fakeDoc); // the editor (and its hooks) mounts at ready
 
       // Mount default: 'normal' pressed (the shipped default), state normal.
@@ -2486,7 +2497,12 @@ describe('mountApp (v1.17.0): #pixel-strength wiring + strength in the seams', (
         ['false', 'false', 'false', 'true'],
       );
       expect(sink.hooks.getState().pixelStrength).toBe('max');
-      expect(refreshes.length).toBeGreaterThanOrEqual(1); // preview re-render
+      expect(events.filter((e) => e === 'refresh').length).toBeGreaterThanOrEqual(1); // DOM re-render
+      // v1.38.1: the strength click must also kick an immediate CANVAS
+      // redraw — refresh() re-renders chips/rows only, so on rVFC-dead
+      // machines with the video paused the new block size never appeared
+      // until the user held Peek once (field report).
+      expect(events).toContain('redraw');
 
       // A click on a non-button target is a no-op; an invalid data-strength
       // degrades to 'normal' (button states still swapped).

@@ -50,9 +50,9 @@ describe('formatVersionBadge (footer version badge)', () => {
 });
 
 describe('v1.28.0 version stamping wiring', () => {
-  it('package.json is at the 1.38.0 release version', () => {
+  it('package.json is at the 1.38.1 release version', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-    expect(pkg.version).toBe('1.38.0');
+    expect(pkg.version).toBe('1.38.1');
   });
 
   it('index.html hosts the #app-version badge in the footer', () => {

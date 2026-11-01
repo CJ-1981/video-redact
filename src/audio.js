@@ -19,9 +19,9 @@
  *                          SILENTLY (REQ-206: "no error surfaced").
  *   clearWaveformCache()   test seam — drops the per-file result cache
  *
- * LAZY + CACHED (REQ-206): main.js calls decodeWaveform only after the first
- * review entry, keyed by `name:size` in this module-level Map (no
- * IndexedDB — the peaks are cheap to recompute and die with the session).
+ * CACHED (REQ-206): main.js fires the decode at FILE OPEN since v1.39.3
+ * (originally review-gated), keyed by `name:size` in this module-level Map
+ * (no IndexedDB — the peaks are cheap to recompute and die with the session).
  * The PROMISE is cached, so concurrent calls dedupe and a failure result is
  * cached too (no per-refresh decode storm on undecodable audio).
  *

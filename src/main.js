@@ -276,8 +276,10 @@ const STEP_TRANSITIONS = {
     CLEAR: 'gate',
   },
   // v1.10.0: 'ready' carries a LIVE editor (mounted at file-open) — playback,
-  // scrub and manual-box drawing all work here; Export stays gated to the
-  // post-analyze states (review/done) so nothing ships before an analysis ran.
+  // scrub and manual-box drawing all work here. Since v1.35.0 EXPORT_START is
+  // ALSO legal at ready (the grey pre-analysis export — manual regions,
+  // watermark and settings, no auto tracks); it stays rejected at gate/
+  // analyzing.
   ready: {
     ANALYZE_START: 'analyzing',
     // v1.34.0: export before analysis — manual regions/watermark/resolution

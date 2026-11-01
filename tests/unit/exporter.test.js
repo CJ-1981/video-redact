@@ -1684,3 +1684,32 @@ describe('export resolution + audio removal (v1.16.0)', () => {
     expect(captured.audio).toBeUndefined();
   });
 });
+
+describe('iOS Web Share delivery (v1.29.0)', () => {
+  it('uses navigator.share with the file when canShare accepts files', async () => {
+    // share-capable iOS-like environment
+    const shareCalls = [];
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      share: async (data) => { shareCalls.push(data); },
+      canShare: (data) => Array.isArray(data.files) && data.files.length > 0,
+    });
+    const input = fakeInput();
+    const track = makeTrack({ keyframes: new Map([[1, { x: 100, y: 50, w: 40, h: 40 }]]), start: 1, end: 3 });
+    const result = await runExport({ input, tracks: [track], settings: { outputMode: 'buffer', quality: 'high' } });
+    expect(result.blob).toBeInstanceOf(Blob);
+    expect(shareCalls).toHaveLength(1);
+    expect(shareCalls[0].files[0]).toBeInstanceOf(File);
+    expect(shareCalls[0].files[0].name).toMatch(/^redacted-.*\.mp4$/);
+  });
+
+  it('falls through to picker/blob when canShare rejects files', async () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      share: async () => {},
+      canShare: () => false,
+    });
+    const result = await runExport({ input: fakeInput(), tracks: [], settings: { outputMode: 'buffer', quality: 'high' } });
+    expect(result.blob).toBeInstanceOf(Blob);
+  });
+});

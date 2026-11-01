@@ -52,6 +52,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Changed
 - Header redesign: one cohesive action cluster — "🎬 Open video" + "✕ Clear" grouped as video actions, "💾 Save" / "📂 Load" grouped as project actions, theme toggle isolated at the far edge. Labels compact to glyphs on phones (with full titles on hover); touch targets ≥ 40px.
 
+## [1.29.0] — 2026-11-01
+
+### Fixed
+- iOS Safari export delivery: iOS ignores the `<a download>` attribute for blob URLs, so the anchor-click download silently failed. Exports now prefer the **Web Share API** (save to Files / share sheet) whenever the browser can share files — the reliable path on iOS — with the save-picker and Blob-download fallbacks retained for Chromium.
+
 ## [1.28.1] — 2026-11-01
 
 ### Fixed

@@ -579,6 +579,28 @@ async function deliver(staging, blob, settings, bytes, ext, mime) {
     return { handle: settings.saveHandle, opfsPath: undefined, bytes };
   }
 
+  // v1.29.0 iOS path: iOS Safari ignores <a download> for blob URLs, so
+  // the Web Share API is the ONLY reliable delivery there. Preferred
+  // whenever the file is shareable (Safari 15+; keep the blob alive — iOS
+  // reads it lazily after share resolves).
+  const shareFile = globalThis.navigator?.share?.bind(globalThis.navigator);
+  const canShareFile =
+    shareFile &&
+    typeof globalThis.navigator.canShare === 'function' &&
+    (() => {
+      try {
+        const probe = new Blob([new Uint8Array(8)], { type: mime });
+        return globalThis.navigator.canShare({ files: [new File([probe], filename, { type: mime })] });
+      } catch {
+        return false;
+      }
+    })();
+  if (canShareFile) {
+    await shareFile({ files: [new File([blob], filename, { type: mime })] });
+    await removeTemp(staging);
+    return { blob, handle: null, opfsPath: undefined, bytes };
+  }
+
   const picker = globalThis.showSaveFilePicker;
   if (typeof picker === 'function') {
     try {

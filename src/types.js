@@ -115,11 +115,15 @@ export {};
  * @property {{dashcamMode: boolean, padSeconds: number,
  *             quality: 'high'|'balanced',
  *             confFace?: number, confPlate?: number,
+ *             detectFace?: boolean, detectPlate?: boolean,
  *             downscale?: 'full'|'1080p'|'720p', minSizePx?: number,
  *             trims?: Array<{start: number, end: number}>}} settings
  *     `confFace`/`confPlate` (v1.5.0 REQ-113): detection confidence
  *     thresholds from the Analyze-panel sensitivity sliders (face default
  *     0.6, plate 0.25); undefined → detector defaults.
+ *     `detectFace`/`detectPlate` (v1.39.0): per-class detector toggles from
+ *     the Analyze-panel checkboxes — false skips that model entirely for the
+ *     pass; undefined/true → the class runs.
  *     `downscale` (v1.12.0 REQ-117): analysis-canvas LONG-edge cap —
  *     'full' (default, native px) | '1080p' (cap 1920) | '720p' (cap 1280);
  *     detections are rescaled to display space before tracking.

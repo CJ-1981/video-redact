@@ -1004,6 +1004,7 @@ export function describeCompareContext(settings) {
  * undefined so analyze.js applies its own DEFAULT_PLATE_STRIDE.
  *
  * @returns {{confFace: number, confPlate: number, dashcamMode: boolean,
+ *            detectFace: boolean, detectPlate: boolean,
  *            plateStride: number | undefined}}
  */
 export function DEFAULT_SETTINGS() {
@@ -1011,6 +1012,8 @@ export function DEFAULT_SETTINGS() {
     confFace: THRESHOLD_FACE_RANGE.default,
     confPlate: THRESHOLD_PLATE_RANGE.default,
     dashcamMode: false,
+    detectFace: true,
+    detectPlate: true,
     plateStride: undefined,
   };
 }
@@ -2347,6 +2350,10 @@ export async function mountApp(
     analyzeFps: $('analyze-fps'),
     analyzeEta: $('analyze-eta'),
     dashcamToggle: /** @type {HTMLInputElement | null} */ ($('dashcam-toggle')),
+    // v1.39.0: per-class detector toggles (Face/Plate) — unchecked = the
+    // analyze pass skips that model entirely. Read live at analyze start.
+    detectFaceToggle: /** @type {HTMLInputElement | null} */ ($('detect-face-toggle')),
+    detectPlateToggle: /** @type {HTMLInputElement | null} */ ($('detect-plate-toggle')),
     analyzePanel: $('analyze-panel'),
     confFace: /** @type {HTMLInputElement | null} */ ($('conf-face')),
     confFaceOut: /** @type {HTMLOutputElement | null} */ ($('conf-face-out')),
@@ -3380,12 +3387,16 @@ export async function mountApp(
    * Push a settings object into the analyze-panel controls (sliders, live
    * readouts, dashcam toggle). DOM-side helper shared by the initial mount
    * state and clearAll — both start from DEFAULT_SETTINGS().
-   * @param {{confFace: number, confPlate: number, dashcamMode: boolean}} settings
+   * @param {{confFace: number, confPlate: number, dashcamMode: boolean,
+   *          detectFace?: boolean, detectPlate?: boolean}} settings
    */
   function applySettings(settings) {
     if (els.confFace) els.confFace.value = String(settings.confFace);
     if (els.confPlate) els.confPlate.value = String(settings.confPlate);
     if (els.dashcamToggle) els.dashcamToggle.checked = settings.dashcamMode === true;
+    // v1.39.0: the detector toggles reset with the rest of the panel.
+    if (els.detectFaceToggle) els.detectFaceToggle.checked = settings.detectFace !== false;
+    if (els.detectPlateToggle) els.detectPlateToggle.checked = settings.detectPlate !== false;
     syncThresholdReadouts();
   }
 
@@ -3768,6 +3779,11 @@ export async function mountApp(
     // REQ-113: the sensitivity sliders drive the analyze pass (and every
     // re-analyze); absent/invalid sliders → omitted → detector defaults.
     const settings = { dashcamMode: els.dashcamToggle?.checked === true };
+    // v1.39.0: per-class detector toggles — read LIVE like the conf sliders;
+    // only an explicit UNCHECK travels into the pass (omitted → runs,
+    // fail-open, mirroring the confThreshold contract in analyze.js).
+    if (els.detectFaceToggle?.checked === false) settings.detectFace = false;
+    if (els.detectPlateToggle?.checked === false) settings.detectPlate = false;
     // v1.15.2: trimmed regions are skipped during analysis (their frames
     // never export) — a snapshot at pass start; edits mid-pass don't apply.
     if (app.trims?.length) {
@@ -4611,6 +4627,10 @@ export async function mountApp(
     applyDownscale(s.downscale);
     applySizeFilter(Number(s.minSizePx));
     if (els.dashcamToggle) els.dashcamToggle.checked = s.dashcamMode === true;
+    // v1.39.0: the per-class detector toggles restore like dashcamMode
+    // (omitted/false-y → run; only an explicit false stays skipped).
+    if (els.detectFaceToggle) els.detectFaceToggle.checked = s.detectFace !== false;
+    if (els.detectPlateToggle) els.detectPlateToggle.checked = s.detectPlate !== false;
 
     // 2. Trims + tracks. Duration known → normalize/clamp against it; a
     //    project saved against a longer video loses its past-the-end spans

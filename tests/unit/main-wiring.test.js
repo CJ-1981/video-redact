@@ -502,6 +502,8 @@ describe('main-wiring: DEFAULT_SETTINGS factory (v1.6.0)', () => {
       confFace: 0.6,
       confPlate: 0.25,
       dashcamMode: false,
+      detectFace: true, // v1.39.0 per-class detector toggles
+      detectPlate: true,
       plateStride: undefined,
     });
   });
@@ -516,6 +518,8 @@ describe('main-wiring: DEFAULT_SETTINGS factory (v1.6.0)', () => {
       confFace: 0.6,
       confPlate: 0.25,
       dashcamMode: false,
+      detectFace: true, // v1.39.0 per-class detector toggles
+      detectPlate: true,
       plateStride: undefined,
     });
   });
@@ -3780,6 +3784,97 @@ describe('export before analysis (v1.34.0)', () => {
     expect(main.deriveStep('ready', 'EXPORT_START')).toBe('exporting');
     // the UI class is applied by updateButtons — pin the pure half via the
     // exported reducer and the existing fake harness in the next block.
+  });
+});
+
+describe('v1.39.0: per-class detector toggles ride the analyze pass', () => {
+  const g = wave3Globals();
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  /** Seed the Face/Plate checkboxes (checked = run, the shipped default). */
+  function seedDetectToggles(elsById) {
+    const face = makeFakeEl('INPUT');
+    face.checked = true;
+    const plate = makeFakeEl('INPUT');
+    plate.checked = true;
+    elsById.set('detect-face-toggle', face);
+    elsById.set('detect-plate-toggle', plate);
+    return { face, plate };
+  }
+
+  it('DEFAULT_SETTINGS carries both toggles ON', () => {
+    const d = main.DEFAULT_SETTINGS();
+    expect(d.detectFace).toBe(true);
+    expect(d.detectPlate).toBe(true);
+  });
+
+  it('unchecked plate → settings.detectPlate=false; a checked class is OMITTED (fail-open)', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const { face, plate } = seedDetectToggles(elsById);
+      g.arm(fakeView);
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      plate.checked = false;
+      face.checked = true;
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      const call = runAnalyzeMock.mock.calls.at(-1)?.[0];
+      expect(call.settings.detectPlate).toBe(false);
+      expect('detectFace' in call.settings).toBe(false); // omitted → runs
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('both unchecked → both flags travel into the pass', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const { face, plate } = seedDetectToggles(elsById);
+      g.arm(fakeView);
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      face.checked = false;
+      plate.checked = false;
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      const call = runAnalyzeMock.mock.calls.at(-1)?.[0];
+      expect(call.settings.detectFace).toBe(false);
+      expect(call.settings.detectPlate).toBe(false);
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('mount and clearAll restore both toggles to checked (DEFAULT_SETTINGS)', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const { face, plate } = seedDetectToggles(elsById);
+      face.checked = false;
+      plate.checked = false;
+      await main.mountApp(fakeDoc, { mountEditor: () => null }); // mount reset
+      expect(face.checked).toBe(true);
+      expect(plate.checked).toBe(true);
+
+      await openFile(fakeDoc);
+      face.checked = false;
+      plate.checked = false;
+      fakeDoc.getElementById('clear-file').dispatch('click'); // clear reset
+      await flushApp();
+      expect(face.checked).toBe(true);
+      expect(plate.checked).toBe(true);
+    } finally {
+      g.restore();
+    }
   });
 });
 

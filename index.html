@@ -898,6 +898,21 @@
       font-size: 13px;
       min-height: 32px;
     }
+    /* v1.39.0: per-class detector toggles — the Face/Plate checkbox sits
+       left of its threshold slider row (unchecked = skip that model). */
+    .detect-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .detect-row .slider-row { flex: 1 1 auto; }
+    .detect-toggle {
+      flex: none;
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--accent);
+    }
     .slider-row .slider-name { flex: none; min-width: 5.5ch; color: var(--ink); }
     .slider-row input[type='range'] { flex: 1; accent-color: var(--accent); min-width: 0; }
     .slider-row output {
@@ -1473,16 +1488,27 @@
             <div role="group" aria-label="Detection sensitivity">
             <h3>Detection sensitivity</h3>
             <p class="stat-line">Lower values detect more (weaker confidence still counts); higher values only detect clear, certain objects.</p>
-            <label class="slider-row" for="conf-face">
-              <span class="slider-name">Face</span>
-              <input type="range" id="conf-face" min="0.10" max="0.90" step="0.05" value="0.60" />
-              <output id="conf-face-out" for="conf-face">0.60</output>
-            </label>
-            <label class="slider-row" for="conf-plate">
-              <span class="slider-name">Plate</span>
-              <input type="range" id="conf-plate" min="0.05" max="0.90" step="0.05" value="0.25" />
-              <output id="conf-plate-out" for="conf-plate">0.25</output>
-            </label>
+            <!-- v1.39.0: per-class detector toggles — uncheck a class to skip
+                 that model entirely for the next pass (inference AND tiles),
+                 roughly halving the per-frame cost when only one kind of
+                 privacy object is needed. Read live at analyze start;
+                 omitted (checked) → both run. -->
+            <div class="detect-row">
+              <input type="checkbox" id="detect-face-toggle" class="detect-toggle" checked title="Detect faces this pass — uncheck to skip the face model entirely (faster analysis)" aria-label="Detect faces" />
+              <label class="slider-row" for="conf-face">
+                <span class="slider-name">Face</span>
+                <input type="range" id="conf-face" min="0.10" max="0.90" step="0.05" value="0.60" />
+                <output id="conf-face-out" for="conf-face">0.60</output>
+              </label>
+            </div>
+            <div class="detect-row">
+              <input type="checkbox" id="detect-plate-toggle" class="detect-toggle" checked title="Detect license plates this pass — uncheck to skip the plate model entirely (faster analysis)" aria-label="Detect license plates" />
+              <label class="slider-row" for="conf-plate">
+                <span class="slider-name">Plate</span>
+                <input type="range" id="conf-plate" min="0.05" max="0.90" step="0.05" value="0.25" />
+                <output id="conf-plate-out" for="conf-plate">0.25</output>
+              </label>
+            </div>
 
             <!-- REQ-120 (v1.12.0): detection minimum-size filter — segmented
                  button group. data-size is the min box dimension in display

@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.39.0] — 2026-11-01
+
+### Added
+- Per-class detector toggles (field request): ☑ Face and ☑ Plate checkboxes now sit next to their sensitivity sliders in the Analyze panel. Unchecking a class skips that model ENTIRELY for the next pass — full-frame AND enhanced-scan tiles — so a single-class analysis costs one inference instead of two and finishes roughly twice as fast. Checked (the default) runs both, exactly as before; the toggles ride Save/Load project like the enhanced-scan switch and reset with the panel on file load and Clear.
+
 ## [1.38.1] — 2026-11-01
 
 ### Fixed

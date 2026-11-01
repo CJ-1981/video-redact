@@ -171,6 +171,7 @@ function defaultYieldNow() {
  * @param {import('./types.js').MediaMeta} [opts.meta] Display size / fps / duration.
  * @param {{dashcamMode?: boolean, plateStride?: number, padSeconds?: number,
  *          confFace?: number, confPlate?: number, epPolicy?: string[],
+ *          detectFace?: boolean, detectPlate?: boolean,
  *          downscale?: 'full'|'1080p'|'720p', minSizePx?: number,
  *          trims?: Array<{start: number, end: number}>}} [opts.settings]
  *     Analysis settings. `plateStride` (default 2) is the full-pass plate
@@ -178,6 +179,9 @@ function defaultYieldNow() {
  *     REQ-007); `confFace` / `confPlate` (REQ-113, defaults 0.6 / 0.25 —
  *     the detector's DEFAULT_CONF_FACE / DEFAULT_CONF_PLATE) gate the face /
  *     plate decode on EVERY detect call, full-frame AND dashcam tile passes;
+ *     `detectFace` / `detectPlate` (v1.39.0, default true) skip that model
+ *     ENTIRELY when false — full pass AND tiles — so a single-class pass
+ *     costs one inference instead of two (fail-open: omitted → runs);
  *     `epPolicy` overrides the ORT execution-provider ladder (ADR-5);
  *     `downscale` (REQ-117, default 'full') caps the analysis-canvas LONG
  *     edge ('1080p' → 1920, '720p' → 1280) — detections are rescaled back to
@@ -277,6 +281,12 @@ export async function runAnalyze({
     const faceOpts = { confThreshold: settings?.confFace };
     const plateOpts = { confThreshold: settings?.confPlate };
 
+    // v1.39.0 per-class detector toggles: `false` skips that model ENTIRELY
+    // (full pass AND tiles) — the user pays for one inference, not two.
+    // Fail-open like confThreshold: omitted/undefined → the class runs.
+    const runFace = settings?.detectFace !== false;
+    const runPlate = settings?.detectPlate !== false;
+
     const tracker = new Tracker();
     const frameTimes = []; // rolling clock stamps for the fps estimate
     let frameCount = 0;
@@ -300,23 +310,32 @@ export async function runAnalyze({
         sample.draw(ctx, 0, 0, analysisW, analysisH);
         const frame = ctx.getImageData(0, 0, analysisW, analysisH);
 
-        // Full pass: faces every frame, plates every plateStride-th frame.
-        const dets = [...(await detectors.detectFace(frame, faceOpts))];
-        if (frameCount % plateStride === 0) {
+        // Full pass: faces every frame, plates every plateStride-th frame
+        // (each gated by its v1.39.0 toggle — skipped classes cost nothing).
+        const dets = [];
+        if (runFace) {
+          dets.push(...(await detectors.detectFace(frame, faceOpts)));
+        }
+        if (runPlate && frameCount % plateStride === 0) {
           dets.push(...(await detectors.detectPlate(frame, plateOpts)));
         }
 
         // Dashcam pass: tiled face+plate every analyzed frame, tile-local
         // rasters merged back into full-frame display coords BEFORE tracking
-        // (design §4.1 — tracking never sees tile coordinates).
+        // (design §4.1 — tracking never sees tile coordinates). Tiles honor
+        // the same per-class toggles as the full pass.
         if (tiles) {
           const tileDets = [];
           for (let i = 0; i < tiles.length; i++) {
             const tile = tiles[i];
             const raster = ctx.getImageData(tile.x, tile.y, tile.w, tile.h);
             const tag = (d) => ({ ...d, tileIndex: i, pass: 'tile' });
-            tileDets.push(...(await detectors.detectFace(raster, faceOpts)).map(tag));
-            tileDets.push(...(await detectors.detectPlate(raster, plateOpts)).map(tag));
+            if (runFace) {
+              tileDets.push(...(await detectors.detectFace(raster, faceOpts)).map(tag));
+            }
+            if (runPlate) {
+              tileDets.push(...(await detectors.detectPlate(raster, plateOpts)).map(tag));
+            }
           }
           dets.push(...mergeTiles(tileDets, tiles));
         }

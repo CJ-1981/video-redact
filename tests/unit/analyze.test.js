@@ -232,8 +232,76 @@ describe('stride schedule — faces every frame, plates every 2nd (REQ-009)', ()
   });
 });
 
-describe('configurable thresholds (REQ-113) — settings.confFace/confPlate reach EVERY detect call', () => {
-  it('passes the thresholds to full-frame AND dashcam tile detect calls', async () => {
+describe('per-class detector toggles (v1.39.0) — false skips that model entirely', () => {
+  it('detectPlate:false → the plate detector never runs; face tracks survive', async () => {
+    installSink([0, 0.1, 0.2, 0.3]);
+
+    const result = await runAnalyze(baseOpts({ settings: { detectPlate: false } }));
+
+    expect(detState.detectFace).toHaveBeenCalledTimes(4);
+    expect(detState.detectPlate).toHaveBeenCalledTimes(0);
+    expect(result.tracks.some((t) => t.cls === 'face')).toBe(true);
+    expect(result.tracks.some((t) => t.cls === 'plate')).toBe(false);
+  });
+
+  it('detectFace:false → the face detector never runs; plates still track', async () => {
+    installSink([0, 0.1, 0.2, 0.3]);
+
+    const result = await runAnalyze(baseOpts({ settings: { detectFace: false } }));
+
+    expect(detState.detectFace).toHaveBeenCalledTimes(0);
+    expect(detState.detectPlate).toHaveBeenCalledTimes(2); // stride schedule intact
+    expect(result.tracks.some((t) => t.cls === 'plate')).toBe(true);
+    expect(result.tracks.some((t) => t.cls === 'face')).toBe(false);
+  });
+
+  it('both false → zero inference, zero tracks, the run still completes', async () => {
+    installSink([0, 0.1, 0.2, 0.3]);
+
+    const result = await runAnalyze(
+      baseOpts({ settings: { detectFace: false, detectPlate: false } }),
+    );
+
+    expect(detState.detectFace).toHaveBeenCalledTimes(0);
+    expect(detState.detectPlate).toHaveBeenCalledTimes(0);
+    expect(result.cancelled).toBe(false);
+    expect(result.frameCount).toBe(4);
+    expect(result.tracks).toHaveLength(0);
+  });
+
+  it('omitted toggles → both classes run (fail-open, contract unchanged)', async () => {
+    installSink([0, 0.1, 0.2, 0.3]);
+
+    await runAnalyze(baseOpts({}));
+
+    expect(detState.detectFace).toHaveBeenCalledTimes(4);
+    expect(detState.detectPlate).toHaveBeenCalledTimes(2);
+  });
+
+  it('dashcam tiles honor the toggles: face off → full+tile face calls are 0', async () => {
+    installSink([0, 0.1, 0.2]);
+
+    await runAnalyze(baseOpts({ settings: { dashcamMode: true, detectFace: false } }));
+
+    expect(detState.detectFace).toHaveBeenCalledTimes(0);
+    // plates: 2 full-frame (stride) + 3 frames × 4 tiles = 14
+    const plateRasters = detState.detectPlate.mock.calls.map(([raster]) => raster);
+    expect(plateRasters.filter((r) => r.width === W)).toHaveLength(2);
+    expect(plateRasters.filter((r) => r.width === 320)).toHaveLength(12);
+  });
+
+  it('dashcam tiles honor the toggles: plate off → full+tile plate calls are 0', async () => {
+    installSink([0, 0.1, 0.2]);
+
+    await runAnalyze(baseOpts({ settings: { dashcamMode: true, detectPlate: false } }));
+
+    expect(detState.detectPlate).toHaveBeenCalledTimes(0);
+    // faces: 3 full-frame + 3 frames × 4 tiles = 15
+    expect(detState.detectFace).toHaveBeenCalledTimes(15);
+  });
+});
+
+describe('configurable thresholds (REQ-113) — settings.confFace/confPlate reach EVERY detect call', () => {  it('passes the thresholds to full-frame AND dashcam tile detect calls', async () => {
     installSink([0, 0.1]);
 
     await runAnalyze(baseOpts({ settings: { dashcamMode: true, confFace: 0.42, confPlate: 0.17 } }));

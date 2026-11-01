@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.39.2] — 2026-11-01
+
+### Fixed
+- The analyze progress counter no longer doubles the frame count (field report: "79/79 / 80"). The v1.32.0 rewrite moved the whole "N / M (−K trimmed)" string into the #analyze-total span but left the static markup's baked `/` between it and #analyze-frames — the composite rendered the count twice. The separator now lives inside the span ("N" + " / M (−K trimmed)"), and a markup-contract test pins the adjacency so this exact regression (first seen as "231/231 / 1880") cannot ship again.
+
 ## [1.39.1] — 2026-11-01
 
 ### Fixed

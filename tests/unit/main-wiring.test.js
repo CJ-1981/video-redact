@@ -3927,6 +3927,94 @@ describe('v1.39.0: per-class detector toggles ride the analyze pass', () => {
   });
 });
 
+describe('v1.39.2: the analyze counter reads "N / M (−K trimmed)" — no doubled count', () => {
+  const g = wave3Globals();
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  // Field regression (v1.32.0 "231/231 / 1880", again v1.39.2 "79/79 / 80"):
+  // the progress paint writes the WHOLE "N / M" string into #analyze-total —
+  // if the static markup ALSO bakes a '/' before that span, the composite
+  // doubles the count. Pin the markup AND the painted composite.
+
+  it('markup: no separator between #analyze-frames and #analyze-total', () => {
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+    expect(html).toMatch(/<b id="analyze-frames">0<\/b><span id="analyze-total"> \/ 0<\/span>/);
+  });
+
+  it('progress paint: frames=79, total=" / 80 (−1 trimmed)" — composite has one slash', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      // Seed the counter elements (the paint path is null-guarded without).
+      const frames = makeFakeEl('B');
+      const total = makeFakeEl('SPAN');
+      elsById.set('analyze-frames', frames);
+      elsById.set('analyze-total', total);
+      elsById.set('analyze-bar', makeFakeEl('DIV'));
+
+      runAnalyzeMock.mockImplementationOnce(async (opts) => {
+        opts.onProgress({
+          phase: 'analyze',
+          frameCount: 79,
+          totalFrames: 80,
+          skippedCount: 1,
+          analyzeFps: 48.7,
+          etaSec: 0,
+          trackCount: 0,
+        });
+        return { tracks: [], frameCount: 79, effectiveEp: 'webgpu', cancelled: false };
+      });
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      expect(frames.textContent).toBe('79');
+      expect(total.textContent).toBe(' / 80 (−1 trimmed)');
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('no-trims pass paints " / M" without the trimmed suffix', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const frames = makeFakeEl('B');
+      const total = makeFakeEl('SPAN');
+      elsById.set('analyze-frames', frames);
+      elsById.set('analyze-total', total);
+      elsById.set('analyze-bar', makeFakeEl('DIV'));
+
+      runAnalyzeMock.mockImplementationOnce(async (opts) => {
+        opts.onProgress({
+          phase: 'analyze',
+          frameCount: 12,
+          totalFrames: 12,
+          skippedCount: 0,
+          analyzeFps: 30,
+          etaSec: 0,
+          trackCount: 0,
+        });
+        return { tracks: [], frameCount: 12, effectiveEp: 'webgpu', cancelled: false };
+      });
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      expect(frames.textContent).toBe('12');
+      expect(total.textContent).toBe(' / 12');
+    } finally {
+      g.restore();
+    }
+  });
+});
+
 describe('v1.37.0 — grey pre-analysis export + explicit open label', () => {
   const g = wave3Globals();
 

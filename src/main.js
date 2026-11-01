@@ -2784,7 +2784,7 @@ export async function mountApp(
   function resetAnalyzeUi() {
     setBar(els.analyzeBar, 0);
     if (els.analyzeFrames) els.analyzeFrames.textContent = '0';
-    if (els.analyzeTotal) els.analyzeTotal.textContent = '0';
+    if (els.analyzeTotal) els.analyzeTotal.textContent = ' / 0'; // v1.39.2: span owns the slash
     if (els.analyzeFps) els.analyzeFps.textContent = '0.0';
     if (els.analyzeEta) els.analyzeEta.textContent = '—';
     if (els.analyzeStatus) els.analyzeStatus.textContent = '';
@@ -3884,11 +3884,14 @@ export async function mountApp(
           if (els.analyzeTotal) {
             // v1.23.0: trimmed frames are skipped, so the honest denominator
             // shrinks as skips accumulate — "N / M−K" reads correctly.
+            // v1.39.2: the span carries its own " / " separator (the static
+            // markup no longer bakes one in — that baked slash is what made
+            // the v1.32.0 rewrite read "79/79 / 80" in the field).
             const shown = evt.totalFrames != null
               ? (evt.skippedCount
-                  ? `${evt.frameCount} / ${evt.totalFrames} (−${evt.skippedCount} trimmed)`
-                  : `${evt.frameCount} / ${evt.totalFrames}`)
-              : '—';
+                  ? ` / ${evt.totalFrames} (−${evt.skippedCount} trimmed)`
+                  : ` / ${evt.totalFrames}`)
+              : ' / —';
             els.analyzeTotal.textContent = shown;
           }
           if (els.analyzeFps) {

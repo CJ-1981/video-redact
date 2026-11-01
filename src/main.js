@@ -3800,9 +3800,11 @@ export async function mountApp(
           if (els.analyzeTotal) {
             // v1.23.0: trimmed frames are skipped, so the honest denominator
             // shrinks as skips accumulate — "N / M−K" reads correctly.
-            const shown = evt.totalFrames != null && evt.skippedCount
-              ? `${evt.frameCount} / ${evt.totalFrames} (−${evt.skippedCount} trimmed)`
-              : evt.totalFrames != null ? String(evt.totalFrames) : '—';
+            const shown = evt.totalFrames != null
+              ? (evt.skippedCount
+                  ? `${evt.frameCount} / ${evt.totalFrames} (−${evt.skippedCount} trimmed)`
+                  : `${evt.frameCount} / ${evt.totalFrames}`)
+              : '—';
             els.analyzeTotal.textContent = shown;
           }
           if (els.analyzeFps) {

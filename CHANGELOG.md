@@ -63,6 +63,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Zoomed timeline now scrolls horizontally (thin scrollbar, drag on the track) instead of clipping chips — the chips layer is a static, zoom-scaled lane inside the scrollable strip, and pointer→time mapping divides through the same lane width.
 - Desktop Chromium export: the Web Share path is now gated on the ABSENCE of showSaveFilePicker, so desktop exports go through the real save dialog again (v1.29.0 regression where desktop Chromium got the mobile share sheet instead of a download).
 
+## [1.32.0] — 2026-11-01
+
+### Fixed
+- Analyze progress counter no longer shows the redundant double frame count ("231/231 / 1880"): the counter reads "processed / total" with the trimmed-frame deduction inline ("890 / 1880 (−104 trimmed)"), and the stray "frames" word is dropped.
+
 ## [1.31.1] — 2026-11-01
 
 ### Changed

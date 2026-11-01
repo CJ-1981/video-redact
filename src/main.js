@@ -1019,6 +1019,28 @@ export function DEFAULT_SETTINGS() {
 }
 
 /**
+ * v1.39.1: at least one per-class detector must stay ON — an analyze pass
+ * with zero enabled classes can never produce tracks. PURE: returns the
+ * FIXED pair; when both land off, the class named by `changed` (the one the
+ * user just tried to turn off; 'face' for the project-apply path) is
+ * re-enabled and `reverted` names it (null = nothing fixed). The change
+ * listeners and the project-apply path both route through this, so the UI
+ * and a restored .vrproj can never reach the both-off state.
+ *
+ * @param {boolean} faceOn Current Face checkbox state.
+ * @param {boolean} plateOn Current Plate checkbox state.
+ * @param {'face'|'plate'} [changed] Which class to keep on when both are
+ *     off (the click target; defaults to 'face' for programmatic applies).
+ * @returns {{faceOn: boolean, plateOn: boolean, reverted: 'face'|'plate'|null}}
+ */
+export function enforceDetectorPair(faceOn, plateOn, changed = 'face') {
+  if (faceOn || plateOn) return { faceOn, plateOn, reverted: null };
+  return changed === 'plate'
+    ? { faceOn, plateOn: true, reverted: 'plate' }
+    : { faceOn: true, plateOn, reverted: 'face' };
+}
+
+/**
  * True when a file input still carries a selection (v1.6.0). An input with a
  * non-empty value will NOT fire another `change` event if the user re-selects
  * the SAME file — the classic pitfall clearAll must defeat. Trivial, but
@@ -3400,6 +3422,33 @@ export async function mountApp(
     syncThresholdReadouts();
   }
 
+  /**
+   * v1.39.1: keep ≥1 detector enabled (pure enforceDetectorPair + the toast).
+   * Shared by the checkbox change listeners AND the project-apply path (a
+   * restored .vrproj can carry both classes off — the pair-fixer re-enables
+   * the given class deterministically and the user hears why).
+   * @param {boolean} announce When true (a user revert), explain via toast.
+   * @param {'face'|'plate'} [changed] Which class to keep on when both off.
+   */
+  function syncDetectToggles(announce, changed = 'face') {
+    const fixed = enforceDetectorPair(
+      els.detectFaceToggle?.checked !== false,
+      els.detectPlateToggle?.checked !== false,
+      changed,
+    );
+    if (els.detectFaceToggle) els.detectFaceToggle.checked = fixed.faceOn;
+    if (els.detectPlateToggle) els.detectPlateToggle.checked = fixed.plateOn;
+    if (fixed.reverted && announce) {
+      toast(
+        'Keep at least one detector checked — analysis needs Face or Plate to find anything.',
+        { timeoutMs: 6000 },
+      );
+    }
+  }
+
+  els.detectFaceToggle?.addEventListener('change', () => syncDetectToggles(true, 'face'));
+  els.detectPlateToggle?.addEventListener('change', () => syncDetectToggles(true, 'plate'));
+
   function clearAll() {
     // (a) In-flight work dies FIRST: abort the passes, then bump the
     // generation so every stale async completion (analyze, export, compare)
@@ -4631,6 +4680,8 @@ export async function mountApp(
     // (omitted/false-y → run; only an explicit false stays skipped).
     if (els.detectFaceToggle) els.detectFaceToggle.checked = s.detectFace !== false;
     if (els.detectPlateToggle) els.detectPlateToggle.checked = s.detectPlate !== false;
+    // v1.39.1: a .vrproj carrying BOTH classes off still leaves one on.
+    syncDetectToggles(true);
 
     // 2. Trims + tracks. Duration known → normalize/clamp against it; a
     //    project saved against a longer video loses its past-the-end spans

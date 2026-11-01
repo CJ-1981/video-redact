@@ -3876,6 +3876,55 @@ describe('v1.39.0: per-class detector toggles ride the analyze pass', () => {
       g.restore();
     }
   });
+
+  it('unchecking the LAST checked toggle reverts it — one detector always stays on (v1.39.1)', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const { face, plate } = seedDetectToggles(elsById);
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+
+      // Turning one off while the other is on is fine.
+      face.checked = false;
+      face.dispatch('change');
+      expect(face.checked).toBe(false);
+      expect(plate.checked).toBe(true);
+
+      // Trying to turn the last one off reverts it + explains via toast.
+      plate.checked = false;
+      plate.dispatch('change');
+      expect(plate.checked).toBe(true);
+      expect(toastTexts(fakeDoc).some((t) => t.includes('at least one detector'))).toBe(true);
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('a project restoring BOTH toggles off still leaves one on after apply', async () => {
+    // The pure pair-fixer (exported for the project-apply path): when both
+    // land off, Face is deterministically re-enabled.
+    expect(main.enforceDetectorPair(false, false)).toEqual({
+      faceOn: true,
+      plateOn: false,
+      reverted: 'face',
+    });
+    // The click-target variant: turning PLATE off last reverts PLATE.
+    expect(main.enforceDetectorPair(false, false, 'plate')).toEqual({
+      faceOn: false,
+      plateOn: true,
+      reverted: 'plate',
+    });
+    expect(main.enforceDetectorPair(true, false)).toEqual({
+      faceOn: true,
+      plateOn: false,
+      reverted: null,
+    });
+    expect(main.enforceDetectorPair(true, true)).toEqual({
+      faceOn: true,
+      plateOn: true,
+      reverted: null,
+    });
+  });
 });
 
 describe('v1.37.0 — grey pre-analysis export + explicit open label', () => {

@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.39.1] — 2026-11-01
+
+### Fixed
+- At least one detector always stays enabled: unchecking the LAST remaining Face/Plate checkbox now reverts that click and explains why ("Keep at least one detector checked — analysis needs Face or Plate to find anything"). Previously both could be off, producing a full-priced pass that could never find anything. A saved project carrying both classes off also re-enables one on restore.
+
 ## [1.39.0] — 2026-11-01
 
 ### Added

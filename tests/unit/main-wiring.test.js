@@ -187,7 +187,9 @@ describe('main-wiring: deriveStep state machine', () => {
     // No Analyze before ready; no Export without review state.
     expect(main.deriveStep('gate', 'ANALYZE_START')).toBeNull();
     expect(main.deriveStep('gate', 'EXPORT_START')).toBeNull();
-    expect(main.deriveStep('ready', 'EXPORT_START')).toBeNull();
+    // v1.34.0: ready EXPORT_START is legal (pre-analysis export with
+    // manual regions/watermark only); ANALYZE_FINISH still is not.
+    expect(main.deriveStep('ready', 'EXPORT_START')).toBe('exporting');
     expect(main.deriveStep('ready', 'ANALYZE_FINISH')).toBeNull();
     expect(main.deriveStep('analyzing', 'EXPORT_START')).toBeNull();
     expect(main.deriveStep('analyzing', 'EXPORT_DONE')).toBeNull();
@@ -1231,9 +1233,8 @@ describe('main-wiring: deriveStep v1.10.0 — ready carries a live editor, expor
     expect(main.deriveStep('analyzing', 'ANALYZE_FAIL')).toBe('ready');
   });
 
-  it('export can never run pre-analyze: no path from gate/ready/analyzing to exporting', () => {
+  it('v1.34.0: export is gated from gate/analyzing but legal from ready', () => {
     expect(main.deriveStep('gate', 'EXPORT_START')).toBeNull();
-    expect(main.deriveStep('ready', 'EXPORT_START')).toBeNull();
     expect(main.deriveStep('analyzing', 'EXPORT_START')).toBeNull();
     // And the landing states stay clean: from ready, CLEAR still resets.
     expect(main.deriveStep('ready', 'CLEAR')).toBe('gate');
@@ -1299,9 +1300,12 @@ describe('mountApp (v1.10.0): the editor mounts at READY — analysis merges, ne
       const st = mounts[0].hooks.getState();
       expect(st.tracks).toEqual([]);
       expect(st.duration).toBe(FAKE_META.duration);
-      // Ready state: analyze offered, export still gated (post-analyze only).
+      // Ready state: analyze offered; export now ENABLED pre-analyze
+      // (v1.34.0) but visually marked `.export-unanalyzed` — manual
+      // regions/watermark only, no auto-detected redactions.
       expect(fakeDoc.getElementById('analyze-button').textContent).toBe('Analyze');
-      expect(fakeDoc.getElementById('export-button').disabled).toBe(true);
+      expect(fakeDoc.getElementById('export-button').disabled).toBe(false);
+      expect(fakeDoc.getElementById('export-button').classList.contains('export-unanalyzed')).toBe(true);
     } finally {
       restoreGlobals();
     }
@@ -3748,5 +3752,17 @@ describe('mountApp (v1.22.0): session autosave (REQ-138)', () => {
       idb.uninstall();
       g.restore();
     }
+  });
+});
+
+describe('export before analysis (v1.34.0)', () => {
+  it('ready state legally transitions to exporting', () => {
+    expect(main.deriveStep('ready', 'EXPORT_START')).toBe('exporting');
+  });
+
+  it('ready-state export is reachable and marked', () => {
+    expect(main.deriveStep('ready', 'EXPORT_START')).toBe('exporting');
+    // the UI class is applied by updateButtons — pin the pure half via the
+    // exported reducer and the existing fake harness in the next block.
   });
 });

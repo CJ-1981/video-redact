@@ -280,6 +280,9 @@ const STEP_TRANSITIONS = {
   // post-analyze states (review/done) so nothing ships before an analysis ran.
   ready: {
     ANALYZE_START: 'analyzing',
+    // v1.34.0: export before analysis — manual regions/watermark/resolution
+    // apply; only auto-detected tracks are absent.
+    EXPORT_START: 'exporting',
     FILE_OPENED: 'ready',
     CLEAR: 'gate',
   },
@@ -2641,6 +2644,14 @@ export async function mountApp(
     if (els.exportButton) {
       els.exportButton.disabled =
         exporting || deriveStep(app.step, 'EXPORT_START') == null;
+      // v1.34.0: pre-analysis export — the button shifts to the accent
+      // color so the user can tell this run has NO auto-detected
+      // redactions (manual regions/watermark/export settings only).
+      const unanalyzed = app.step === 'ready';
+      els.exportButton.classList.toggle('export-unanalyzed', unanalyzed);
+      els.exportButton.title = unanalyzed
+        ? 'Export without analysis — only manual regions, watermark and your export settings apply'
+        : 'Export redacted video';
     }
     if (els.exportCancel) els.exportCancel.hidden = !exporting;
     if (els.changeFile) els.changeFile.hidden = app.step === 'gate';

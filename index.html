@@ -1064,6 +1064,14 @@
       font-size: 12.5px;
     }
     #export-status { min-height: 1.2em; color: var(--ink); font-size: 12.5px; }
+    /* v1.34.0: pre-analysis export — accent-colored so the user can tell
+       this run carries NO auto-detected redactions (manual regions,
+       watermark and export settings only). */
+    #export-button.export-unanalyzed {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #14100A;
+    }
     #export-button { width: 100%; margin-top: 4px; }
     /* v1.22.0 REQ-133: watermark controls (above #export-quality). */
     #watermark-text {

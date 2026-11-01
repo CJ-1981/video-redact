@@ -826,3 +826,12 @@ describe('v1.22.0 REQ-206: waveform strip contract', () => {
     expect(HTML).toContain('#waveform[hidden]');
   });
 });
+
+describe('v1.31.1 — explicit project button labels', () => {
+  it('project buttons carry the full "Save project" / "Load project" labels', () => {
+    expect(HTML).toContain('>Save project</button>');
+    expect(HTML).toContain('>Load project<');
+    expect(HTML).not.toContain('>Save</button>');
+    expect(HTML).not.toContain('>Load<');
+  });
+});

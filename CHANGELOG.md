@@ -12,15 +12,67 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - "Open video" renamed to "Open new video" — the header action now reads unambiguously next to Save/Load project.
 - The pre-analysis export button is GREY instead of accent-colored (field feedback: accent read as ready-to-go). Grey is the "not analyzed yet" signal; at READY the button also labels itself "Export (not analyzed)" in text, flipping back to "Export redacted video" once analysis completes.
 
+
 ## [1.35.0] — 2026-11-01
 
 ### Added
 - Export without analysis (field request): at READY — before any analysis — Export is enabled so a manual-regions-only redaction (plus watermark and export settings) can be exported without running detection. The pre-analysis state is visually distinct so it can't be mistaken for an analyzed export.
 
+
+## [1.34.0] — 2026-11-01
+
+### Fixed
+- Mobile: the theme toggle lost its ☀️/🌙 glyph (it was caught by the glyph-only font-size: 0 rule meant for text-labeled buttons). The toggle is excluded from that group — its icon comes from the element text that main.js swaps, and it keeps the 40px touch target.
+
+
+## [1.33.1] — 2026-11-01
+
+### Fixed
+- Mobile: the Clear button showed a doubled ✕ — the glyph lived in the button text AND in the mobile ::before rule. Icons now come solely from CSS ::before at every width (matching the v1.28.1 Save/Load fix).
+
+
+## [1.32.0] — 2026-11-01
+
+### Fixed
+- Analyze progress counter no longer shows the redundant double frame count ("231/231 / 1880"): the counter reads "processed / total" with the trimmed-frame deduction inline ("890 / 1880 (−104 trimmed)"), and the stray "frames" word is dropped.
+
+
+## [1.31.1] — 2026-11-01
+
+### Changed
+- Project buttons carry explicit labels again: "Save project" / "Load project" (the short "Save"/"Load" read ambiguously next to "Open video").
+
+
+## [1.31.0] — 2026-11-01
+
+### Fixed
+- Zoomed timeline now scrolls horizontally (thin scrollbar, drag on the track) instead of clipping chips — the chips layer is a static, zoom-scaled lane inside the scrollable strip, and pointer→time mapping divides through the same lane width.
+- Desktop Chromium export: the Web Share path is now gated on the ABSENCE of showSaveFilePicker, so desktop exports go through the real save dialog again (v1.29.0 regression where desktop Chromium got the mobile share sheet instead of a download).
+
+
+## [1.29.0] — 2026-11-01
+
+### Fixed
+- iOS Safari export delivery: iOS ignores the `<a download>` attribute for blob URLs, so the anchor-click download silently failed. Exports now prefer the **Web Share API** (save to Files / share sheet) whenever the browser can share files — the reliable path on iOS — with the save-picker and Blob-download fallbacks retained for Chromium.
+
+
+## [1.28.1] — 2026-11-01
+
+### Fixed
+- iOS regression: duplicated 💾/📂/🎬 icons on the header action buttons — the emoji lived in the button text AND was re-added by the mobile glyph ::before rules. Icons now come solely from CSS ::before at every width; button text is plain. Verified via a computed-style audit: text has no emoji, ::before carries exactly one icon glyph.
+
+
+## [1.28.0] — 2026-11-01
+
+### Changed
+- Header redesign: one cohesive action cluster — "🎬 Open video" + "✕ Clear" grouped as video actions, "💾 Save" / "📂 Load" grouped as project actions, theme toggle isolated at the far edge. Labels compact to glyphs on phones (with full titles on hover); touch targets ≥ 40px.
+
+
 ## [1.24.1] — 2026-11-01
 
 ### Fixed
 - Skip-trimmed playback is now frame-precise: the skip previously rode the ~4 Hz timeupdate signal, so up to 250 ms of grey-veiled frames presented before the jump. The skip now runs inside the editor's per-frame tick — the playhead jumps the moment it enters a trimmed region — and chained touching regions are walked in one jump so playback never lands inside the next one.
+
 
 ## [1.24.0] — 2026-11-01
 
@@ -30,15 +82,18 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Changed
 - Trimmed (multi-segment) exports accept in-memory segment stagings too: the concatenation pass reopens buffer segments from bytes, so the mobile fallback covers trimmed exports as well.
 
+
 ## [1.23.0] — 2026-11-01
 
 ### Fixed
 - The analyze total-frame counter now reflects trimmed frames honestly: trimmed frames are counted separately ("skipped") and the live counter shows "N / M (−K trimmed)" so the pass no longer looks incomplete when trims skip frames. The final status line already reported skipped frames; the progress event now carries skippedCount for the live counter too.
 
+
 ## [1.22.1] — 2026-11-01
 
 ### Fixed
 - Mobile: the project Save/Load buttons overflowed the header row. The header now wraps, the buttons go glyph-only (💾 / 📂) on narrow screens with full labels restored on wide screens, and all header controls keep 40px touch targets.
+
 
 ## [1.22.0] — 2026-11-01
 
@@ -47,10 +102,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Per-track confidence (REQ-202): auto-track rows show the track's mean detection confidence ("· conf 0.87").
 - Per-track "Re-scan" (REQ-202): each auto track row gains a Re-scan button — re-runs detection only inside that track's span at a lowered threshold (mean conf − 0.15, floor 0.10) and merges newly found boxes into the track (duplicates at IoU ≥ 0.5 within 0.15 s are dropped; existing boxes are never replaced). The row reads "…" while scanning; Clear/file switch/analyze-cancel abort it.
 
-## [1.18.2] — 2026-11-01
+
+## [1.21.1] — 2026-11-01
 
 ### Fixed
-- The preview height handle could no longer drag DOWN to enlarge (v1.18.1 follow-up): the reserved-space clamp counted the tracks/compare panels — which moved into the same column in v1.18.1 — as must-stay-visible, leaving almost no enlargement room. The clamp now reserves only the chrome above the stage plus a minimal constant for the controls directly below it; enlarging pushes the timeline/tracks below the fold (theater-mode behavior, bounded by the 75vh cap, footer in normal flow can never overlap).
+- Mobile: the project Save/Load buttons overflowed the header row. The header now wraps, the buttons go glyph-only (💾 / 📂) on narrow screens with full labels restored on wide screens, and all header controls keep 40px touch targets.
+
 
 ## [1.21.0] — 2026-11-01
 
@@ -58,56 +115,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Tracks panel summary: the title shows per-class counts ("Tracks — 2 faces · 1 plate · 1 manual"), refreshed live.
 - Track filter buttons (All / Face / Plate / Manual) above the list — filtering is a list-finding aid only; the preview, timeline chips, and export are unaffected. Filter resets to All on file load / Clear; when the filter hides everything, the list explains "No tracks match this filter."
 
-## [1.21.1] — 2026-11-01
-
-### Fixed
-- Mobile: the project Save/Load buttons overflowed the header row. The header now wraps, the buttons go glyph-only (💾 / 📂) on narrow screens with full labels restored on wide screens, and all header controls keep 40px touch targets.
-
-## [1.28.0] — 2026-11-01
-
-### Changed
-- Header redesign: one cohesive action cluster — "🎬 Open video" + "✕ Clear" grouped as video actions, "💾 Save" / "📂 Load" grouped as project actions, theme toggle isolated at the far edge. Labels compact to glyphs on phones (with full titles on hover); touch targets ≥ 40px.
-
-## [1.31.0] — 2026-11-01
-
-### Fixed
-- Zoomed timeline now scrolls horizontally (thin scrollbar, drag on the track) instead of clipping chips — the chips layer is a static, zoom-scaled lane inside the scrollable strip, and pointer→time mapping divides through the same lane width.
-- Desktop Chromium export: the Web Share path is now gated on the ABSENCE of showSaveFilePicker, so desktop exports go through the real save dialog again (v1.29.0 regression where desktop Chromium got the mobile share sheet instead of a download).
-
-## [1.34.0] — 2026-11-01
-
-### Fixed
-- Mobile: the theme toggle lost its ☀️/🌙 glyph (it was caught by the glyph-only font-size: 0 rule meant for text-labeled buttons). The toggle is excluded from that group — its icon comes from the element text that main.js swaps, and it keeps the 40px touch target.
-
-## [1.33.1] — 2026-11-01
-
-### Fixed
-- Mobile: the Clear button showed a doubled ✕ — the glyph lived in the button text AND in the mobile ::before rule. Icons now come solely from CSS ::before at every width (matching the v1.28.1 Save/Load fix).
-
-## [1.32.0] — 2026-11-01
-
-### Fixed
-- Analyze progress counter no longer shows the redundant double frame count ("231/231 / 1880"): the counter reads "processed / total" with the trimmed-frame deduction inline ("890 / 1880 (−104 trimmed)"), and the stray "frames" word is dropped.
-
-## [1.31.1] — 2026-11-01
-
-### Changed
-- Project buttons carry explicit labels again: "Save project" / "Load project" (the short "Save"/"Load" read ambiguously next to "Open video").
-
-## [1.29.0] — 2026-11-01
-
-### Fixed
-- iOS Safari export delivery: iOS ignores the `<a download>` attribute for blob URLs, so the anchor-click download silently failed. Exports now prefer the **Web Share API** (save to Files / share sheet) whenever the browser can share files — the reliable path on iOS — with the save-picker and Blob-download fallbacks retained for Chromium.
-
-## [1.28.1] — 2026-11-01
-
-### Fixed
-- iOS regression: duplicated 💾/📂/🎬 icons on the header action buttons — the emoji lived in the button text AND was re-added by the mobile glyph ::before rules. Icons now come solely from CSS ::before at every width; button text is plain. Verified via a computed-style audit: text has no emoji, ::before carries exactly one icon glyph.
 
 ## [1.20.1] — 2026-11-01
 
 ### Added
 - Plain-language hint under Detection sensitivity: "Lower values detect more (weaker confidence still counts); higher values only detect clear, certain objects."
+
 
 ## [1.20.0] — 2026-11-01
 
@@ -115,15 +128,24 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Skip trimmed parts during playback: an opt-in checkbox in the trim bar — when playing, the playhead jumps over trimmed regions instead of showing the grey veil. Paused inspection still shows the veil.
 - Friendlier wording for the enhanced-scan toggle (was "Dashcam mode (tiled pass for small plates)" — now "Enhanced scan (finds small or distant faces & plates — 3× slower)").
 
+
 ## [1.19.0] — 2026-11-01
 
 ### Fixed
 - The two width handles had inconsistent visual states: the left handle (capability | preview) had no hover highlight or focus ring, while the right handle (preview | rail) highlighted grey on hover. Both handles now share identical styling — grey hover highlight, accent focus ring, and a visible grip affordance so they are discoverable without hovering.
 
+
+## [1.18.2] — 2026-11-01
+
+### Fixed
+- The preview height handle could no longer drag DOWN to enlarge (v1.18.1 follow-up): the reserved-space clamp counted the tracks/compare panels — which moved into the same column in v1.18.1 — as must-stay-visible, leaving almost no enlargement room. The clamp now reserves only the chrome above the stage plus a minimal constant for the controls directly below it; enlarging pushes the timeline/tracks below the fold (theater-mode behavior, bounded by the 75vh cap, footer in normal flow can never overlap).
+
+
 ## [1.18.1] — 2026-11-01
 
 ### Fixed
 - Large empty gap between the timeline and the Tracks panel: the below-timeline section was a workspace-grid child, so its position depended on the right rail's height. It now lives inside the preview column directly after the timeline — the tracks panel always follows the timeline with a constant 28px margin, measured at every layout width.
+
 
 ## [1.18.0] — 2026-10-31
 
@@ -131,10 +153,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Export resolution 480p (long edge 854) — smallest/fastest export option.
 - The Tracks and Compare-thresholds panels now align with the preview column width (they previously spanned under the right rail).
 
+
 ## [1.17.1] — 2026-10-31
 
 ### Fixed
 - Export resolution and audio removal did not apply (field report with an affected export): clicking Export called resetExportUi() FIRST, which reset the resolution select to Full and re-checked audio BEFORE the settings were read — every export ran with defaults. Choices now reset only on file load and Clear; an export click keeps them. Verified with a real-browser probe: a 2560×1440 source exported at 720p with audio off produces exactly 1280×720 with 0 audio tracks (tools/debug-export-settings.mjs).
+
 
 ## [1.17.0] — 2026-10-31
 
@@ -146,6 +170,7 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Pixelation strength control (Fine ×1 / Normal ×2 / Coarse ×3 / Max ×4 block multiplier; Normal default doubles the old block size) — same strength in preview and export.
 - Project save/load: 💾 Save project downloads a .vrproj with settings, trims, tracks, and video identity (no video bytes); 📂 Load project restores them with typed error handling and video re-association warnings.
 
+
 ## [1.16.0] — 2026-10-31
 
 ### Added
@@ -156,10 +181,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Changed
 - The resolution and audio choices reset with every export-panel reset (file load, Clear, re-export).
 
+
 ## [1.15.2] — 2026-10-31
 
 ### Added
 - Trimmed regions are now skipped during analysis: frames inside trim regions cost no draw, no inference, and no tracking — large trims make analysis proportionally faster and keep ghost tracks out of the list. The analyze status reports how many trimmed frames were skipped, and the trim hint documents the behavior.
+
 
 ## [1.15.1] — 2026-10-31
 
@@ -167,16 +194,19 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Trim drags starting at the playhead were stolen by the scrub thumb's hit zone (users naturally drag from where the playhead is) — in trim mode the thumb now yields so region creation works from anywhere on the timeline. Verified by a faithful probe: a drag starting exactly at the thumb creates a region.
 - Changed: the ✂ Trim toggle moved from the Tracks panel to the timeline area (trimming is independent of redaction tracks), with an inline hint while trim mode is active.
 
+
 ## [1.15.0] — 2026-10-31
 
 ### Added
 - Timeline TRIM (REQ-125): a ✂ Trim toggle (Tracks panel header) activates trim mode — drag anywhere on the timeline to mark regions for deletion. Each region renders as a greyed-out overlay with ✂ marks at its draggable edges and a ✕ (or double-click) to remove; multiple regions are supported, edges never cross a neighbor, and the minimum region is 0.1 s. While the playhead is inside a region the preview frame renders under a grey veil (and skips the pixelation burn — trimmed frames never export).
 - Trimmed export (REQ-126): export excludes every trimmed region — one native mediabunny trim conversion per kept segment (pixelation burn-in per segment, audio packet-copied), then the segments' encoded packets are concatenated into a single file with continuous timestamps and intact A/V sync (no re-encode). With no trims the export path is byte-for-byte unchanged. Progress, cancellation and temp cleanup cover the multi-segment pipeline; all segment temps are removed after delivery.
 
+
 ## [1.14.1] — 2026-10-31
 
 ### Fixed
 - Preview image duplicated/stretched along the right edge after dragging a width handle: the preview IS the editor canvas, and on machines where rVFC never presents frames the frame loop never re-drew it after a layout change — the stale bitmap stayed stretched over the new layout beside the live <video>. Width handles now kick a (throttled) editor redraw live during the drag + an exact one on drag end, and the timeupdate fallback re-draws the canvas (~4 Hz) so rVFC-dead machines keep a correct preview during playback too.
+
 
 ## [1.14.0] — 2026-10-31
 
@@ -187,10 +217,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Right-rail width handle moved in the opposite direction: the handle is the rail's LEFT edge and now follows the pointer (drag right = narrower rail). Direction pinned by unit tests.
 - Compare-thresholds now sits UNDER the Tracks panel (stacked), per field request.
 
+
 ## [1.13.1] — 2026-10-31
 
 ### Fixed
 - Mobile: collapsing the Capability report left a large empty area underneath — the intake panel carried a hard 320px flex-basis (meant for the desktop side-column) which becomes a fixed HEIGHT in the mobile column layout. Replaced inline flex styles with viewport-aware CSS classes (content-sized on phones; desktop unchanged).
+
 
 ## [1.13.0] — 2026-10-31
 
@@ -199,6 +231,7 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - All panels (Capability, Detection settings, Compare thresholds, Tracks, Export, Models) are collapsible via their headers (native details, open by default).
 - Models/attribution panel moved below the footer as its own full-width section.
 - Detection detail wording clarified: "Detection detail (analysis only)" with a hint that analysis speed is affected but export always uses the full-resolution source.
+
 
 ## [1.12.0] — 2026-10-31
 
@@ -214,6 +247,7 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Analysis cancel button is state-driven ("Stop analysis", danger-styled) while a pass is running.
 - Compare frame-time field no longer truncates (wider bottom-section layout).
 
+
 ## [1.11.0] — 2026-10-31
 
 ### Added
@@ -221,10 +255,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Selected state on threshold-compare panels: the clicked level stays visually highlighted (accent ring + ✓, aria-pressed) until another level wins or the panels clear.
 - "Use preview time" button next to the compare frame-time field — one click sets the field to the preview's current position instead of reading the timecode by hand.
 
+
 ## [1.10.1] — 2026-10-30
 
 ### Fixed
 - License-plate detection never fired (found with the user's IMG_5019.MOV — plates clearly visible, zero detections): TWO hard-coded layout mismatches. (1) The output finder accepted only 6-wide tensors while the real open-image-models end2end export emits 7-wide rows `[batch_idx, x1, y1, x2, y2, class_id, score]`; (2) the row parser read stride-6 with score at column 5 — which is class_id (always 0) — so every detection was filtered. Parser now supports both 7-wide and legacy 6-wide layouts (score = last column, box = the 4 columns before class_id). Verified end-to-end on real frames: conf 0.887 at the true plate position (probe: tools/debug-plate.mjs, tools/debug-plate-e2e.mjs).
+
 
 ## [1.10.0] — 2026-10-30
 
@@ -242,6 +278,7 @@ The timeline works BEFORE analysis: the review editor now mounts the moment a vi
 - Unit: 540 → 553 tests, all passing. New: `mergeManualTracks` (keep+append, collision re-id, re-analyze replaces autos only, degenerate inputs + no mutation), `deriveStep` ready-carries-a-live-editor / export-gated-pre-analyze, mountApp integration (mount at ready with 0 tracks, no remount on analyze completion, manual boxes survive analysis, Space-at-ready with ←/→ still gated), and empty-track editor mounts (render/refresh safe, position driven, scrub + pin, clean teardown) in `timeline.test.js`.
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
 
+
 ## [1.9.0] — 2026-10-30
 
 ### Added
@@ -250,6 +287,7 @@ The timeline works BEFORE analysis: the review editor now mounts the moment a vi
 ### Fixed
 - Timeline thumb can no longer freeze permanently: the v1.8.0 release pin (a condition latch that could stop clearing once playback moved away from the pinned position) is replaced by a 350 ms time-boxed pin that self-expires unconditionally; drag-state guaranteed to clear on every gesture end path.
 - Editor mount and per-tick exceptions are isolated: keyboard wiring runs before the editor mounts, a mount failure surfaces a readable toast while keyboard stays live, and one bad tick can never stop the loop.
+
 
 ## [1.8.2] — 2026-10-30
 
@@ -266,6 +304,7 @@ A runtime self-diagnostic for remote support: `?debug=1` makes the reporting pag
 - Probe: `node tools/debug-diag.mjs` — loads `dist/index.html?debug=1` with the detectable fixture: P1 a `[diag]` line every ~2 s (±700 ms), P2 every line carries `v: "1.8.2"`, P3 `tu`/`vfc` keys present, P4 a flagless page logs zero `[diag]` lines.
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
 
+
 ## [1.8.1] — 2026-10-30
 
 The scrub thumb follows playback again on browsers where the frame loop never fires.
@@ -279,6 +318,7 @@ The scrub thumb follows playback again on browsers where the frame loop never fi
 - Unit: 507 → 510 tests, all passing (14 files; new `mountEditor playback following` tests in `timeline.test.js`: thumb 0%→50%→100% via `timeupdate` with a starved frame loop — verified failing on the pre-fix wiring — plus the delivered-rVFC path and the meta-duration fallback).
 - Probe: `node tools/debug-touch-timeline.mjs` — new T-play (untouched `video.play()` → thumb advanced ≥15% of the strip and thumb x ≈ currentTime/duration ±5%, with an rVFC-delivery counter distinguishing "loop healthy" from "loop starved, timeupdate carried it"); T1/T2/T2c/T3/T-thumb/T4 unchanged and passing.
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
+
 
 ## [1.8.0] — 2026-10-30
 
@@ -298,6 +338,7 @@ Desktop-mouse reliability for the timeline scrub handle, plus an audio mute butt
 - Probe: `node tools/debug-thumb-mouse.mjs` — real-mouse drag checks M0 (click-to-park), M1 (paused drag, mid-drag follow + release + no snap-back), M1b (grab at the half-clipped 0% position), M1c (fast fling — capture sentinel), M1d (overshoot clamps), M1e (30 px vertical drift off the thumb — capture sentinel), M1f (immediate re-grab), M2 (drag while PLAYING) — PASS on Chromium; BROWSER=firefox run PASS; WITH_MUTE=1 adds M3 (mute toggle, external-flip mirror, clearAll reset on both bars).
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
 
+
 ## [1.7.0] — 2026-10-30
 
 A visible, draggable scrub handle on the timeline — the standard video-player slider pattern, replacing tap-only scrubbing (field reports: timeline taps still don't register on some real devices).
@@ -312,6 +353,7 @@ A visible, draggable scrub handle on the timeline — the standard video-player 
 - Probe: `node tools/debug-touch-timeline.mjs` — T1 (plain tap strip 50%), T2 (jitter tap axis 25%), T2c (mouse click guard), T3 (chip-edge touch trim) all still PASS, plus new T-thumb (thumb parked at 25% after a 25% tap; touch-drag 25%→50% lands |t − 0.5·dur| < 0.15 s with currentTime followed mid-drag).
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
 
+
 ## [1.6.2] — 2026-10-30
 
 ### Fixed
@@ -319,6 +361,7 @@ A visible, draggable scrub handle on the timeline — the standard video-player 
 
 ### Changed
 - Clear button styled alert red (destructive-action affordance).
+
 
 ## [1.6.1] — 2026-10-29
 
@@ -337,6 +380,7 @@ Field-regression fixes in the review workspace: timeline seeking, keyboard trans
 - E2E: 6/6 passing in Chromium (coordinator run).
 - Gate: `npm run gate` (eslint 0 errors · tsc --noEmit 0 errors · unit suite · build) exits 0.
 
+
 ## [1.6.0] — 2026-10-29
 
 A "✕ Clear" button that unloads the current video and resets the whole app to the landing view.
@@ -344,6 +388,7 @@ A "✕ Clear" button that unloads the current video and resets the whole app to 
 ### Added
 
 - Clear button (header, next to "Open another file"): aborts any in-flight analysis or export first (their stale callbacks are dropped via the generation counter), destroys the review editor (cancelling the preview frame loops and listeners), revokes the preview blob URL, unloads the video element (`src` removed + `load()` — decoder freed) and disposes the mediabunny `Input`, then sweeps any leftover OPFS export temp (`exports/redact-export-*`, the REQ-019/AC-14 hygiene on explicit clear). The file input is reset so re-selecting the SAME file fires `change` again, the stepper returns to the Capability-check gate via a new total `CLEAR` transition (legal from every step), and every panel returns to its landing state: capability report cleared, sensitivity sliders restored from a single `DEFAULT_SETTINGS()` factory (face 0.60 / plate 0.25, dashcam off), progress bars to 0, track list + timeline emptied, export status/progress cleared, transport reset (pause glyph, 1×, 0:00.0), toasts dismissed — confirmed with a "Cleared — ready for the next video." toast. The model cache (IndexedDB), the preview-stage height, the version badge and the model attribution panel survive a clear.
+
 
 ## [1.5.0] — 2026-10-29
 
@@ -354,10 +399,12 @@ Configurable detection sensitivity and a single-frame threshold comparison previ
 - Configurable detection thresholds (REQ-113): the Analyze panel gains a "Detection sensitivity" group with face (0.10–0.90, default 0.60) and plate (0.05–0.90, default 0.25) sliders with live numeric readouts. The configured values flow into every `detectFace` / `detectPlate` call of the analyze pass — full-frame AND dashcam tile passes — and every re-analysis; the pre-1.5.0 baked gates (0.6 / 0.25) remain the defaults everywhere a setting is omitted (`DEFAULT_CONF_FACE` / `DEFAULT_CONF_PLATE`, per-call `opts.confThreshold` in detector.js).
 - Single-frame threshold comparison (REQ-114): a "Compare thresholds" section in the Analyze panel decodes ONE frame at a user-chosen time (default `round(duration·0.1)`), runs each model EXACTLY once (new raw accessors `detectFaceRaw` / `detectPlateRaw` return the undecoded outputs so every level reuses the single inference), and renders five side-by-side panels at the fixed levels ≥0.15 / ≥0.30 / ≥0.45 / ≥0.60 / ≥0.75 — each panel showing the frame with its boxes (faces teal, plates violet) and a per-panel count caption. Clicking a panel applies that level to BOTH sensitivity sliders. The button shows a busy state while running and failures surface via toast; `sampleFrameAt()` (analyze.js) shares the analyze loop's decode seam and sample-closing discipline.
 
+
 ## [1.4.1] — 2026-10-29
 
 ### Fixed
 - Track-row time fields overflowed the row on mobile (rendered 336px inside a 312px content box): the `.times` group is now pinned to exactly the row content width with zero-basis flexible inputs — no overflow, no clipped text at 390px (element-level probe `tools/debug-times-overflow.mjs`).
+
 
 ## [1.4.0] — 2026-10-29
 
@@ -368,10 +415,12 @@ Fullscreen-usable controls and a mobile-friendly single-column layout (SPEC-VID-
 - In-fullscreen overlay controls (REQ-111): an overlay control bar inside the preview stage — play/pause, frame step back/forward, playback speed, and an exit button — shown only in fullscreen / enlarged (zoom) modes so transport stays reachable while the stage fills the screen. Both bars call the same shared transport actions (`togglePlay` / `stepFrame` / `setSpeed` / `exitPreview`), so glyphs, speed selectors and behavior stay in lockstep with the existing bottom transport bar (whose `#transport-bar` / `#export-button` ids and behavior are unchanged). The bar auto-hides after ~3 s of interaction idle and reappears on any pointer/touch activity on the stage, the standard video-player pattern; entering fullscreen or zoom re-shows it with a fresh idle timer.
 - Mobile-friendly layout (REQ-112): at viewport widths ≤ 820 px the app collapses to a single column — the right rail (tracks, export, attribution) stacks below the timeline — with ≥ 40 px touch targets on buttons/selects/inputs, flexible track-row time inputs, a smaller 48 vh default preview stage (the resize handle still overrides it), header/stepper compression, hidden footer keyboard hints, and no horizontal overflow at 390 px. Timeline chip-edge grab zones widen from 6 px to 14 px on coarse (touch) pointers so trims work with a fingertip.
 
+
 ## [1.3.1] — 2026-10-29
 
 ### Fixed
 - Preview resize handle worked in the opposite direction: dragging DOWN now makes the video TALLER (the handle is the stage's bottom edge and follows the pointer). Keyboard parity unchanged (ArrowUp = taller). Direction pinned by unit tests.
+
 
 ## [1.3.0] — 2026-10-29
 
@@ -386,6 +435,7 @@ Track-time editing, distinct manual colors, and the trim-gesture fix (SPEC-VID-0
 
 - Chip-edge trim drags now start reliably, so the chip's rendered length updates live during the drag with the row span readout following it (REQ-110). Root cause (verified with a live pointer-event probe): the edge-grab hit test only matched INSIDE the chip span, and the trim gesture was wired to the chips layer — so on the most common chips (every manual region and any auto track spanning the whole video) the end edge sits exactly on the strip boundary, the pointerdown there hit-tests to the timeline strip instead of the chips layer, the drag never started, and the follow-up click seeked instead of trimming. Edge hit zones now extend ±6 px around each chip edge (grabbable from outside too) and the gesture is bound to the whole timeline strip; each pointermove re-renders the chip live (probe-measured: chip width changes ≥ 20 px mid-drag).
 
+
 ## [1.2.0] — 2026-10-29
 
 Preview ergonomics follow-up to SPEC-VID-002: the preview stage is resizable.
@@ -393,6 +443,7 @@ Preview ergonomics follow-up to SPEC-VID-002: the preview stage is resizable.
 ### Added
 
 - Draggable preview-height handle between the preview stage and the transport bar: drag it up/down to resize the preview (clamped to 220 px – 75% of the viewport height, recomputed while dragging), double-click to reset to the default height, and ArrowUp/ArrowDown on the focused handle steps ±24 px (`role="separator"` semantics with a live `aria-valuenow`). The stage height is driven by the `--stage-h` custom property and every change re-scales the pixel-truthful overlay through the editor's existing `redraw()` path — the same seam as fullscreen/zoom.
+
 
 ## [1.1.0] — 2026-10-29
 

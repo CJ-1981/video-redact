@@ -450,8 +450,8 @@ describe('progress reporting (REQ-009)', () => {
       expect(e.totalFrames).toBe(4); // round(duration · fps)
       expect(e.trackCount).toBe(2); // one face + one plate record
       expect(Object.keys(e).sort()).toEqual(
-        ['analyzeFps', 'etaSec', 'frameCount', 'phase', 'totalFrames', 'trackCount'].sort(),
-      );
+        ['analyzeFps', 'etaSec', 'frameCount', 'phase', 'skippedCount', 'totalFrames', 'trackCount'].sort(),
+      ); // skippedCount (v1.23.0) rides every analyze event
     }
     // 10 ms/frame clock → 100 fps steady state; frame 1 has no estimate yet.
     expect(analyze[0].analyzeFps).toBeNull();
@@ -1038,5 +1038,24 @@ describe('rescanSpan — span-limited re-detection (v1.22.0 REQ-202)', () => {
         0.3,
       ),
     ).rejects.toThrow(/display size/);
+  });
+});
+
+describe('runAnalyze — skipped frames surface in progress events (v1.23.0)', () => {
+  it('the analyze-phase event carries skippedCount so the UI counter can shrink the denominator', async () => {
+    const samples = installSink([0, 0.1, 0.2, 0.3, 0.4]);
+    const canvas = installCanvas();
+    const events = [];
+    const result = await runAnalyze(
+      baseOpts({
+        canvasFactory: canvas,
+        settings: { trims: [{ start: 0.15, end: 0.35 }] }, // 0.2 and 0.3 skipped
+        onProgress: (e) => { if (e.phase === 'analyze') events.push({ frameCount: e.frameCount, skippedCount: e.skippedCount }); },
+      }),
+    );
+    expect(result.skippedCount).toBe(2);
+    expect(events.length).toBeGreaterThan(0);
+    expect(events[events.length - 1].skippedCount).toBe(2);
+    expect(events[0].skippedCount).toBe(0); // starts at zero, accumulates
   });
 });

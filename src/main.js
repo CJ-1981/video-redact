@@ -3797,7 +3797,12 @@ export async function mountApp(
           setBar(els.analyzeBar, evt.totalFrames ? evt.frameCount / evt.totalFrames : null);
           if (els.analyzeFrames) els.analyzeFrames.textContent = String(evt.frameCount);
           if (els.analyzeTotal) {
-            els.analyzeTotal.textContent = evt.totalFrames != null ? String(evt.totalFrames) : '—';
+            // v1.23.0: trimmed frames are skipped, so the honest denominator
+            // shrinks as skips accumulate — "N / M−K" reads correctly.
+            const shown = evt.totalFrames != null && evt.skippedCount
+              ? `${evt.frameCount} / ${evt.totalFrames} (−${evt.skippedCount} trimmed)`
+              : evt.totalFrames != null ? String(evt.totalFrames) : '—';
+            els.analyzeTotal.textContent = shown;
           }
           if (els.analyzeFps) {
             els.analyzeFps.textContent = evt.analyzeFps != null ? evt.analyzeFps.toFixed(1) : '—';

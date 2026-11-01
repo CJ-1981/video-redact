@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.23.0] — 2026-11-01
+
+### Fixed
+- The analyze total-frame counter now reflects trimmed frames honestly: trimmed frames are counted separately ("skipped") and the live counter shows "N / M (−K trimmed)" so the pass no longer looks incomplete when trims skip frames. The final status line already reported skipped frames; the progress event now carries skippedCount for the live counter too.
+
 ## [1.22.1] — 2026-11-01
 
 ### Fixed

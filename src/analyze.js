@@ -186,7 +186,7 @@ function defaultYieldNow() {
  *     drops detections whose display-space min(w, h) is below the threshold
  *     BEFORE the tracker.
  * @param {(progress: {phase: 'models', model: string, fraction: number} |
- *                {phase: 'analyze', frameCount: number,
+ *                {phase: 'analyze', frameCount: number, skippedCount: number,
  *                 totalFrames: number|null, analyzeFps: number|null,
  *                 etaSec: number|null, trackCount: number}) => void} [opts.onProgress]
  *     Model download progress, then honest per-frame progress (drives
@@ -374,6 +374,7 @@ export async function runAnalyze({
         analyzeFps,
         etaSec: remaining,
         trackCount: tracker._order.length,
+        skippedCount, // v1.23.0: trimmed frames — surfaced in the live counter
       });
 
       // P-5: yield every frame so Cancel/progress stay alive.

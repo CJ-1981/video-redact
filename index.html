@@ -212,6 +212,8 @@
       background: transparent;
     }
     #clear-file:hover { background: #E5484D; color: #fff; }
+    /* v1.33.0: icon lives solely in ::before — never duplicated in the text. */
+    #clear-file::before { content: '\2715  '; }
     #clear-file:focus-visible { outline: 2px solid var(--alert); outline-offset: 2px; }
     /* v1.17.0 REQ-130: project save/load — #project-save sits next to
          ✕ Clear / Open another file and is disabled until a file is loaded
@@ -1207,7 +1209,6 @@
       #project-save::before { content: '\1F4BE  '; font-size: 14px; }
       #project-load::before { content: '\1F4C2  '; font-size: 14px; }
       #change-file::before { content: '\1F39B  '; font-size: 14px; }
-      #clear-file::before { content: '\2715  '; font-size: 14px; }
     }
   </style>
 </head>
@@ -1237,7 +1238,7 @@
     <div id="header-actions">
       <div class="ha-group" id="ha-video">
         <button id="change-file" type="button" class="ha-primary" hidden>Open video</button>
-        <button id="clear-file" type="button" class="ha-danger" hidden>✕ Clear</button>
+        <button id="clear-file" type="button" class="ha-danger" hidden>Clear</button>
       </div>
       <div class="ha-group" id="ha-project">
         <button id="project-save" type="button" disabled title="Save settings, trims and tracks as a .vrproj project file">Save project</button>

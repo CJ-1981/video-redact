@@ -51,6 +51,7 @@
 import {
   ALL_FORMATS,
   BlobSource,
+  BufferSource,
   BufferTarget,
   Conversion,
   ConversionCanceledError,
@@ -405,9 +406,8 @@ export function exportGeometry(resolution, width, height) {
  * Create the OPFS staging file for one stream attempt.
  *
  * @param {string} ext Output extension ('mp4' | 'webm').
- * @returns {Promise<{kind: 'stream', dir: object, handle: object,
- *                     name: string, opfsPath: string}>}
- * @throws {ExportError} stage 'io' when OPFS is unavailable.
+ * @returns {Promise<{kind: 'stream', dir: object, handle: object, name: string, opfsPath: string, canStream: boolean}>}
+  * @throws {ExportError} stage 'io' when OPFS is unavailable.
  */
 async function stageInOpfs(ext) {
   let root;
@@ -430,7 +430,11 @@ async function stageInOpfs(ext) {
   } catch (err) {
     throw new ExportError('io', `Could not create staging file ${STAGING_DIR}/${name}.`, { cause: err });
   }
-  return { kind: 'stream', dir, handle, name, opfsPath: `${STAGING_DIR}/${name}` };
+  // v1.24.0: some mobile browsers (iOS Safari < 17.4, Firefox mobile) lack
+  // OPFS createWritable — signal that so runExport can fall back to
+  // in-memory staging instead of failing the whole export.
+  const canStream = typeof handle.createWritable === 'function';
+  return { kind: 'stream', dir, handle, name, opfsPath: `${STAGING_DIR}/${name}`, canStream };
 }
 
 /**
@@ -480,6 +484,41 @@ async function removeTemp(staging) {
   } catch {
     // Already gone or unwritable — the crash-recovery sweep handles strays.
   }
+}
+
+/**
+ * Acquire export staging with a MOBILE-SAFE fallback (v1.24.0): OPFS
+ * stream staging when the browser supports createWritable; otherwise an
+ * in-memory BufferTarget so exports on iOS Safari < 17.4 / Firefox mobile
+ * still succeed (delivered as a Blob download). Returns the staging object
+ * plus a `fallback` flag so the caller can inform the user.
+ *
+ * @param {string} ext File extension for the staging file.
+ * @param {boolean} [forceBuffer] Skip OPFS entirely (outputMode 'buffer').
+ * @returns {Promise<{kind: 'stream'|'buffer', dir?: object, handle?: object,
+ *                     name?: string, opfsPath?: string, target?: object,
+ *                     canStream: boolean, fallback: boolean}>}
+ * @throws {ExportError} stage 'io' when even the buffer fallback fails.
+ */
+/**
+ * @returns {Promise<{kind: 'stream'|'buffer', dir?: object, handle?: object,
+ *                     name?: string, opfsPath?: string, target?: object,
+ *                     canStream: boolean, fallback: boolean}>}
+ */
+async function acquireStaging(ext, forceBuffer = false) {
+  if (!forceBuffer) {
+    try {
+      const staging = await stageInOpfs(ext);
+      if (staging.handle && typeof staging.handle.createWritable === 'function') {
+        return { ...staging, canStream: true, fallback: false };
+      }
+      // Handle exists but createWritable is missing — fall through to buffer.
+    } catch (err) {
+      // OPFS unavailable entirely — fall through to buffer.
+      if (!(err instanceof ExportError)) throw err;
+    }
+  }
+  return { kind: 'buffer', target: new BufferTarget(), canStream: false, fallback: true };
 }
 
 /**
@@ -646,7 +685,7 @@ function throwIfAborted(signal) {
  * A/V sync holds because video and audio packets of a segment get the SAME
  * offset. Delivery + final-temp cleanup ride the shared deliver().
  *
- * @param {Awaited<ReturnType<typeof stageInOpfs>>[]} segStagings
+ * @param {Array<{kind: 'stream'|'buffer', dir?: object, handle?: object, name?: string, opfsPath?: string, target?: object, canStream?: boolean, fallback?: boolean}>} segStagings
  * @param {typeof LADDER[number]} rung
  * @param {object} settings runExport settings.
  * @param {Array<{start: number, end: number}>} kept Kept segments (same
@@ -666,8 +705,15 @@ async function concatKeptSegments(segStagings, rung, settings, kept, onProgress,
   let stream = null;
   try {
     for (const staging of segStagings) {
-      const file = await staging.handle.getFile();
-      segInputs.push(new Input({ source: new BlobSource(file), formats: ALL_FORMATS }));
+      // v1.24.0: segment stagings may be OPFS streams or in-memory buffers
+      // (mobile fallback) — both reopen as Inputs for the concat pass.
+      if (staging.kind === 'buffer') {
+        const bytes = new Uint8Array(staging.target.buffer ?? new Uint8Array(0));
+        segInputs.push(new Input({ source: new BufferSource(bytes), formats: ALL_FORMATS }));
+      } else {
+        const file = await staging.handle.getFile();
+        segInputs.push(new Input({ source: new BlobSource(file), formats: ALL_FORMATS }));
+      }
     }
 
     // Codec identity + decoder configs come from the FIRST segment.
@@ -862,7 +908,7 @@ async function runTrimmedExport({
   let lastStage = rungs[0].stage;
 
   for (const rung of rungs) {
-    /** @type {Awaited<ReturnType<typeof stageInOpfs>>[]} */
+    /** @type {Array<{kind: 'stream'|'buffer', dir?: object, handle?: object, name?: string, opfsPath?: string, target?: object, canStream?: boolean, fallback?: boolean}>} */
     const segStagings = [];
     try {
       // -- Phase 1: one trimmed Conversion per kept segment ----------------
@@ -870,13 +916,19 @@ async function runTrimmedExport({
       for (let i = 0; i < kept.length; i++) {
         throwIfAborted(signal);
         const seg = kept[i];
-        const staging = await stageInOpfs(rung.ext);
+        const staging = await acquireStaging(rung.ext, settings.outputMode === 'buffer');
         segStagings.push(staging);
-        const segStream = await countingWritable(staging.handle);
-        const output = new Output({
-          format: new rung.Format(),
-          target: new StreamTarget(segStream.writable, { chunked: true }),
-        });
+        let segStream = null;
+        let output;
+        if (staging.kind === 'buffer') {
+          output = new Output({ format: new rung.Format(), target: staging.target });
+        } else {
+          segStream = await countingWritable(staging.handle);
+          output = new Output({
+            format: new rung.Format(),
+            target: new StreamTarget(segStream.writable, { chunked: true }),
+          });
+        }
         // v1.16.0: export resolution — same scaling as the single pass.
         const { sf: segSf, outW: segOutW, outH: segOutH } = exportGeometry(
           settings.exportResolution, width, height,
@@ -910,7 +962,7 @@ async function runTrimmedExport({
             ratio:
               ((segIndex + (Number.isFinite(ratio) ? ratio : 0)) / kept.length) *
               SEGMENT_PROGRESS_SHARE,
-            bytesWritten: bytesSoFar + segStream.bytes(),
+            bytesWritten: bytesSoFar + (segStream ? segStream.bytes() : 0),
           });
         };
         const onAbort = () => void conversion.cancel();
@@ -920,7 +972,7 @@ async function runTrimmedExport({
         } finally {
           signal?.removeEventListener('abort', onAbort);
         }
-        bytesSoFar += segStream.bytes();
+        bytesSoFar += segStream ? segStream.bytes() : 0;
       }
 
       // -- Phase 2: concat the encoded packets into ONE output -------------
@@ -1041,10 +1093,9 @@ export async function runExport(opts) {
   let lastStage = rungs[0].stage;
 
   for (const rung of rungs) {
-    /** @type {{kind:'buffer', target: BufferTarget} | Awaited<ReturnType<typeof stageInOpfs>>} */
-    const staging = settings.outputMode === 'buffer'
-      ? { kind: 'buffer', target: new BufferTarget() }
-      : await stageInOpfs(rung.ext);
+    // v1.24.0: mobile-safe staging — falls back to in-memory when the
+    // browser lacks OPFS createWritable (field report: mobile export IO fail).
+    const staging = await acquireStaging(rung.ext, settings.outputMode === 'buffer');
 
     /** @type {{writable?: WritableStream<object>, bytes?: () => number, ioError?: () => unknown}} */
     let stream;

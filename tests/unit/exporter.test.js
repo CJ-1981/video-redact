@@ -47,6 +47,9 @@ const { mbState } = vi.hoisted(() => ({
 }));
 
 vi.mock('mediabunny', () => {
+  class BufferSource {
+    constructor(bytes) { this.bytes = bytes; }
+  }
   class ConversionCanceledError extends Error {
     constructor(message) {
       super(message ?? 'The conversion was canceled.');
@@ -184,6 +187,7 @@ vi.mock('mediabunny', () => {
     WebMOutputFormat,
     StreamTarget,
     BufferTarget,
+    BufferSource,
     Output,
     Quality,
     canEncodeVideo,
@@ -1265,59 +1269,34 @@ describe('runExport — burn-in canvas paths', () => {
   });
 });
 
-describe('runExport — OPFS staging failure paths (stream mode)', () => {
-  it('OPFS unavailable → ExportError(io) "OPFS ... unavailable for export staging"', async () => {
-    vi.stubGlobal('navigator', {}); // no navigator.storage
-    await expect(runExport({ input: fakeInput(), tracks: [], settings: { quality: 'high' } }))
-      .rejects.toMatchObject({
-        name: 'ExportError',
-        stage: 'io',
-        message: expect.stringContaining('unavailable for export staging'),
-      });
+describe('runExport — OPFS staging failure paths (stream mode) — v1.24.0: buffer fallback', () => {
+  it('OPFS unavailable → in-memory buffer fallback SUCCEEDS (mobile fix)', async () => {
+    vi.stubGlobal('navigator', {}); // no navigator.storage at all
+    const result = await runExport({ input: fakeInput(), tracks: [], settings: { quality: 'high' } });
+    expect(result.blob).toBeInstanceOf(Blob);
+    expect(result.bytes).toBeGreaterThan(0);
+    expect(result.handle ?? null).toBeNull(); // Blob download delivery
   });
 
-  it('exports/ dir creation failure → ExportError(io) "staging directory"', async () => {
+  it('exports/ dir creation failure → in-memory buffer fallback SUCCEEDS', async () => {
     const root = { getDirectoryHandle: async () => { throw new Error('quota exceeded'); } };
     vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
-    await expect(runExport({ input: fakeInput(), tracks: [], settings: { quality: 'high' } }))
-      .rejects.toMatchObject({
-        name: 'ExportError',
-        stage: 'io',
-        message: expect.stringContaining('Could not open the exports/ staging directory'),
-      });
+    const result = await runExport({ input: fakeInput(), tracks: [], settings: { quality: 'high' } });
+    expect(result.blob).toBeInstanceOf(Blob);
+    expect(result.bytes).toBeGreaterThan(0);
   });
 
-  it('staging file creation failure → ExportError(io) "Could not create staging file"', async () => {
-    const exportsDir = { getFileHandle: async () => { throw new Error('quota exceeded'); } };
-    const root = { getDirectoryHandle: async () => exportsDir };
-    vi.stubGlobal('navigator', { storage: { getDirectory: async () => root } });
-    await expect(runExport({ input: fakeInput(), tracks: [], settings: { quality: 'high' } }))
-      .rejects.toMatchObject({
-        name: 'ExportError',
-        stage: 'io',
-        message: expect.stringContaining('Could not create staging file exports/redact-export-'),
-      });
+  it('staging file creation failure → in-memory buffer fallback SUCCEEDS', async () => {
+    const dir = { getFileHandle: async () => { throw new Error('quota exceeded'); } };
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => dir } });
+    const result = await runExport({ input: fakeInput(), tracks: [], settings: { quality: 'high' } });
+    expect(result.blob).toBeInstanceOf(Blob);
   });
 
-  it('aborted sink classifies as ExportError(io) without ladder retry', async () => {
-    installOpfs();
-    let conv;
-    mb.Conversion.init.mockImplementation(async (o) => {
-      conv = new mb.Conversion(o);
-      conv.execute.mockImplementation(async () => {
-        const target = conv.opts.output.target;
-        await target.writable.abort(new Error('disk full'));
-        throw new Error('stream closed');
-      });
-      return conv;
-    });
-
-    await expect(runExport({ input: fakeInput(), tracks: [], settings: { quality: 'high' } }))
-      .rejects.toMatchObject({
-        name: 'ExportError',
-        stage: 'io',
-        message: expect.stringContaining('Writing the export file failed'),
-      });
+  it('buffer-mode export is unaffected by OPFS state (explicit)', async () => {
+    vi.stubGlobal('navigator', {}); // no OPFS
+    const result = await runExport({ input: fakeInput(), tracks: [], settings: { outputMode: 'buffer', quality: 'high' } });
+    expect(result.blob).toBeInstanceOf(Blob);
   });
 });
 

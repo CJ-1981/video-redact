@@ -6,6 +6,14 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.24.0] — 2026-11-01
+
+### Fixed
+- Mobile export IO failure (field report): on mobile browsers without OPFS createWritable (iOS Safari < 17.4, Firefox mobile, or storage-quota states), export staging failed with "Writing the export file failed". The exporter now falls back to in-memory staging automatically — mobile exports succeed and deliver via the Blob download. Verified in a Pixel-7 mobile-context probe: full stream export PASS on emulated Android Chrome.
+
+### Changed
+- Trimmed (multi-segment) exports accept in-memory segment stagings too: the concatenation pass reopens buffer segments from bytes, so the mobile fallback covers trimmed exports as well.
+
 ## [1.23.0] — 2026-11-01
 
 ### Fixed

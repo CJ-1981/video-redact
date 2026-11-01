@@ -183,7 +183,7 @@
     #app-header h1 span { color: var(--accent); }
     #app-header .tagline { color: var(--ink); font-size: 12px; margin-top: 2px; }
     /* v1.6.0: Clear + Open-another-file share one header slot */
-    #header-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+    #header-actions { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; row-gap: 6px; }
     /* v1.6.2: Clear is a destructive action — alert-red styling (probe: tools/debug-touch-timeline.mjs T4). */
     #clear-file {
       color: var(--alert);
@@ -1149,6 +1149,7 @@
 
       /* Touch targets: every control ≥ 40 px tall on coarse/narrow screens. */
       button, select { min-height: 40px; }
+      #header-actions { flex: 1 1 auto; }
       /* v1.17.0 REQ-130: the load control is a label styled as a button —
          give it the same 40px touch target. */
       #project-load { min-height: 40px; }
@@ -1157,6 +1158,13 @@
 
       /* Transport wraps instead of forcing a second scrollbar-width row. */
       #transport-bar { flex-wrap: wrap; }
+      /* v1.21.1: compact glyph-first project buttons — the full labels
+         overflowed the header row on phones. */
+      #project-save, #project-load { padding: 6px 8px; font-size: 12px; }
+      #project-save { font-size: 0; padding: 6px 10px; } /* glyph-only: 💾 */
+      #project-save::before { content: '\1F4BE'; font-size: 14px; }
+      #project-load { font-size: 0; padding: 6px 10px; } /* glyph-only: 📂 */
+      #project-load::before { content: '\1F4C2'; font-size: 14px; }
     }
   </style>
 </head>

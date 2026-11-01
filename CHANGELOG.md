@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.22.1] — 2026-11-01
+
+### Fixed
+- Mobile: the project Save/Load buttons overflowed the header row. The header now wraps, the buttons go glyph-only (💾 / 📂) on narrow screens with full labels restored on wide screens, and all header controls keep 40px touch targets.
+
 ## [1.22.0] — 2026-11-01
 
 ### Added
@@ -23,6 +28,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Added
 - Tracks panel summary: the title shows per-class counts ("Tracks — 2 faces · 1 plate · 1 manual"), refreshed live.
 - Track filter buttons (All / Face / Plate / Manual) above the list — filtering is a list-finding aid only; the preview, timeline chips, and export are unaffected. Filter resets to All on file load / Clear; when the filter hides everything, the list explains "No tracks match this filter."
+
+## [1.21.1] — 2026-11-01
+
+### Fixed
+- Mobile: the project Save/Load buttons overflowed the header row. The header now wraps, the buttons go glyph-only (💾 / 📂) on narrow screens with full labels restored on wide screens, and all header controls keep 40px touch targets.
 
 ## [1.20.1] — 2026-11-01
 

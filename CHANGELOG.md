@@ -47,6 +47,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Fixed
 - Mobile: the project Save/Load buttons overflowed the header row. The header now wraps, the buttons go glyph-only (💾 / 📂) on narrow screens with full labels restored on wide screens, and all header controls keep 40px touch targets.
 
+## [1.28.0] — 2026-11-01
+
+### Changed
+- Header redesign: one cohesive action cluster — "🎬 Open video" + "✕ Clear" grouped as video actions, "💾 Save" / "📂 Load" grouped as project actions, theme toggle isolated at the far edge. Labels compact to glyphs on phones (with full titles on hover); touch targets ≥ 40px.
+
 ## [1.20.1] — 2026-11-01
 
 ### Added

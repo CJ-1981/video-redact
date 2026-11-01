@@ -183,7 +183,23 @@
     #app-header h1 span { color: var(--accent); }
     #app-header .tagline { color: var(--ink); font-size: 12px; margin-top: 2px; }
     /* v1.6.0: Clear + Open-another-file share one header slot */
-    #header-actions { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; row-gap: 6px; }
+    #header-actions { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; row-gap: 6px; }
+    /* v1.27.0: grouped cluster — video actions vs project actions vs theme. */
+    #header-actions .ha-group {
+      display: flex; align-items: center; gap: 0;
+      border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+    }
+    #header-actions .ha-group > * {
+      padding: 6px 12px; font-size: 13px; min-height: 34px;
+      background: var(--bg-panel); border: none; color: var(--ink-hi);
+    }
+    #header-actions .ha-group > * + * { border-left: 1px solid var(--line); }
+    #header-actions .ha-group > *:hover { background: var(--bg-inset); }
+    #header-actions .ha-primary { color: var(--accent); font-weight: 600; }
+    #header-actions .ha-danger { color: var(--alert); }
+    #header-actions .ha-danger:hover { background: var(--alert); color: #fff; }
+    #header-actions #clear-file[hidden], #header-actions #change-file[hidden] { display: none; }
+    #theme-toggle { font-size: 15px; line-height: 1.2; padding: 6px 10px; }
     /* v1.6.2: Clear is a destructive action — alert-red styling (probe: tools/debug-touch-timeline.mjs T4). */
     #clear-file {
       color: var(--alert);
@@ -1161,10 +1177,14 @@
       /* v1.21.1: compact glyph-first project buttons — the full labels
          overflowed the header row on phones. */
       #project-save, #project-load { padding: 6px 8px; font-size: 12px; }
-      #project-save { font-size: 0; padding: 6px 10px; } /* glyph-only: 💾 */
-      #project-save::before { content: '\1F4BE'; font-size: 14px; }
-      #project-load { font-size: 0; padding: 6px 10px; } /* glyph-only: 📂 */
-      #project-load::before { content: '\1F4C2'; font-size: 14px; }
+      /* v1.27.0: all header group controls go glyph-only on phones. */
+      #ha-video > *, #ha-project > *, #theme-toggle {
+        font-size: 0; padding: 6px 10px; min-height: 40px;
+      }
+      #project-save::before { content: '\1F4BE  '; font-size: 14px; }
+      #project-load::before { content: '\1F4C2  '; font-size: 14px; }
+      #change-file::before { content: '\1F39B  '; font-size: 14px; }
+      #clear-file::before { content: '\2715  '; font-size: 14px; }
     }
   </style>
 </head>
@@ -1188,22 +1208,19 @@
       <h1>Video <span>Redact</span></h1>
       <div class="tagline">Faces &amp; plates pixelated locally — nothing leaves this device</div>
     </div>
+    <!-- v1.27.0: one cohesive header cluster — VIDEO actions (open/clear)
+         left, PROJECT actions (save/load) grouped right, theme isolated at
+         the far edge. Labels stay on desktop, glyph-only on mobile. -->
     <div id="header-actions">
-      <!-- v1.12.0 REQ-124: light/dark theme toggle. Dark is the default, so
-           the resting glyph offers the sun (switch to light); main.js flips
-           html[data-theme], swaps the glyph, and persists the choice. -->
-      <button id="theme-toggle" type="button" title="Toggle light theme" aria-label="Toggle light theme" aria-pressed="false">☀️</button>
-      <!-- v1.6.0: full unload & reset — aborts in-flight passes, frees the
-           decoder + blob URL, sweeps export temps, resets every panel back to
-           the landing view. Hidden at the gate step (nothing to clear);
-           shown from ready → done. Wired by main.js clearAll(). -->
-      <button id="clear-file" type="button" hidden>✕ Clear</button>
-      <button id="change-file" type="button" hidden>Open another file</button>
-      <!-- v1.17.0 REQ-130: project save/load (always reachable in the header;
-           main.js enables/disables #project-save by load state and fills
-           #project-status with save/load messages). -->
-      <button id="project-save" type="button" disabled title="Save settings, trims and tracks as a .vrproj project file">💾 Save project</button>
-      <label id="project-load" for="project-load-input" title="Open a saved .vrproj project file">📂 Load project<input type="file" id="project-load-input" accept=".vrproj,application/json" hidden /></label>
+      <div class="ha-group" id="ha-video">
+        <button id="change-file" type="button" class="ha-primary" hidden>🎬 Open video</button>
+        <button id="clear-file" type="button" class="ha-danger" hidden>✕ Clear</button>
+      </div>
+      <div class="ha-group" id="ha-project">
+        <button id="project-save" type="button" disabled title="Save settings, trims and tracks as a .vrproj project file">💾 Save</button>
+        <label id="project-load" for="project-load-input" title="Open a saved .vrproj project file">📂 Load<input type="file" id="project-load-input" accept=".vrproj,application/json" hidden /></label>
+      </div>
+      <button id="theme-toggle" type="button" class="ha-theme" title="Toggle light theme" aria-label="Toggle light theme" aria-pressed="false">☀️</button>
     </div>
     <ol id="stepper" aria-label="Workflow steps">
       <li id="step-gate" data-step="gate" aria-current="step"><span class="num">①</span> Capability check</li>

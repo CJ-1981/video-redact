@@ -1033,6 +1033,29 @@ const KF_EPS = 1e-9;
  * @param {number} t Query time, seconds.
  * @returns {import('./types.js').Box} Interpolated (or endpoint) box copy.
  */
+/**
+ * End of the trim region containing `t`, walking chains of adjacent
+ * regions so a jump can never land inside the NEXT region (v1.24
+ * skip-trimmed playback). PURE; null when t is not inside any region.
+ *
+ * @param {Array<{start: number, end: number}>} trims Sorted regions.
+ * @param {number} t Playhead time (seconds).
+ * @returns {number | null}
+ */
+export function trimSkipTarget(trims, t) {
+  if (!Array.isArray(trims) || trims.length === 0 || !Number.isFinite(t)) {
+    return null;
+  }
+  let end = null;
+  for (const r of trims) {
+    if (t >= r.start && t <= r.end) {
+      end = Math.max(end ?? r.end, r.end); // chain through touching regions
+      t = r.end; // re-check later regions from here
+    }
+  }
+  return end;
+}
+
 export function interpolateBetween(a, b, t) {
   const boxA = a && typeof a.box === 'object' ? a.box : null;
   const boxB = b && typeof b.box === 'object' ? b.box : null;
@@ -1764,6 +1787,15 @@ export function mountEditor(els, hooks) {
       const inTrim = (state.trims ?? []).some(
         (r) => Number.isFinite(t) && t >= r.start && t <= r.end,
       );
+      // v1.24.0 skip-trimmed playback (opt-in): while PLAYING, jump straight
+      // to the region's end instead of presenting veiled frames — precise
+      // per-tick, unlike the ~4 Hz timeupdate fallback in main.js. Paused
+      // inspection still shows the veil on purpose.
+      if (inTrim && state.skipTrimsPlayback && video && !video.paused) {
+        const skipEnd = trimSkipTarget(state.trims, t);
+        if (skipEnd != null) video.currentTime = Math.min(skipEnd, video.duration || skipEnd);
+        return; // next tick draws the landed frame
+      }
       if (!inTrim) {
         // v1.17.0 REQ-129: the selected pixelation strength rides through the
         // shared seam — getState().pixelStrength ('fine'|'normal'|'coarse'|

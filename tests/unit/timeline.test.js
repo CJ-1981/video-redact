@@ -1734,7 +1734,7 @@ const {
   trimsAt,
   keptSegments,
 } = await import('../../src/main.js');
-const { trimRegionViews } = await import('../../src/editor.js');
+const { trimRegionViews, trimSkipTarget } = await import('../../src/editor.js');
 
 describe('main.trim helpers (v1.15.0 REQ-125): MIN_TRIM_SPAN_S', () => {
   it('is 0.1 s — the same floor as the chip-span trim', () => {
@@ -2388,5 +2388,24 @@ describe('hitTestTimeline under a view window (v1.22.0 REQ-204)', () => {
       track: a,
       zone: 'body',
     });
+  });
+});
+
+describe('trimSkipTarget — chained skip-trimmed playback (v1.24.0)', () => {
+  it('returns the containing region end', () => {
+    expect(trimSkipTarget([{ start: 0.5, end: 1.5 }], 0.7)).toBe(1.5);
+  });
+
+  it('chains through touching regions so a jump never lands inside the next one', () => {
+    const trims = [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }];
+    expect(trimSkipTarget(trims, 0.5)).toBe(3);
+    expect(trimSkipTarget(trims, 1.9)).toBe(3);
+  });
+
+  it('null outside all regions and for invalid input', () => {
+    expect(trimSkipTarget([{ start: 1, end: 2 }], 2.5)).toBeNull();
+    expect(trimSkipTarget([], 1)).toBeNull();
+    expect(trimSkipTarget(undefined, 1)).toBeNull();
+    expect(trimSkipTarget([{ start: 1, end: 2 }], Number.NaN)).toBeNull();
   });
 });

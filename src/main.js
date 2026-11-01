@@ -3599,6 +3599,7 @@ export async function mountApp(
         getState: () => ({
           tracks: app.tracks,
           trackFilter: app.trackFilter,
+          skipTrimsPlayback: els.skipTrimsToggle?.checked === true,
           currentTime: els.video?.currentTime ?? 0,
           duration: app.meta?.duration,
           // v1.15.0 REQ-125: trim regions + trim mode drive the greyed

@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.24.1] — 2026-11-01
+
+### Fixed
+- Skip-trimmed playback is now frame-precise: the skip previously rode the ~4 Hz timeupdate signal, so up to 250 ms of grey-veiled frames presented before the jump. The skip now runs inside the editor's per-frame tick — the playhead jumps the moment it enters a trimmed region — and chained touching regions are walked in one jump so playback never lands inside the next one.
+
 ## [1.24.0] — 2026-11-01
 
 ### Fixed

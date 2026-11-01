@@ -63,6 +63,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 - Zoomed timeline now scrolls horizontally (thin scrollbar, drag on the track) instead of clipping chips — the chips layer is a static, zoom-scaled lane inside the scrollable strip, and pointer→time mapping divides through the same lane width.
 - Desktop Chromium export: the Web Share path is now gated on the ABSENCE of showSaveFilePicker, so desktop exports go through the real save dialog again (v1.29.0 regression where desktop Chromium got the mobile share sheet instead of a download).
 
+## [1.34.0] — 2026-11-01
+
+### Fixed
+- Mobile: the theme toggle lost its ☀️/🌙 glyph (it was caught by the glyph-only font-size: 0 rule meant for text-labeled buttons). The toggle is excluded from that group — its icon comes from the element text that main.js swaps, and it keeps the 40px touch target.
+
 ## [1.33.1] — 2026-11-01
 
 ### Fixed

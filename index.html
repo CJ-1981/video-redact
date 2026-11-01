@@ -1203,9 +1203,13 @@
          overflowed the header row on phones. */
       #project-save, #project-load { padding: 6px 8px; font-size: 12px; }
       /* v1.27.0: all header group controls go glyph-only on phones. */
-      #ha-video > *, #ha-project > *, #theme-toggle {
+      #ha-video > *, #ha-project > * {
         font-size: 0; padding: 6px 10px; min-height: 40px;
       }
+      /* v1.34.0: the theme toggle keeps its glyph (☀️/🌙 set by main.js in
+         the element text — not a ::before), so it is excluded from the
+         font-size: 0 group and just gets the 40px touch target. */
+      #theme-toggle { min-height: 40px; }
       #project-save::before { content: '\1F4BE  '; font-size: 14px; }
       #project-load::before { content: '\1F4C2  '; font-size: 14px; }
       #change-file::before { content: '\1F39B  '; font-size: 14px; }

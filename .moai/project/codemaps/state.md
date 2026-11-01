@@ -1,6 +1,6 @@
 # Codemap: State (main.js stepper state machine)
 
-`main.js` owns the single `AppState` (see `src/types.js`); `deriveStep(step, event)` is the pure reducer (unit-tested in `main-wiring.test.js` — incl. a v1.6.0 group asserting CLEAR from every known step and v1.10.0 groups for the ready-carried editor and export-gating pre-analyze). Unlisted (state, event) pairs are illegal and derive to `null` — the caller ignores them.
+`main.js` owns the single `AppState` (see `src/types.js`); `deriveStep(step, event)` is the pure reducer (unit-tested in `main-wiring.test.js` — incl. a v1.6.0 group asserting CLEAR from every known step and v1.10.0 groups for the ready-carried editor, export-transition groups (ready→EXPORT_START legal since v1.35.0)). Unlisted (state, event) pairs are illegal and derive to `null` — the caller ignores them.
 
 ## States
 
@@ -25,6 +25,9 @@ analyzing ──ANALYZE_FINISH──▶ review      analyzing ──ANALYZE_FAIL
                                            editor — it merges tracks via mergeManualTracks
                                            (manual tracks preserved) and editor.refresh()s)
 review ──ANALYZE_START──▶ analyzing       (re-analyze, e.g. dashcam/sensitivity changed)
+ready ──EXPORT_START──▶ exporting         (v1.35.0: the grey "Export (not analyzed)"
+                                          pre-analysis export — manual regions,
+                                          watermark and settings only)
 review ──EXPORT_START──▶ exporting        review ──FILE_OPENED──▶ ready
 exporting ──EXPORT_DONE──▶ done           exporting ──EXPORT_FAIL──▶ review
 done ──ANALYZE_START──▶ analyzing         done ──EXPORT_START──▶ exporting
@@ -39,7 +42,7 @@ ANY step ──CLEAR──▶ gate        (v1.6.0: the header ✕ Clear button �
 
 Cancellation convention: analyze cancel is the `ANALYZE_FINISH` success event carrying a cancelled flag (partial tracks kept, AC-03); export cancel surfaces as `EXPORT_FAIL` with a cancelled marker at the callsite. `CLEAR` is independent of both — it aborts them first and lands on `gate`.
 
-Keyboard gating over states (v1.9.0/1.10.0, map extended v1.12.0): the doc-level keyboard handler is wired FIRST (before any editor mount, preserved through v1.10.0); `Space` toggles playback at `ready` (a live editor exists) and in review/done, `B` draws a manual box; since v1.12.0 `←`/`→` jump ±5 s (`SEEK_STEP_S`) and `Shift+←/→` frame-step ±1 (review/done-gated), `F` toggles fullscreen/enlarge and `M` mute (REQ-122); `EXPORT_START` is rejected at `ready`/`gate`/`analyzing` (`deriveStep` → null), so nothing can ship pre-analysis. A mount failure at any state surfaces a readable toast while the keyboard stays live (`mountEditorSafe`).
+Keyboard gating over states (v1.9.0/1.10.0, map extended v1.12.0): the doc-level keyboard handler is wired FIRST (before any editor mount, preserved through v1.10.0); `Space` toggles playback at `ready` (a live editor exists) and in review/done, `B` draws a manual box; since v1.12.0 `←`/`→` jump ±5 s (`SEEK_STEP_S`) and `Shift+←/→` frame-step ±1 (review/done-gated), `F` toggles fullscreen/enlarge and `M` mute (REQ-122); `EXPORT_START` is legal from ready since v1.35.0 (the grey pre-analysis export); it stays rejected at `gate`/`analyzing` (`deriveStep` → null). A mount failure at any state surfaces a readable toast while the keyboard stays live (`mountEditorSafe`).
 
 Export settings flow (v1.16.0–v1.17.1, REQ-127): the export panel's resolution select and "Include audio" checkbox are read live at export click (`startExport` reads `els.exportResolution` / `els.exportAudio` / `app.settings.pixelStrength` / `app.trims`). `resetExportChoices()` (resolution → 'full', audio → checked) runs ONLY on file load and Clear — v1.17.1 removed the pre-read reset that made every export run with defaults. Pixel strength lives in `app.settings.pixelStrength` (preview and export share it).
 
@@ -61,9 +64,12 @@ Layout state note (v1.18.0–v1.18.1): the review workspace's `#below-timeline` 
                                  //   style 'pixelate'|'solid' (REQ-101; default pixelate for auto,
                                  //   solid for manual — tracker.finalize sets it) }
   settings: { dashcamMode: boolean, padSeconds: number, quality: 'high'|'balanced',
-              confFace?: number, confPlate?: number }   // REQ-113 (v1.5.0): detection confidence
+              confFace?: number, confPlate?: number,
+              detectFace?: boolean, detectPlate?: boolean }   // REQ-113 (v1.5.0): detection confidence
                                  // thresholds from the Analyze-panel sensitivity sliders
                                  // (defaults 0.6 / 0.25 — detector DEFAULT_CONF_FACE/PLATE when omitted);
+                                 // detectFace/detectPlate (v1.39.0): per-class detector toggles —
+                                 // false skips that model entirely (≥1 must stay on, enforceDetectorPair);
                                  // reset from DEFAULT_SETTINGS() on mount and on CLEAR (v1.6.0).
                                  // A SECOND settings record on the mountApp app object holds the
                                  // analyze-pass knobs (v1.12.0/v1.17.0): { minSizePx: 0, downscale: 'full',

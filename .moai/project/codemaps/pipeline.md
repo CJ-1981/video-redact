@@ -30,6 +30,7 @@ All boxes/coordinates are display-oriented native pixels after ingest (ADR-9). S
  │   ┌──────────────┐   ┌───────────────┐   ┌────────────┐           │
  │   │ detector.js  │   │ detector.js   │   │ tracker.js │           │
  │   │ detectFace   │──▶│ detectPlate   │──▶│ Tracker    │           │
+ │   │ (skip via detectFace/detectPlate=false — v1.39.0)│           │
  │   │ (YuNet 640²) │   │ (YOLOv9-t 640²)│  │ update(t)  │           │
  │   └──────┬───────┘   └───────────────┘   └─────┬──────┘           │
  │          │ Detection[] (display space)         │ finalize(pad)    │

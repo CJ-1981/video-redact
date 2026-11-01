@@ -52,6 +52,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Changed
 - Header redesign: one cohesive action cluster — "🎬 Open video" + "✕ Clear" grouped as video actions, "💾 Save" / "📂 Load" grouped as project actions, theme toggle isolated at the far edge. Labels compact to glyphs on phones (with full titles on hover); touch targets ≥ 40px.
 
+## [1.31.0] — 2026-11-01
+
+### Fixed
+- Zoomed timeline now scrolls horizontally (thin scrollbar, drag on the track) instead of clipping chips — the chips layer is a static, zoom-scaled lane inside the scrollable strip, and pointer→time mapping divides through the same lane width.
+- Desktop Chromium export: the Web Share path is now gated on the ABSENCE of showSaveFilePicker, so desktop exports go through the real save dialog again (v1.29.0 regression where desktop Chromium got the mobile share sheet instead of a download).
+
 ## [1.29.0] — 2026-11-01
 
 ### Fixed

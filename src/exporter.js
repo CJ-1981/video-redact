@@ -584,8 +584,15 @@ async function deliver(staging, blob, settings, bytes, ext, mime) {
   // whenever the file is shareable (Safari 15+; keep the blob alive — iOS
   // reads it lazily after share resolves).
   const shareFile = globalThis.navigator?.share?.bind(globalThis.navigator);
-  const canShareFile =
+  // v1.31.0 regression fix: the Web Share path is for iOS Safari — the ONE
+  // environment where <a download> fails. Desktop Chromium supports BOTH
+  // share and showSaveFilePicker, and the picker is better there (direct
+  // save dialog). Gating share on the ABSENCE of showSaveFilePicker routes
+  // desktop Chromium to the picker and mobile Safari/iOS to share — each
+  // browser gets its best channel. Probe seam: `preferShare` override.
+  const sharePreferred =
     shareFile &&
+    typeof globalThis.showSaveFilePicker !== 'function' &&
     typeof globalThis.navigator.canShare === 'function' &&
     (() => {
       try {
@@ -595,7 +602,7 @@ async function deliver(staging, blob, settings, bytes, ext, mime) {
         return false;
       }
     })();
-  if (canShareFile) {
+  if (sharePreferred) {
     await shareFile({ files: [new File([blob], filename, { type: mime })] });
     await removeTemp(staging);
     return { blob, handle: null, opfsPath: undefined, bytes };

@@ -1961,6 +1961,13 @@ export function mountEditor(els, hooks) {
     const vm = renderTimeline(state.tracks, d, displayTime(), view);
 
     if (chipsContainer) {
+      // v1.31.0: zoomed view widens the lane so all chips stay in the
+      // document flow (the strip scrolls — no clipping), and pointer x→time
+      // mapping divides by the same lane width.
+      const zoomSpan = view.end - view.start;
+      const laneScale = zoomSpan > 0 && zoomSpan < d ? d / zoomSpan : 1;
+      chipsContainer.style.width = `${laneScale * 100}%`;
+      chipsContainer.style.minWidth = '100%';
       chipsContainer.textContent = '';
       for (const chip of vm.chips) {
         const widthPct = chip.endPct - chip.startPct;

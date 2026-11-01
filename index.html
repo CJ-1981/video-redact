@@ -542,7 +542,25 @@
       border-radius: 6px;
       overflow: hidden;
     }
-    #track-chips { position: absolute; inset: 0; }
+    /* v1.31.0: zoomed-in view scrolls horizontally instead of clipping. */
+    #timeline-track {
+      position: relative;
+      overflow-x: auto;
+      overflow-y: hidden;
+      touch-action: pan-y;
+      scrollbar-width: thin;
+    }
+    /* v1.31.0: zoomed-in view scrolls horizontally instead of clipping.
+       The chips layer is STATIC (sized by editor.js via chips.style.width) —
+       an absolutely-positioned layer would not create scrollable overflow. */
+    #track-chips {
+      position: relative;
+      height: 100%;
+      min-width: 0;
+    }
+    /* When zoomed the strip is wider than the viewport — width set by
+       editor.js (span/duration · 100%). */
+    #timeline-track > #zoom-lane { position: relative; min-width: 100%; height: 100%; }
     #playhead {
       position: absolute;
       top: 0;

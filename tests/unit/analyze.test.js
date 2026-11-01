@@ -872,3 +872,171 @@ describe('runAnalyze — trimmed regions skipped (v1.15.2)', () => {
     expect(inTrims(Number.NaN, trims)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// rescanSpan (v1.22.0 REQ-202) — span-limited re-detection for the track
+// row's "Re-scan span" action. Same seam harness as runAnalyze above.
+// ---------------------------------------------------------------------------
+
+const { rescanSpan } = await import('../../src/analyze.js');
+
+/** installSink variant that CAPTURES the (start, end) window args. */
+function installSinkWindow(timestamps) {
+  const samples = [];
+  const windows = [];
+  VideoSampleSink.mockImplementation(function (videoTrack) {
+    return {
+      videoTrack,
+      samples: (a, b) => {
+        windows.push([a, b]);
+        return (async function* () {
+          for (const timestamp of timestamps) {
+            const sample = { timestamp, draw: vi.fn(), close: vi.fn() };
+            samples.push(sample);
+            yield sample;
+          }
+        })();
+      },
+    };
+  });
+  return { samples, windows };
+}
+
+describe('rescanSpan — span-limited re-detection (v1.22.0 REQ-202)', () => {
+  function makeInput2() {
+    const track = { __primaryVideoTrack: true, displayWidth: W, displayHeight: H };
+    return { input: { getPrimaryVideoTrack: vi.fn(async () => track) }, track };
+  }
+
+  it('runs detection ONLY in the requested span window, sink timestamps authoritative', async () => {
+    const { input } = makeInput2();
+    const { samples, windows } = installSinkWindow([1.05, 1.2]);
+    const out = await rescanSpan(input, 1, 1.3, 0.45, null, {
+      cls: 'face',
+      meta: makeMeta(),
+      canvasFactory: installCanvas(),
+      yieldNow: vi.fn(async () => {}),
+    });
+
+    expect(windows).toEqual([[1, 1.3]]); // the sink window IS the span
+    expect(out.cancelled).toBe(false);
+    expect(out.frameCount).toBe(2);
+    expect(out.detections.map((d) => d.t)).toEqual([1.05, 1.2]); // sink stamps
+    expect(out.detections[0].box).toEqual({ x: 100, y: 100, w: 60, h: 60 });
+    expect(samples.every((s) => s.close.mock.calls.length === 1)).toBe(true);
+  });
+
+  it('forwards the confidence threshold to EVERY detect call', async () => {
+    const { input } = makeInput2();
+    installSinkWindow([0.5]);
+    await rescanSpan(input, 0, 1, 0.33, null, {
+      meta: makeMeta(),
+      canvasFactory: installCanvas(),
+      yieldNow: vi.fn(async () => {}),
+    });
+    for (const calls of [detState.detectFace.mock.calls, detState.detectPlate.mock.calls]) {
+      expect(calls.length).toBeGreaterThan(0);
+      for (const [, opts] of calls) expect(opts).toEqual({ confThreshold: 0.33 });
+    }
+  });
+
+  it('opts.cls limits detection to one class (the track\'s own)', async () => {
+    const { input } = makeInput2();
+    installSinkWindow([0.5, 0.6]);
+    await rescanSpan(input, 0, 1, 0.3, null, {
+      cls: 'face',
+      meta: makeMeta(),
+      canvasFactory: installCanvas(),
+      yieldNow: vi.fn(async () => {}),
+    });
+    expect(detState.detectFace).toHaveBeenCalled();
+    expect(detState.detectPlate).not.toHaveBeenCalled();
+
+    detState.detectFace.mockReset();
+    detState.detectFace.mockImplementation(async () => fullFaceDet());
+    await rescanSpan(input, 0, 1, 0.3, null, {
+      cls: 'plate',
+      meta: makeMeta(),
+      canvasFactory: installCanvas(),
+      yieldNow: vi.fn(async () => {}),
+    });
+    expect(detState.detectFace).not.toHaveBeenCalled();
+    expect(detState.detectPlate).toHaveBeenCalled();
+  });
+
+  it('rescales detections to display space under the REQ-117 downscale', async () => {
+    const { input } = makeInput2();
+    installSinkWindow([0.5]);
+    const sf = scaleFactorFor('720p', 2560, 1440); // 0.5
+    expect(sf).toBe(0.5);
+    const out = await rescanSpan(input, 0, 1, 0.3, null, {
+      meta: makeMeta({ displayWidth: 2560, displayHeight: 1440 }),
+      downscale: '720p',
+      canvasFactory: installCanvas(),
+      yieldNow: vi.fn(async () => {}),
+    });
+    // The raw detector box (100,100,60,60) doubles back into display px.
+    expect(out.detections[0].box).toEqual({ x: 200, y: 200, w: 120, h: 120 });
+  });
+
+  it('onSample fires per frame; abort → cancelled with partial detections', async () => {
+    const { input } = makeInput2();
+    installSinkWindow([0.1, 0.2, 0.3]);
+    const controller = new AbortController();
+    const seen = [];
+    const out = await rescanSpan(
+      input,
+      0,
+      1,
+      0.3,
+      (evt) => {
+        seen.push(evt);
+        if (evt.frameCount === 2) controller.abort();
+      },
+      {
+        cls: 'face',
+        signal: controller.signal,
+        meta: makeMeta(),
+        canvasFactory: installCanvas(),
+        yieldNow: vi.fn(async () => {}),
+      },
+    );
+    expect(out.cancelled).toBe(true);
+    expect(out.frameCount).toBe(2); // third frame never processed
+    expect(seen.map((e) => e.frameCount)).toEqual([1, 2]);
+    expect(out.detections).toHaveLength(2);
+  });
+
+  it('closes detectors on every exit path; sample.close survives detector throws', async () => {
+    const { input } = makeInput2();
+    const { samples } = installSinkWindow([0.1, 0.2]);
+    detState.detectFace.mockImplementationOnce(async () => {
+      throw new Error('model exploded');
+    });
+    const closedBefore = detState.detectorClosed;
+    await expect(
+      rescanSpan(input, 0, 1, 0.3, null, {
+        meta: makeMeta(),
+        canvasFactory: installCanvas(),
+        yieldNow: vi.fn(async () => {}),
+      }),
+    ).rejects.toThrow('model exploded');
+    expect(detState.detectorClosed).toBe(closedBefore + 1);
+    expect(samples[0].close.mock.calls.length).toBe(1); // closed in the finally
+  });
+
+  it('throws on an empty span / no primary video track / no display size', async () => {
+    const { input } = makeInput2();
+    await expect(rescanSpan(input, 2, 2, 0.3)).rejects.toThrow(/empty span/);
+    await expect(rescanSpan(input, 3, 1, 0.3)).rejects.toThrow(/empty span/);
+    await expect(rescanSpan(null, 0, 1, 0.3)).rejects.toThrow(/primary video track/);
+    await expect(
+      rescanSpan(
+        { getPrimaryVideoTrack: vi.fn(async () => ({})) }, // no display size, no meta
+        0,
+        1,
+        0.3,
+      ),
+    ).rejects.toThrow(/display size/);
+  });
+});

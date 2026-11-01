@@ -82,6 +82,30 @@
  *                                      REQ-128): detect-affecting settings
  *   adoptTracks(tracks) / clampTracksToDuration(tracks, durationSec) /
  *   videoBaseName(name)                project-load helpers (v1.17.0 REQ-130)
+ *   mergeDetections(existingKeyframes, newDets, opts)
+ *                                      span re-scan dedup merge (v1.22.0
+ *                                      REQ-202): IoU ≥ 0.5 at |Δt| ≤ 0.15 s
+ *                                      drops a new det; best-conf wins
+ *                                      among colliding NEW dets; existing
+ *                                      keyframes are preserved verbatim
+ *   estimateSizeBytes(durationSec, resolution, quality)
+ *                                      size ESTIMATE heuristic (v1.22.0
+ *                                      REQ-137): flat bitrate model, ≈ only
+ *   buildExportSummary(input)          export summary card rows (REQ-137)
+ *   computeExportPlan(input)           UI choices → {settings, summary,
+ *                                      outSec, outW, outH} (REQ-137) — the
+ *                                      summary and the runExport settings
+ *                                      come from the SAME computation
+ *   AUTOSAVE_DB / AUTOSAVE_STORE / AUTOSAVE_INTERVAL_MS / autosaveKeyFor(file)
+ *                                      session-autosave coordinates (v1.22.0
+ *                                      REQ-138); key = "<name>:<size>"
+ *   serializeAutosave(input)           session → plain snapshot (tracks'
+ *                                      Map keyframes → sorted [s, box] pairs)
+ *   applyAutosaveSnapshot(snapshot, currentFile)
+ *                                      name+size check → {settings, trims,
+ *                                      tracks} to apply, null on mismatch
+ *   autosaveIsMeaningful(snapshot)     false for a defaults-only snapshot
+ *                                      (no restore nag on stock re-opens)
  *
  * mountApp(document) owns ALL DOM access and stays untested (node has no
  * DOM); it runs automatically in the browser and is a no-op import in node.
@@ -123,6 +147,7 @@
 import { secureContextInfo, guidance, probeCapabilities } from './capability.js';
 import { MODELS } from './models.js';
 import {
+  densifyManualTracks,
   filterTracksByClass,
   formatTrackSummary,
   manualTrackFromBox,
@@ -131,9 +156,17 @@ import {
   toggleTrack,
   trackSummaryCounts,
   trimTrack,
+  upsertKeyframe,
 } from './editor.js';
 import { openInput } from './ingest.js';
-import { filterByMinSize, runAnalyze, sampleFrameAt, scaleFactorFor } from './analyze.js';
+import {
+  filterByMinSize,
+  rescanSpan,
+  runAnalyze,
+  sampleFrameAt,
+  scaleFactorFor,
+} from './analyze.js';
+import { iou } from './tracker.js';
 import {
   createDetectors,
   decodeYunetOutputs,
@@ -141,8 +174,17 @@ import {
   parsePlateRows,
   tileGrid,
 } from './detector.js';
-import { ExportError, discardExportTemp, runExport } from './exporter.js';
+import {
+  ExportError,
+  discardExportTemp,
+  exportGeometry,
+  normalizeWatermark,
+  runExport,
+} from './exporter.js';
 import { parseProject, serializeProject, validateVideoMatch } from './project.js';
+// v1.22.0 REQ-206: waveform peaks for the timeline strip (lazy decode +
+// per-file cache live in the module).
+import { decodeWaveform } from './audio.js';
 import './types.js';
 
 // ---------------------------------------------------------------------------
@@ -1165,6 +1207,78 @@ export function mergeManualTracks(existingTracks, analyzedTracks) {
 }
 
 /**
+ * Dedup-merge fresh detections into a track's keyframe map (v1.22.0
+ * REQ-202, the "Re-scan span" action's model half). PURE — the input Map is
+ * never mutated; the result is a NEW Map whose entries are sorted ascending
+ * by time ("min-order", same convention as upsertKeyframe).
+ *
+ * Dedup rule (REQ-202): a new detection is DROPPED when IoU ≥ `iou` (default
+ * 0.5) against an existing keyframe box at |kt − det.t| ≤ `tEps` (default
+ * 0.15 s) — the track already covers that instant. Existing keyframes are
+ * PRESERVED verbatim (a re-scan never deletes or replaces user/tracker
+ * state). Among colliding NEW detections (same rule against each other) the
+ * HIGHEST-CONF one wins — detections are considered best-conf first, so a
+ * strong box beats its weaker near-duplicate. A new detection whose exact
+ * time already exists in the map is dropped even below the IoU gate (one box
+ * per instant per track; replacing would silently rewrite existing state).
+ *
+ * @param {Map<number, import('./types.js').Box> | null | undefined} existingKeyframes
+ *     The track's current keyframes.
+ * @param {import('./types.js').Detection[] | null | undefined} newDets
+ *     Fresh display-space detections (one class — the wiring filters).
+ * @param {{iou?: number, tEps?: number}} [opts] Gate overrides (0.5 / 0.15).
+ * @returns {Map<number, import('./types.js').Box>} New merged Map.
+ */
+export function mergeDetections(existingKeyframes, newDets, opts = {}) {
+  const iouGate =
+    typeof opts.iou === 'number' && Number.isFinite(opts.iou) ? opts.iou : 0.5;
+  const tEps = typeof opts.tEps === 'number' && Number.isFinite(opts.tEps) ? opts.tEps : 0.15;
+  const existing = existingKeyframes instanceof Map ? existingKeyframes : new Map();
+  const candidates = (Array.isArray(newDets) ? newDets : [])
+    .filter((d) => !!d && d.box && typeof d.box === 'object' && Number.isFinite(d.t))
+    .sort((x, y) => (Number(y?.conf) || 0) - (Number(x?.conf) || 0)); // best-conf first
+
+  /** @type {Array<[number, import('./types.js').Box]>} */
+  const added = [];
+  for (const det of candidates) {
+    const t = det.t;
+    let dup = existing.has(t); // one box per instant — existing always wins
+    if (!dup) {
+      for (const [kt, box] of existing) {
+        if (Math.abs(kt - t) <= tEps && iou(box, det.box) >= iouGate) {
+          dup = true;
+          break;
+        }
+      }
+    }
+    if (!dup) {
+      for (const [at, box] of added) {
+        if (Math.abs(at - t) <= tEps && iou(box, det.box) >= iouGate) {
+          dup = true;
+          break;
+        }
+      }
+    }
+    if (!dup) added.push([t, { ...det.box }]);
+  }
+  return new Map([...existing.entries(), ...added].sort((x, y) => x[0] - y[0]));
+}
+
+/**
+ * Re-scan confidence threshold for a track (v1.22.0 REQ-202). PURE: the
+ * track's mean conf lowered by 0.15, floored at 0.10; a track without a
+ * usable conf (manual tracks, legacy data) sits at the 0.10 floor.
+ *
+ * @param {number | null | undefined} trackConf The track's mean confidence.
+ * @returns {number} Threshold in [0.10, 1).
+ */
+export function rescanThresholdFor(trackConf) {
+  const base = Number(trackConf);
+  if (!Number.isFinite(base)) return 0.1;
+  return Math.max(0.1, base - 0.15);
+}
+
+/**
  * Bulk-restyle EVERY track to one redaction style (v1.13.0 — #bulk-solid /
  * #bulk-pixelate). PURE: returns a NEW array; the input array and its track
  * objects are never mutated (each track is copied only when its style
@@ -1694,6 +1808,456 @@ export function epLabel(ep) {
 }
 
 // ---------------------------------------------------------------------------
+// Export summary card (v1.22.0 REQ-137, pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Rough per-quality video bitrate heuristic, megabits per second at FULL
+ * resolution. `balanced` ≈ half of `high` — the same subjective step the
+ * mediabunny Quality mapping ('high' vs 'medium') produces in practice.
+ */
+const SUMMARY_BITRATE_MBPS = { high: 8, balanced: 4 };
+
+/**
+ * Resolution → fraction of the FULL-resolution bitrate (the encoder cost
+ * tracks the pixel count, which these long-edge caps approximate):
+ * 'full'/'1080p' → 1, '720p' → 0.5, '480p' → 0.25. Unknown → 1.
+ */
+const SUMMARY_RESOLUTION_FACTOR = { full: 1, '1080p': 1, '720p': 0.5, '480p': 0.25 };
+
+/** Audio bitrate added to every estimate (packet-copied source audio), Mb/s. */
+const SUMMARY_AUDIO_MBPS = 0.128;
+
+/**
+ * ESTIMATE ONLY (REQ-137): expected output size from a flat bitrate
+ * heuristic — `quality` picks the full-resolution video bitrate
+ * (high ≈ 8 Mb/s, balanced ≈ 4 Mb/s), `resolution` scales it
+ * ('full'/'1080p' ×1, '720p' ×0.5, '480p' ×0.25), + a constant 128 kb/s
+ * audio term; bytes = Mb/s · 1e6 / 8 · seconds. PURE. It ignores scene
+ * complexity, codec ladder fallbacks and container overhead — the summary
+ * card labels it "≈" for a reason. Non-finite/non-positive duration → 0.
+ *
+ * @param {number} durationSec OUTPUT duration (kept segments only).
+ * @param {'full'|'1080p'|'720p'|'480p'|undefined} resolution
+ * @param {'high'|'balanced'|undefined} quality
+ * @returns {number} Estimated bytes (integer ≥ 0).
+ */
+export function estimateSizeBytes(durationSec, resolution, quality) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return 0;
+  const videoMbps = SUMMARY_BITRATE_MBPS[quality] ?? SUMMARY_BITRATE_MBPS.high;
+  const factor = SUMMARY_RESOLUTION_FACTOR[
+    /** @type {'full'|'1080p'|'720p'|'480p'} */ (normalizeDownscale(resolution))
+  ] ?? 1;
+  const mbps = videoMbps * factor + SUMMARY_AUDIO_MBPS;
+  return Math.round((mbps * 1_000_000 * dur) / 8);
+}
+
+/**
+ * Export summary card rows (v1.22.0 REQ-137). PURE — the view model rendered
+ * into #export-summary right before an export runs (and kept visible through
+ * completion): what ships, computed from the SAME math the exporter uses
+ * (keptSegments for the output duration, exportGeometry for the resolution).
+ * `watermarkText` blank → 'None'.
+ *
+ * @param {{durationSec: number, trimmedOutSec: number,
+ *           outW: number, outH: number, resolution?: string,
+ *           quality?: 'high'|'balanced',
+ *           tracks?: Array<{cls?: string}>,
+ *           audioOn?: boolean, watermarkText?: string,
+ *           trimsCount?: number}} [input]
+ * @returns {Array<{label: string, value: string}>} Fixed row order:
+ *     Output duration, Resolution, Quality, Tracks, Audio, Watermark,
+ *     Estimated size.
+ */
+export function buildExportSummary(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const durationSec = Number(src.durationSec) || 0;
+  const outSec = Number(src.trimmedOutSec) || 0;
+  const trimmedSec = Math.max(0, durationSec - outSec);
+  const durationValue = trimmedSec > 0.05
+    ? `${formatClock(outSec)} (source ${formatClock(durationSec)} − trimmed ${formatClock(trimmedSec)})`
+    : formatClock(outSec);
+  const counts = trackSummaryCounts(Array.isArray(src.tracks) ? src.tracks : []);
+  const watermark = String(src.watermarkText ?? '').trim();
+  const quality = src.quality === 'balanced' ? 'balanced' : 'high';
+  return [
+    { label: 'Output duration', value: durationValue },
+    {
+      label: 'Resolution',
+      value: `${Math.max(0, Math.round(Number(src.outW) || 0))}×${Math.max(0, Math.round(Number(src.outH) || 0))}`,
+    },
+    { label: 'Quality', value: quality === 'balanced' ? 'Balanced' : 'High' },
+    { label: 'Tracks', value: formatTrackSummary(counts) },
+    { label: 'Audio', value: src.audioOn === false ? 'Removed' : 'Included' },
+    { label: 'Watermark', value: watermark ? `“${watermark}”` : 'None' },
+    {
+      label: 'Estimated size',
+      value: `≈ ${formatBytes(estimateSizeBytes(outSec, src.resolution, quality))}`,
+    },
+  ];
+}
+
+/**
+ * The export plan (v1.22.0 REQ-137): everything startExport needs, computed
+ * PURELY from plain inputs so the summary math and the runExport settings
+ * can never drift. Reads the current UI choices via its caller; returns the
+ * exporter settings (watermark normalized — absent when blank), the summary
+ * rows, and the derived output duration/size.
+ *
+ * @param {{durationSec: number, sourceW: number, sourceH: number,
+ *           quality?: string, resolution?: string, audioOn?: boolean,
+ *           watermark?: {text?: string, corner?: string, opacity?: number},
+ *           pixelStrength?: string,
+ *           trims?: Array<{id?: number, start: number, end: number}>,
+ *           tracks?: Array<object>}} [input]
+ * @returns {{settings: object,
+ *            summary: Array<{label: string, value: string}>,
+ *            outSec: number, outW: number, outH: number}}
+ */
+export function computeExportPlan(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const quality = src.quality === 'balanced' ? 'balanced' : 'high';
+  const resolution = normalizeDownscale(src.resolution);
+  const audioOn = src.audioOn !== false;
+  const durationSec = Number(src.durationSec) || 0;
+  const trims = Array.isArray(src.trims) ? src.trims.slice() : [];
+  const outSec = keptSegments(trims, durationSec)
+    .reduce((acc, seg) => acc + Math.max(0, seg.end - seg.start), 0);
+  const { outW, outH } = exportGeometry(
+    resolution,
+    Number(src.sourceW) || 0,
+    Number(src.sourceH) || 0,
+  );
+  const watermark = normalizeWatermark(src.watermark);
+  const settings = {
+    quality,
+    exportResolution: resolution,
+    removeAudio: !audioOn,
+    outputMode: 'stream', // OPFS staging; delivery handled inside runExport
+    trims,
+    pixelStrength: normalizePixelStrength(src.pixelStrength),
+    ...(watermark ? { watermark } : {}),
+  };
+  const summary = buildExportSummary({
+    durationSec,
+    trimmedOutSec: outSec,
+    outW,
+    outH,
+    resolution,
+    quality,
+    tracks: Array.isArray(src.tracks) ? src.tracks : [],
+    audioOn,
+    watermarkText: watermark ? watermark.text : '',
+    trimsCount: trims.length,
+  });
+  return { settings, summary, outSec, outW, outH };
+}
+
+// ---------------------------------------------------------------------------
+// Session autosave (v1.22.0 REQ-138, pure parts)
+// ---------------------------------------------------------------------------
+
+/** IndexedDB coordinates for the per-video session snapshot. */
+export const AUTOSAVE_DB = 'video-redact-autosave';
+export const AUTOSAVE_STORE = 'sessions';
+/** How often the dirty-state tick snapshots the session (ms). */
+export const AUTOSAVE_INTERVAL_MS = 10_000;
+
+/**
+ * Default app.settings — the "nothing worth restoring" baseline the
+ * meaningfulness check compares against (REQ-138). Keep in sync with
+ * DEFAULT_SETTINGS()/app.settings initializers above.
+ */
+const AUTOSAVE_DEFAULT_SETTINGS = { minSizePx: 0, downscale: 'full', pixelStrength: 'normal' };
+
+/**
+ * Autosave key for a loaded video: `"<name>:<size>"` (REQ-138). Same
+ * identity pair project.js uses for .vrproj matching. Guarded — a file
+ * without a usable name/size yields null (never save under a bogus key).
+ *
+ * @param {{name?: unknown, size?: unknown} | null | undefined} file
+ * @returns {string | null}
+ */
+export function autosaveKeyFor(file) {
+  const name = file && typeof file.name === 'string' ? file.name : '';
+  const size = Number(file?.size);
+  if (!name || !Number.isFinite(size) || size < 0) return null;
+  return `${name}:${size}`;
+}
+
+/**
+ * Snapshot the live session for the autosave store (v1.22.0 REQ-138). PURE.
+ * Tracks are serialized with their Map keyframes as time-sorted
+ * [seconds, box] pairs (the project.js JSON shape — IndexedDB structured
+ * clone would carry Maps, but this keeps the snapshot inspectable and the
+ * restore normalizer identical to the project-load path). No video bytes
+ * are ever included — identity is name+size+lastModified only.
+ *
+ * @param {{file: {name: string, size: number, lastModified?: number},
+ *           settings: Record<string, unknown>, trims: Array<object>,
+ *           tracks: Array<object>, savedAt: number}} input
+ * @returns {{videoName: string, videoSize: number, videoLastModified: number,
+ *            settings: Record<string, unknown>, trims: Array<object>,
+ *            tracks: Array<object>, savedAt: number}}
+ */
+export function serializeAutosave(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const file = /** @type {any} */ (src.file ?? {});
+  return {
+    videoName: String(file.name ?? ''),
+    videoSize: Number(file.size) || 0,
+    videoLastModified: Number(file.lastModified) || 0,
+    settings:
+      src.settings && typeof src.settings === 'object'
+        ? { .../** @type {Record<string, unknown>} */ (src.settings) }
+        : {},
+    trims: (Array.isArray(src.trims) ? src.trims : [])
+      .map((t) => /** @type {any} */ (t))
+      .filter((t) => t && typeof t === 'object')
+      .map((t) => ({ id: Number(t.id), start: Number(t.start), end: Number(t.end) })),
+    tracks: (Array.isArray(src.tracks) ? src.tracks : []).map(serializeAutosaveTrack),
+    savedAt: Number(src.savedAt) || 0,
+  };
+}
+
+/**
+ * One track → plain snapshot shape: Map keyframes → sorted [seconds, box]
+ * pairs; every other field shallow-copied.
+ * @param {object} track
+ * @returns {object}
+ */
+function serializeAutosaveTrack(track) {
+  const t = /** @type {any} */ (track);
+  if (!t || typeof t !== 'object') return t;
+  if (!(t.keyframes instanceof Map)) return { ...t };
+  return {
+    ...t,
+    keyframes: [...t.keyframes.entries()]
+      .map(([seconds, box]) => [seconds, box])
+      .sort((a, b) => a[0] - b[0]),
+  };
+}
+
+/**
+ * Restore check (v1.22.0 REQ-138). PURE — validates the snapshot against the
+ * just-opened file (exact name + byte-size match, the project.js identity
+ * rule) and returns the merged `{settings, trims, tracks}` ready to apply,
+ * or **null** on any mismatch (wrong video, garbage shape). Track keyframes
+ * are rebuilt to Maps from the serialized pairs; trims keep their ids
+ * (well-formed entries only); settings merge over the current defaults.
+ *
+ * @param {object | null | undefined} snapshot A stored autosave snapshot.
+ * @param {{name: string, size: number} | null | undefined} currentFile
+ * @returns {{settings: Record<string, unknown>, trims: Array<object>,
+ *            tracks: Array<object>} | null}
+ */
+export function applyAutosaveSnapshot(snapshot, currentFile) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  if (!currentFile || typeof currentFile.name !== 'string') return null;
+  if (snapshot.videoName !== currentFile.name) return null;
+  if (Number(snapshot.videoSize) !== Number(currentFile.size)) return null;
+  const settings =
+    snapshot.settings && typeof snapshot.settings === 'object'
+      ? { ...AUTOSAVE_DEFAULT_SETTINGS, .../** @type {object} */ (snapshot.settings) }
+      : { ...AUTOSAVE_DEFAULT_SETTINGS };
+  const trims = (Array.isArray(snapshot.trims) ? snapshot.trims : [])
+    .map((t) => /** @type {any} */ (t))
+    .filter(
+      (t) =>
+        t &&
+        typeof t === 'object' &&
+        Number.isFinite(Number(t.start)) &&
+        Number.isFinite(Number(t.end)) &&
+        Number(t.end) > Number(t.start),
+    )
+    .map((t) => ({ id: Number(t.id), start: Number(t.start), end: Number(t.end) }));
+  const tracks = (Array.isArray(snapshot.tracks) ? snapshot.tracks : [])
+    .map(restoreAutosaveTrack)
+    .filter((t) => t && typeof t === 'object');
+  return { settings, trims, tracks };
+}
+
+/**
+ * One snapshot track → live shape: array keyframes → Map. Non-object tracks
+ * pass through and get filtered by the caller.
+ * @param {unknown} track
+ * @returns {object | null}
+ */
+function restoreAutosaveTrack(track) {
+  const t = /** @type {any} */ (track);
+  if (!t || typeof t !== 'object') return null;
+  if (t.keyframes instanceof Map) return t;
+  if (Array.isArray(t.keyframes)) {
+    return { ...t, keyframes: new Map(t.keyframes.map((e) => [e[0], e[1]])) };
+  }
+  return { ...t };
+}
+
+/**
+ * Is a stored snapshot worth a restore toast (v1.22.0 REQ-138)? PURE — a
+ * snapshot that only carries defaults (no tracks, no trims, stock settings)
+ * would make every re-open of a video nag for nothing.
+ *
+ * @param {object | null | undefined} snapshot
+ * @returns {boolean}
+ */
+export function autosaveIsMeaningful(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return false;
+  if ((Array.isArray(snapshot.tracks) ? snapshot.tracks : []).length > 0) return true;
+  if ((Array.isArray(snapshot.trims) ? snapshot.trims : []).length > 0) return true;
+  const s = snapshot.settings;
+  if (!s || typeof s !== 'object') return false;
+  return (
+    Number(s.minSizePx) > 0 ||
+    normalizeDownscale(s.downscale) !== AUTOSAVE_DEFAULT_SETTINGS.downscale ||
+    normalizePixelStrength(s.pixelStrength) !== AUTOSAVE_DEFAULT_SETTINGS.pixelStrength
+  );
+}
+
+// --- REQ-138 IndexedDB seam (browser only; every path guarded) -------------
+//
+// The autosave store is BEST-EFFORT by design: private mode, disabled
+// storage, a quota error or a closed DB all degrade to "no autosave" —
+// never an error surface. Every helper resolves false/null instead of
+// throwing, so the callers can be fire-and-forget (`void`).
+
+/**
+ * Open (and lazily create) the autosave database. Resolves null when
+ * IndexedDB is unavailable or the open fails — never throws.
+ * @returns {Promise<IDBDatabase | null>}
+ */
+function idbOpenAutosaveDb() {
+  return new Promise((resolve) => {
+    /** @type {any} */
+    let request;
+    try {
+      const factory = globalThis.indexedDB;
+      if (!factory || typeof factory.open !== 'function') {
+        resolve(null);
+        return;
+      }
+      request = factory.open(AUTOSAVE_DB, 1);
+    } catch {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const done = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    request.onupgradeneeded = () => {
+      try {
+        if (!request.result.objectStoreNames?.contains(AUTOSAVE_STORE)) {
+          request.result.createObjectStore(AUTOSAVE_STORE);
+        }
+      } catch {
+        /* upgrade failure surfaces through onerror → null */
+      }
+    };
+    request.onsuccess = () => {
+      try {
+        done(request.result);
+      } catch {
+        done(null);
+      }
+    };
+    request.onerror = () => done(null);
+    request.onblocked = () => done(null);
+  });
+}
+
+/**
+ * Store one session snapshot under `key` (overwrites). Best-effort.
+ * @param {string} key
+ * @param {object} snapshot
+ * @returns {Promise<boolean>} true when the put completed.
+ */
+async function idbSaveSession(key, snapshot) {
+  let db = null;
+  try {
+    db = await idbOpenAutosaveDb();
+    if (!db) return false;
+    await new Promise((resolve) => {
+      const tx = db.transaction(AUTOSAVE_STORE, 'readwrite');
+      tx.objectStore(AUTOSAVE_STORE).put(snapshot, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* close is best-effort */
+    }
+  }
+}
+
+/**
+ * Load the session snapshot stored under `key` (null when absent/unreadable).
+ * @param {string} key
+ * @returns {Promise<object | null>}
+ */
+async function idbLoadSession(key) {
+  let db = null;
+  try {
+    db = await idbOpenAutosaveDb();
+    if (!db) return null;
+    const got = await new Promise((resolve) => {
+      const tx = db.transaction(AUTOSAVE_STORE, 'readonly');
+      const getRequest = tx.objectStore(AUTOSAVE_STORE).get(key);
+      getRequest.onsuccess = () => resolve(getRequest.result ?? null);
+      getRequest.onerror = () => resolve(null);
+    });
+    return got && typeof got === 'object' ? got : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* close is best-effort */
+    }
+  }
+}
+
+/**
+ * Delete the session snapshot stored under `key` (Discard action). Best-effort.
+ * @param {string} key
+ * @returns {Promise<boolean>}
+ */
+async function idbDeleteSession(key) {
+  let db = null;
+  try {
+    db = await idbOpenAutosaveDb();
+    if (!db) return false;
+    await new Promise((resolve) => {
+      const tx = db.transaction(AUTOSAVE_STORE, 'readwrite');
+      tx.objectStore(AUTOSAVE_STORE).delete(key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* close is best-effort */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // mountApp — the thin DOM shell (browser only; never runs in node)
 // ---------------------------------------------------------------------------
 
@@ -1791,6 +2355,12 @@ export async function mountApp(
     compareStatus: $('compare-status'),
     thresholdPanels: $('threshold-panels'),
     quality: /** @type {HTMLSelectElement | null} */ ($('export-quality')),
+    // v1.22.0 REQ-133/137: the watermark overlay inputs (above quality) and
+    // the summary card container. Null-guarded at every use — the markup may
+    // not carry them and the wiring must degrade to a no-op.
+    watermarkText: /** @type {HTMLInputElement | null} */ ($('watermark-text')),
+    watermarkCorner: /** @type {HTMLSelectElement | null} */ ($('watermark-corner')),
+    exportSummary: $('export-summary'),
     // v1.16.0 CRITICAL FIX: these refs were accidentally dropped when the
     // settings edit failed — els.exportResolution was undefined, so the UI
     // selections silently fell back to full-res + audio (field report:
@@ -1832,6 +2402,14 @@ export async function mountApp(
     pixelStrength: /** @type {HTMLElement | null} */ ($('pixel-strength')),
     projectSave: /** @type {HTMLButtonElement | null} */ ($('project-save')),
     projectLoad: /** @type {HTMLInputElement | null} */ ($('project-load-input')),
+    // v1.22.0 REQ-204/205/206: timeline zoom buttons, the hold-to-peek
+    // button and the waveform strip canvas. Every ref null-guarded at its
+    // use — missing markup degrades to a no-op like the refs above.
+    zoomIn: /** @type {HTMLButtonElement | null} */ ($('zoom-in')),
+    zoomOut: /** @type {HTMLButtonElement | null} */ ($('zoom-out')),
+    zoomFit: /** @type {HTMLButtonElement | null} */ ($('zoom-fit')),
+    peekButton: /** @type {HTMLButtonElement | null} */ ($('peek-button')),
+    waveform: /** @type {HTMLCanvasElement | null} */ ($('waveform')),
   };
 
   // --- REQ-004 secure-context gate: block everything, wire nothing --------
@@ -1853,10 +2431,12 @@ export async function mountApp(
    *          input: object | null, meta: import('./types.js').MediaMeta | null,
    *          caps: import('./types.js').CapabilityReport | null,
    *          tracks: import('./types.js').Track[], gen: number,
-   *          manualNextId: number, objectUrl: string | null,
+   *          manualNextId: number, selectedTrackId: number | null,
+   *          objectUrl: string | null,
    *          trims: Array<{id: number, start: number, end: number}>,
    *          nextTrimId: number, trimMode: boolean,
- *          trackFilter: 'all' | 'face' | 'plate' | 'manual',
+   *          trackFilter: 'all' | 'face' | 'plate' | 'manual',
+   *          viewStart: number, viewEnd: number, waveform: Float32Array | null,
    *          settings: {minSizePx: number, downscale: 'full' | '1080p' | '720p',
    *                     pixelStrength: 'fine' | 'normal' | 'coarse' | 'max'}}} */
   const app = {
@@ -1868,6 +2448,10 @@ export async function mountApp(
     tracks: [],
     gen: 0, // generation counter — stale async completions are dropped
     manualNextId: 1,
+    // v1.22.0 REQ-201: the SELECTED track (track-row click) — the K-keyframe
+    // target and the only track whose keyframe markers render. Reset per
+    // file load + Clear (a selection never survives its track list).
+    selectedTrackId: null,
     objectUrl: null,
     // v1.15.0 REQ-125: trim regions marked for deletion (sorted,
     // non-overlapping, min span MIN_TRIM_SPAN_S via the pure helpers) + the
@@ -1877,6 +2461,16 @@ export async function mountApp(
     nextTrimId: 1,
     trimMode: false,
     trackFilter: 'all',
+    // v1.22.0 REQ-204: the timeline VIEW window (seconds). 0/0 means
+    // "unset" — the editor normalizes that to the full clip. Owned here,
+    // mutated only through the editor's onZoomView hook; reset per file
+    // load (a fresh clip always starts fully fitted — REQ-204).
+    viewStart: 0,
+    viewEnd: 0,
+    // v1.22.0 REQ-206: decoded waveform peaks (Float32Array, 0–1 per bar) or
+    // null until the lazy post-review decode lands (null also = no audio /
+    // undecodable — the strip stays hidden).
+    waveform: null,
     // v1.12.0: the analyze-pass settings driven by the #size-filter button
     // group (REQ-120) and #downscale-select (REQ-117); reset per file load
     // and Clear (resetSizeFilter / resetDownscale). v1.17.0 REQ-129: the
@@ -1887,7 +2481,21 @@ export async function mountApp(
   let editor = /** @type {ReturnType<typeof mountEditor> | null} */ (null);
   let analyzeCtl = /** @type {AbortController | null} */ (null);
   let exportCtl = /** @type {AbortController | null} */ (null);
+  // v1.22.0 REQ-202: the span re-scan's abort controller — cancelled by
+  // Clear / file switch (generation discipline, same as analyze/export) and
+  // by the analyze-cancel control; one rescan at a time (rescanBusy id).
+  let rescanCtl = /** @type {AbortController | null} */ (null);
+  let rescanBusyId = /** @type {number | null} */ (null);
   let persisted = false;
+  // v1.22.0 REQ-138: set by the cheap mutation hooks (refreshTrackUi + the
+  // settings-panel handlers), cleared by the autosave tick after a snapshot
+  // and by file load / Clear AFTER their resets (the resets themselves call
+  // the hooks — the flag reset below their call sites neutralizes that).
+  let dirtySinceSave = false;
+  /** Mark the session as carrying unsaved work (REQ-138 autosave tick). */
+  function markDirty() {
+    dirtySinceSave = true;
+  }
   // v1.17.0 REQ-130: a parsed project awaiting its video. Set by the
   // #project-load-input handler; applied the moment a video is open (or
   // immediately when one already is). Cleared by Clear and after applying.
@@ -2090,6 +2698,7 @@ export async function mountApp(
   }
 
   function refreshTrackUi() {
+    markDirty(); // v1.22.0 REQ-138: every track/trim mutation rides through here
     updateTrackSummary();
     editor?.refresh();
     if (els.trackListEmpty) els.trackListEmpty.hidden = app.tracks.length > 0;
@@ -2142,13 +2751,52 @@ export async function mountApp(
     // resetExportChoices(); an export click keeps them.
     setBar(els.exportBar, 0);
     if (els.exportStatus) els.exportStatus.textContent = '';
+    // v1.22.0 REQ-137: the summary card belongs to the PREVIOUS state —
+    // startExport re-renders it from the fresh plan right after this; file
+    // load and Clear just leave it gone.
+    if (els.exportSummary) {
+      els.exportSummary.replaceChildren();
+      els.exportSummary.hidden = true;
+    }
   }
 
-  /** Choice reset (resolution + audio) — file load and Clear ONLY. */
+  /** Choice reset (resolution + audio + watermark) — file load and Clear ONLY. */
   function resetExportChoices() {
     if (els.exportResolution) els.exportResolution.value = 'full';
     if (els.exportAudio) els.exportAudio.checked = true;
     if (els.skipTrimsToggle) els.skipTrimsToggle.checked = false; // v1.20.0
+    // v1.22.0 REQ-133: watermark back to off + default corner.
+    if (els.watermarkText) els.watermarkText.value = '';
+    if (els.watermarkCorner) els.watermarkCorner.value = 'br';
+  }
+
+  /**
+   * Render the export summary card (v1.22.0 REQ-137) into #export-summary —
+   * one label/value row per plan row, shown ABOVE the progress rail and kept
+   * visible through completion. Rows carry data-summary-label so support
+   * probes can assert on them. Null-guarded: no container → no-op.
+   * @param {Array<{label: string, value: string}>} rows buildExportSummary rows.
+   */
+  function renderExportSummary(rows) {
+    if (!els.exportSummary || !Array.isArray(rows)) return;
+    const title = doc.createElement('div');
+    title.className = 'export-summary-title';
+    title.textContent = 'Export summary (estimate)';
+    const parts = [title];
+    for (const row of rows) {
+      const line = doc.createElement('div');
+      line.className = 'export-summary-row';
+      if (line.dataset) line.dataset.summaryLabel = String(row.label);
+      const name = doc.createElement('span');
+      name.textContent = String(row.label);
+      const value = doc.createElement('span');
+      value.textContent = String(row.value);
+      line.appendChild(name);
+      line.appendChild(value);
+      parts.push(line);
+    }
+    els.exportSummary.replaceChildren(...parts);
+    els.exportSummary.hidden = false;
   }
 
   function requestPersistentStorage() {
@@ -2223,6 +2871,132 @@ export async function mountApp(
   hideFileInfo();
   showIntake();
   void sweepExportTemps();
+
+  // --- v1.22.0 REQ-138: session autosave (best-effort crash recovery) ------
+  //
+  // Every 10 s while a file is open AND unsaved work exists (dirtySinceSave,
+  // set by the cheap refreshTrackUi / settings-handler hooks), the session
+  // {videoName, videoSize, videoLastModified, settings, trims, tracks,
+  // savedAt} is snapshot into IndexedDB under "<name>:<size>". pagehide /
+  // visibilitychange→hidden save too (best-effort). NO video bytes are ever
+  // stored. On the next successful open of the SAME video (after the editor
+  // mounts), a meaningful snapshot raises a Restore / Discard toast; Discard
+  // deletes the key. Every IDB path is guarded (private mode, quota, closed
+  // DB → silent no-op) — the feature degrades to nothing, never to an error.
+
+  /** Snapshot the CURRENT session (null when no file is open). */
+  function sessionSnapshotNow() {
+    if (!app.file) return null;
+    return serializeAutosave({
+      file: app.file,
+      settings: { ...app.settings },
+      trims: app.trims,
+      tracks: app.tracks,
+      savedAt: Date.now(),
+    });
+  }
+
+  /** Write the current session snapshot (fire-and-forget; true on success). */
+  function saveSessionNow() {
+    const snapshot = sessionSnapshotNow();
+    const key = autosaveKeyFor(app.file);
+    if (!snapshot || !key) return Promise.resolve(false);
+    return idbSaveSession(key, snapshot);
+  }
+
+  /** The 10 s tick: only a dirty session writes (idempotent otherwise). */
+  function autosaveTick() {
+    if (!app.file || !dirtySinceSave) return;
+    dirtySinceSave = false; // claimed up front — a failed write loses at most one tick
+    void saveSessionNow();
+  }
+  setInterval(autosaveTick, AUTOSAVE_INTERVAL_MS);
+
+  /** Best-effort crash-recovery save: any open file, dirty or not. */
+  const autosaveSaveOnHide = () => {
+    if (app.file) void saveSessionNow();
+  };
+  doc.addEventListener('pagehide', autosaveSaveOnHide);
+  doc.addEventListener('visibilitychange', () => {
+    if (doc.visibilityState === 'hidden') autosaveSaveOnHide();
+  });
+
+  /**
+   * Apply a user-approved restore (REQ-138): tracks/trims/settings back into
+   * app state (+ UI sync), then — when tracks exist — step straight to
+   * review so the video is reviewable without re-running analyze. Trims are
+   * clamped into the loaded duration; auto tracks render from their
+   * keyframes exactly like the post-analyze merge result.
+   * @param {{settings: Record<string, unknown>, trims: Array<object>,
+   *            tracks: Array<object>}} applied applyAutosaveSnapshot result.
+   */
+  function applyRestoredSession(applied) {
+    if (!app.file || !Array.isArray(applied.tracks) || !Array.isArray(applied.trims)) return;
+    const duration = Number(app.meta?.duration);
+    const clamp = (v) =>
+      Number.isFinite(duration) && duration > 0 ? Math.min(Math.max(v, 0), duration) : v;
+    app.tracks = /** @type {any} */ (applied.tracks);
+    const maxManualId = app.tracks
+      .filter((t) => t?.source === 'manual')
+      .reduce((m, t) => Math.max(m, Number(t?.id) || 0), 0);
+    app.manualNextId = Math.max(app.manualNextId, maxManualId + 1);
+    app.selectedTrackId = null; // a restore never pre-selects (REQ-201 rule)
+    app.trims = /** @type {any} */ (applied.trims).map((t) => ({
+      id: Number(t.id),
+      start: clamp(Number(t.start)),
+      end: clamp(Number(t.end)),
+    }));
+    app.nextTrimId = app.trims.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0) + 1;
+
+    // Settings merge over the current values + sync the panels that render
+    // them (the threshold sliders are read live at analyze start).
+    const s = applied.settings && typeof applied.settings === 'object' ? applied.settings : {};
+    app.settings = {
+      ...app.settings,
+      minSizePx: Number(s.minSizePx) || 0,
+      downscale: normalizeDownscale(s.downscale),
+      pixelStrength: normalizePixelStrength(s.pixelStrength),
+    };
+    applySizeFilter(app.settings.minSizePx);
+    applyDownscale(app.settings.downscale);
+    applyPixelStrength(app.settings.pixelStrength);
+
+    refreshTrackUi();
+    if (app.tracks.length > 0 && app.step !== 'review' && app.step !== 'done') {
+      // Exceptional restore path: deriveStep has no RESTORE event (a restore
+      // is not an analyze), so the step lands on 'review' directly — the
+      // same state enterReview would produce, minus the analysis summary.
+      app.step = 'review';
+      applyStepper();
+      updateButtons();
+    }
+    toast('Session restored — tracks, trims and settings are back.', { kind: 'ok' });
+  }
+
+  /**
+   * After a successful file open (post editor mount): look up the autosave
+   * for THIS video and, when it is meaningful, offer Restore / Discard.
+   * Stale completions drop through the generation check.
+   * @param {number} gen The handleFile generation.
+   */
+  async function maybeRestoreSession(gen) {
+    const file = app.file;
+    const key = autosaveKeyFor(file);
+    if (!file || !key) return;
+    const snapshot = await idbLoadSession(key);
+    if (gen !== app.gen || app.file !== file) return; // file switched mid-read
+    if (!snapshot || !autosaveIsMeaningful(snapshot)) return;
+    const applied = applyAutosaveSnapshot(snapshot, file);
+    if (!applied) return;
+    toast('Unsaved session found for this video.', {
+      kind: '',
+      timeoutMs: 12_000,
+      actions: [
+        { label: 'Restore', onClick: () => applyRestoredSession(applied) },
+        { label: 'Discard', onClick: () => void idbDeleteSession(key) },
+      ],
+    });
+  }
 
   function renderAttribution() {
     if (!els.attribution) return;
@@ -2379,6 +3153,7 @@ export async function mountApp(
     // dropped by the generation check.
     if (app.step === 'analyzing') analyzeCtl?.abort();
     if (app.step === 'exporting') exportCtl?.abort();
+    rescanCtl?.abort(); // v1.22.0 REQ-202: a re-scan dies with the file too
     const gen = ++app.gen;
 
     // Fresh AppState: tear down the editor, revoke the old preview URL.
@@ -2391,8 +3166,17 @@ export async function mountApp(
     app.caps = null;
     app.tracks = [];
     app.manualNextId = 1;
+    app.selectedTrackId = null; // v1.22.0 REQ-201: a selection never survives its track list
+    rescanBusyId = null;
     // v1.15.0 REQ-125: trim regions + trim mode never survive a file load.
     resetTrimState();
+    // v1.22.0 REQ-204/206: the view window resets to FULL on a fresh clip
+    // (a zoom is a per-clip inspection lens, never a preference) and the
+    // previous file's waveform peaks are dropped (the per-file cache in
+    // audio.js still serves a re-open of the SAME file instantly).
+    app.viewStart = 0;
+    app.viewEnd = 0;
+    app.waveform = null;
     // Transport resets with the fresh file (load() resets playbackRate; the
     // selectors must follow or they would show a rate the video no longer
     // has). v1.8.0: a fresh file also starts UNMUTED — mute is a per-video
@@ -2460,9 +3244,20 @@ export async function mountApp(
       // pre-analyze. A mount failure stays contained (mountEditorLive →
       // mountEditorSafe): readable toast, everything else keeps working.
       mountEditorLive();
+      // v1.22.0 REQ-138: a fresh open starts CLEAN — the resets above AND the
+      // editor mount trip the dirty hooks (refreshTrackUi), so the flag only
+      // clears once the whole load path has settled. A loaded .vrproj or a
+      // user-approved restore marks dirty again afterwards (that IS unsaved
+      // work worth snapshotting).
+      dirtySinceSave = false;
       // v1.17.0 REQ-130: a project loaded before its video applies now — the
       // editor is mounted, the duration is known, tracks render clamped.
       if (pendingProject) applyLoadedProject();
+      // v1.22.0 REQ-138: an autosaved session for THIS video (same
+      // name+size) raises its Restore/Discard toast now that the editor can
+      // render the restored state. A loaded .vrproj wins — no competing
+      // restore offer on top of an explicit project load.
+      else void maybeRestoreSession(gen);
       toast(
         `Opened ${file.name} — ${meta.container}, ${meta.displayWidth}×${meta.displayHeight}` +
           (caps.canAnalyze ? '' : ' — video decode unavailable, see capability report'),
@@ -2581,8 +3376,11 @@ export async function mountApp(
     // drops silently instead of touching the reset UI.
     if (app.step === 'analyzing') analyzeCtl?.abort();
     if (app.step === 'exporting') exportCtl?.abort();
+    rescanCtl?.abort(); // v1.22.0 REQ-202: a re-scan dies with Clear too
     analyzeCtl = null;
     exportCtl = null;
+    rescanCtl = null;
+    rescanBusyId = null;
     app.gen += 1;
 
     // (b) Editor teardown: cancels the preview frame loop and detaches every
@@ -2620,6 +3418,7 @@ export async function mountApp(
     app.caps = null;
     app.tracks = [];
     app.manualNextId = 1;
+    app.selectedTrackId = null; // v1.22.0 REQ-201
     // v1.15.0 REQ-125: trim regions + trim mode reset with everything else.
     resetTrimState();
     // v1.17.0 REQ-130: a project loaded but not yet paired with its video is
@@ -2650,6 +3449,7 @@ export async function mountApp(
     if (els.chips) els.chips.replaceChildren();
     if (els.playhead) els.playhead.style.left = '0%';
     refreshTrackUi(); // the "No tracks yet" hint returns
+    dirtySinceSave = false; // v1.22.0 REQ-138: Clear is not unsaved work — the resets above tripped the hooks
     renderCapReport(null, null); // hides + empties the capability report
     renderGuidance({ messages: [] }, null); // hides + empties the guidance
     if (els.thresholdPanels) els.thresholdPanels.replaceChildren();
@@ -2741,7 +3541,17 @@ export async function mountApp(
     } else if (e.key === 'b' || e.key === 'B') {
       // Manual-box mode: the canvas drag is live (editor's interaction map,
       // from ready since v1.10.0); B just tells the user what to do next.
-      toast('Drag on the video to draw a manual redaction box — Escape cancels the drag.', { timeoutMs: 4000 });
+      // v1.22.0 REQ-201: with a manual track SELECTED the drawn box arms a
+      // keyframe instead of a new region — tell the user which flow is live.
+      const selected = app.tracks.find(
+        (tr) => tr && tr.id === app.selectedTrackId && tr.source === 'manual',
+      );
+      toast(
+        selected
+          ? `Drawing for ${selected.label}: drag a box, then press K to set it as a keyframe at the playhead — Escape discards.`
+          : 'Drag on the video to draw a manual redaction box — Escape cancels the drag. (Click a manual track row to keyframe it instead.)',
+        { timeoutMs: 4000 },
+      );
     }
   });
 
@@ -2777,6 +3587,10 @@ export async function mountApp(
         playhead: els.playhead,
         trackList: els.trackList,
         trimRegions: els.trimRegions, // v1.15.0 REQ-125
+        zoomIn: els.zoomIn, // v1.22.0 REQ-204
+        zoomOut: els.zoomOut, // v1.22.0 REQ-204
+        zoomFit: els.zoomFit, // v1.22.0 REQ-204
+        waveform: els.waveform, // v1.22.0 REQ-206
       },
       {
         // v1.8.1: `duration` is the editor's fallback when video.duration is
@@ -2794,7 +3608,25 @@ export async function mountApp(
           // v1.17.0 REQ-129: the pixelation strength rides to
           // editor.drawPreview → redact.pixelateFrame (the shared seam).
           pixelStrength: app.settings.pixelStrength,
+          // v1.22.0 REQ-201: the selected track — the K-keyframe target and
+          // the only track whose .kf-marker diamonds render.
+          selectedTrackId: app.selectedTrackId,
+          // v1.22.0 REQ-204: the host-owned timeline view window (0/0 =
+          // unset → the editor normalizes to the full clip).
+          viewStart: app.viewStart,
+          viewEnd: app.viewEnd,
+          // v1.22.0 REQ-206: decoded waveform peaks (null → strip hidden).
+          waveform: app.waveform,
         }),
+        // v1.22.0 REQ-204: the editor's zoom/pan/fit gestures emit the NEXT
+        // view window here; persisting + refreshing re-renders every strip
+        // layer (chips, regions, playhead, thumb, waveform) through it.
+        onZoomView: (view) => {
+          if (!view || !Number.isFinite(view.start) || !Number.isFinite(view.end)) return;
+          app.viewStart = view.start;
+          app.viewEnd = view.end;
+          refreshTrackUi();
+        },
         onToggle: (trackId, enabled) => {
           app.tracks = toggleTrack(app.tracks, trackId, enabled);
           refreshTrackUi();
@@ -2826,6 +3658,36 @@ export async function mountApp(
           app.tracks = setTrackStyle(app.tracks, trackId, style);
           refreshTrackUi();
         },
+        // v1.22.0 REQ-201: a track-row click SELECTS the track — the target
+        // of the K "keyframe at playhead" action, and the only track whose
+        // keyframe diamonds render in the chips layer.
+        onSelectTrack: (trackId) => {
+          app.selectedTrackId = Number.isFinite(trackId) ? trackId : null;
+          refreshTrackUi();
+        },
+        // v1.22.0 REQ-201: the editor's K commit — a drawn box becomes the
+        // SELECTED manual track's keyframe AT THE PLAYHEAD (nearest-keyframe
+        // update: upsertKeyframe replaces any keyframe at the same clamped
+        // time). Manual regions can now FOLLOW a subject: preview and export
+        // interpolate linearly between the sparse keyframes (densify).
+        onKeyframe: (trackId, box, t) => {
+          const track = app.tracks.find((tr) => tr.id === trackId);
+          if (!track || track.source !== 'manual') return;
+          app.tracks = upsertKeyframe(app.tracks, trackId, t, box, app.meta?.duration);
+          refreshTrackUi();
+          const dur = Number(app.meta?.duration);
+          const at = Math.min(
+            Math.max(Number.isFinite(t) ? t : 0, 0),
+            Number.isFinite(dur) && dur > 0 ? dur : Infinity,
+          );
+          toast(`Keyframe set at ${formatClock(at)} — regions interpolate between keyframes.`, {
+            timeoutMs: 4000,
+          });
+        },
+        // v1.22.0 REQ-202: the row's Re-scan button — detection re-runs ONLY
+        // inside the track's span at a lowered threshold; new boxes merge
+        // into this track (dedup by IoU ≥ 0.5 at |Δt| ≤ 0.15 s).
+        onRescanTrack: (trackId) => void rescanTrack(trackId),
         // v1.15.0 REQ-125 trim hooks: drag-create, edge drag, per-region ✕ /
         // double-click removal — all through the pure helpers (sorted,
         // non-overlapping, min-span, duration-clamped), then a UI refresh.
@@ -2976,6 +3838,26 @@ export async function mountApp(
    * step → review. Re-mounting here used to be the reason the whole workspace
    * stayed dead until the first analyze finished.
    */
+  // --- Waveform decode (v1.22.0 REQ-206) --------------------------------------
+  //
+  // LAZY: the peaks decode only after the FIRST review entry (an analyze
+  // pass completed) — the ready-state workspace never pays a full audio
+  // decode. The per-file cache (audio.js, keyed "name:size") makes
+  // re-reviews and re-opens of the same file instant; a null result (no
+  // audio / undecodable) is cached too, so a silent-degrade file costs one
+  // decode attempt, ever. Errors never surface (REQ-206: the waveform is an
+  // amenity — the strip just stays hidden).
+
+  async function loadWaveform() {
+    if (!app.input || !app.file) return;
+    const gen = app.gen;
+    const key = `${app.file.name}:${app.file.size}`;
+    const result = await decodeWaveform(app.input, { bars: 240, cacheKey: key });
+    if (gen !== app.gen) return; // the file switched mid-decode — drop it
+    app.waveform = result ? result.bars : null;
+    editor?.refresh(); // re-render the strip (it unhides itself on peaks)
+  }
+
   function enterReview(result) {
     if (app.step !== 'analyzing') return;
     const next = deriveStep('analyzing', 'ANALYZE_FINISH');
@@ -2988,11 +3870,21 @@ export async function mountApp(
     const merged = mergeManualTracks(app.tracks, result?.tracks);
     app.tracks = merged.tracks;
     app.manualNextId = merged.manualNextId;
+    // v1.22.0 REQ-201: a selection whose track did not survive the merge
+    // (re-analyze replaced the auto set) dangles — drop it rather than let
+    // K-targeting or the keyframe markers reference a ghost.
+    if (
+      app.selectedTrackId != null &&
+      !app.tracks.some((tr) => tr && tr.id === app.selectedTrackId)
+    ) {
+      app.selectedTrackId = null;
+    }
 
     app.step = next;
     applyStepper();
     updateButtons();
     refreshTrackUi(); // editor.refresh() re-renders chips + rows + playhead
+    void loadWaveform(); // v1.22.0 REQ-206: first review entry decodes the peaks (cached)
 
     // AC-17: surface the ACTIVE provider (createDetectors' effective EP —
     // honest post-fallback fact) as the status-line suffix.
@@ -3014,8 +3906,84 @@ export async function mountApp(
 
   els.analyzeButton?.addEventListener('click', () => startAnalyze());
   blurAfterClick(els.analyzeButton);
-  els.analyzeCancel?.addEventListener('click', () => analyzeCtl?.abort());
+  els.analyzeCancel?.addEventListener('click', () => {
+    analyzeCtl?.abort();
+    rescanCtl?.abort(); // v1.22.0 REQ-202: a re-scan cancels with the analyze pass
+  });
   blurAfterClick(els.analyzeCancel);
+
+  // --- Per-track span re-scan (v1.22.0 REQ-202) ----------------------------
+  //
+  // The row's "Re-scan" action: re-run detection LIMITED to [track.start,
+  // track.end] at (track.conf − 0.15, floor 0.10), merge NEW detections into
+  // THIS track's keyframes (mergeDetections dedup: IoU ≥ 0.5 at |Δt| ≤ 0.15 s;
+  // existing keyframes are preserved), then refresh. The row's button reads
+  // "…" while the pass runs (editor.setRescanBusy); the pass is cancellable
+  // through rescanCtl (Clear / file switch / the analyze-cancel control) and
+  // every stale completion drops through the generation check.
+
+  /**
+   * Run one track's span re-scan. Guards: auto tracks only (manual regions
+   * have no detector class), an input/meta must exist, never while the main
+   * analyze pass is running (the row action is a review-step power tool),
+   * and one re-scan at a time.
+   * @param {number} trackId
+   */
+  async function rescanTrack(trackId) {
+    const track = app.tracks.find((tr) => tr && tr.id === trackId && tr.source === 'auto');
+    if (!track || !app.input || !app.meta) return;
+    if (app.step === 'analyzing' || rescanBusyId != null) return;
+    const gen = app.gen;
+    const threshold = rescanThresholdFor(track.conf);
+    rescanBusyId = trackId;
+    editor?.setRescanBusy?.(trackId);
+    const ctl = new AbortController();
+    rescanCtl = ctl;
+    try {
+      const { detections, cancelled } = await rescanSpan(
+        app.input,
+        track.start,
+        track.end,
+        threshold,
+        null,
+        {
+          cls: track.cls === 'plate' ? 'plate' : 'face',
+          meta: app.meta,
+          downscale: app.settings.downscale,
+          minSizePx: app.settings.minSizePx,
+          epPolicy: app.caps?.epPolicy === 'wasm' ? ['wasm'] : undefined,
+          signal: ctl.signal,
+        },
+      );
+      if (gen !== app.gen) return; // Clear / file switch — state is gone
+      if (cancelled) {
+        toast('Re-scan cancelled — the track is unchanged.', { timeoutMs: 4000 });
+        return;
+      }
+      const kept = detections.filter((d) => d && d.cls === track.cls);
+      const keyframes = mergeDetections(track.keyframes, kept, { iou: 0.5, tEps: 0.15 });
+      const added = keyframes.size - (track.keyframes?.size ?? 0);
+      app.tracks = app.tracks.map((tr) => (tr.id === trackId ? { ...tr, keyframes } : tr));
+      refreshTrackUi();
+      toast(
+        added > 0
+          ? `Re-scan merged ${added} new box${added === 1 ? '' : 'es'} into ${track.label}.`
+          : `Re-scan found nothing new for ${track.label}.`,
+        { kind: added > 0 ? 'ok' : '', timeoutMs: 5000 },
+      );
+    } catch (err) {
+      if (gen !== app.gen) return;
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Re-scan failed: ${message}`, { kind: 'error', timeoutMs: 8000 });
+    } finally {
+      rescanCtl = null;
+      if (gen === app.gen && rescanBusyId === trackId) {
+        rescanBusyId = null;
+        editor?.setRescanBusy?.(null);
+        refreshTrackUi();
+      }
+    }
+  }
 
   // --- Detection sensitivity + single-frame threshold compare (REQ-113/114) ----
 
@@ -3044,6 +4012,7 @@ export async function mountApp(
   /** Set the selection (normalized) + sync the group's aria-pressed states. */
   function applySizeFilter(selectedPx) {
     app.settings.minSizePx = sizeFilterState(app.settings.minSizePx, selectedPx);
+    markDirty(); // v1.22.0 REQ-138 (load/Clear resets clear the flag afterwards)
     const pressed = sizeFilterPressed(app.settings.minSizePx);
     if (!els.sizeFilter) return;
     let index = 0;
@@ -3076,6 +4045,7 @@ export async function mountApp(
 
   function applyDownscale(value) {
     app.settings.downscale = normalizeDownscale(value);
+    markDirty(); // v1.22.0 REQ-138 (load/Clear resets clear the flag afterwards)
     if (els.downscaleSelect) els.downscaleSelect.value = app.settings.downscale;
   }
 
@@ -3102,6 +4072,7 @@ export async function mountApp(
   /** Set the strength (normalized) + sync the group's aria-pressed states. */
   function applyPixelStrength(selected) {
     app.settings.pixelStrength = normalizePixelStrength(selected);
+    markDirty(); // v1.22.0 REQ-138 (load/Clear resets clear the flag afterwards)
     const pressed = pixelStrengthPressed(app.settings.pixelStrength);
     if (!els.pixelStrength) return;
     let index = 0;
@@ -3469,9 +4440,33 @@ export async function mountApp(
   // --- Export (REQ-017/018/019/021) -----------------------------------------------
 
   function startExport() {
-    if (deriveStep(app.step, 'EXPORT_START') == null || !app.input) return;
+    if (deriveStep(app.step, 'EXPORT_START') == null || !app.input || !app.meta) return;
     const gen = ++app.gen;
     resetExportUi();
+
+    // v1.22.0 REQ-137: compute the plan FIRST (pure), render the summary
+    // card from it, then run the export with the very same settings object —
+    // the card can never describe a different export than the one that runs.
+    const plan = computeExportPlan({
+      durationSec: Number(app.meta.duration) || 0,
+      sourceW: Number(app.meta.displayWidth) || 0,
+      sourceH: Number(app.meta.displayHeight) || 0,
+      quality: els.quality?.value,
+      resolution: els.exportResolution?.value,
+      audioOn: els.exportAudio ? els.exportAudio.checked : true,
+      // v1.22.0 REQ-133: the watermark overlay (normalized inside the plan —
+      // blank text yields no watermark at all).
+      watermark: {
+        text: els.watermarkText?.value ?? '',
+        corner: els.watermarkCorner?.value ?? 'br',
+        opacity: 0.5,
+      },
+      pixelStrength: app.settings.pixelStrength,
+      trims: app.trims,
+      tracks: app.tracks,
+    });
+    renderExportSummary(plan.summary);
+
     app.step = 'exporting';
     applyStepper();
     updateButtons();
@@ -3480,21 +4475,14 @@ export async function mountApp(
     exportCtl = ctl;
     runExport({
       input: app.input,
-      tracks: app.tracks,
-      settings: {
-        quality: els.quality?.value === 'balanced' ? 'balanced' : 'high',
-        // v1.16.0: export resolution + audio removal.
-        exportResolution: normalizeDownscale(els.exportResolution?.value),
-        removeAudio: els.exportAudio ? !els.exportAudio.checked : false,
-        outputMode: 'stream', // OPFS staging; delivery handled inside runExport
-        // v1.15.0 REQ-126: trim regions to EXCLUDE from the output. Empty
-        // array → the exporter takes the unchanged single-pass path.
-        trims: app.trims.slice(),
-        // v1.17.0 REQ-129: the pixelation strength rides to the exporter's
-        // burn-in — preview and export must resolve the SAME block sizes
-        // (AC-04 shared-seam rule; invalid values re-default to 'normal').
-        pixelStrength: normalizePixelStrength(app.settings.pixelStrength),
-      },
+      // v1.22.0 REQ-201: the export burn-in resolves manual regions through
+      // the SAME interpolation the preview shows — sparse manual keyframes
+      // densify onto the 1/30 s grid (linear between keyframes) before the
+      // shared redact.pixelateFrame seam runs per sample, so a manual region
+      // NEVER shows a nearest-keyframe step (or a gap) at export timestamps.
+      // Also a snapshot: mid-export edits cannot mutate the burn-in input.
+      tracks: densifyManualTracks(app.tracks),
+      settings: plan.settings,
       signal: ctl.signal,
       onProgress: (p) => {
         if (gen !== app.gen || !p) return;
@@ -3844,6 +4832,35 @@ export async function mountApp(
   els.transportSpeed?.addEventListener('change', () => setSpeed(els.transportSpeed?.value));
   // v1.8.0: both mute buttons route through the SAME shared toggle.
   els.muteButton?.addEventListener('click', () => toggleMute());
+  // v1.22.0 REQ-205: hold-to-peek. The #peek-button drives the editor's
+  // setPeek through a HOLD gesture (pointerdown shows the raw frame,
+  // pointerup/leave/cancel restore); the A key does the same from the
+  // keyboard (keydown idempotence-guarded against auto-repeat, keyup always
+  // releases so a missed keydown can never latch the peek). Preview-only —
+  // the export burn path never consults the peek flag.
+  const setPeekLive = (on) => {
+    if (editor) editor.setPeek(on);
+    els.peekButton?.classList.toggle('peeking', !!on);
+  };
+  els.peekButton?.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); // no focus steal (REG-2): Space must stay playback
+    setPeekLive(true);
+  });
+  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) {
+    els.peekButton?.addEventListener(ev, () => setPeekLive(false));
+  }
+  doc.addEventListener('keydown', (e) => {
+    if (e.key !== 'a' && e.key !== 'A') return;
+    if (e.repeat) return; // auto-repeat spam — already peeking, stay idempotent
+    const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
+    if (!shortcutEnabledFor(target)) return; // typing surfaces keep their 'a'
+    if (!(app.step === 'ready' || app.step === 'review' || app.step === 'done')) return;
+    e.preventDefault();
+    setPeekLive(true);
+  });
+  doc.addEventListener('keyup', (e) => {
+    if (e.key === 'a' || e.key === 'A') setPeekLive(false); // always release
+  });
   // v1.4.0 REQ-111: the overlay bar calls the SAME shared actions.
   els.ovBack?.addEventListener('click', () => stepFrame(-1));
   els.ovFwd?.addEventListener('click', () => stepFrame(1));

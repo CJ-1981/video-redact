@@ -11,6 +11,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   MIN_TRACK_SPAN_S,
+  MIN_VIEW_SPAN_S,
+  ZOOM_WHEEL_FACTOR,
   CHIP_EDGE_PX,
   CHIP_EDGE_PX_COARSE,
   CLICK_SEEK_MAX_DRAG_PX,
@@ -32,6 +34,14 @@ import {
   parseClockInput,
   formatSpan,
   scaleTracksToCanvas,
+  normalizeView,
+  isZoomed,
+  pctToTime,
+  timeToPct,
+  zoomWindow,
+  panWindow,
+  zoomStep,
+  fitWindow,
   beginManualBox,
   mountEditor,
 } from '../../src/editor.js';
@@ -512,12 +522,15 @@ describe('manualTrackFromBox (manual region factory — full-span default)', () 
     expect(track.end).toBe(10);
   });
 
-  it('keys a COPY of the box as the constant keyframe at 0 (never shared)', () => {
+  it('keys a COPY of the box AT the drawn time (v1.22.0 REQ-201; never shared)', () => {
     const track = manualTrackFromBox(1, 3, box);
     expect(track.keyframes.size).toBe(1);
-    const kf = track.keyframes.get(0);
+    const kf = track.keyframes.get(3);
     expect(kf).toEqual(box);
     expect(kf).not.toBe(box);
+    // Clamped into the span bounds: negative times → 0, past-end → duration.
+    expect(manualTrackFromBox(1, -2, box, 10).keyframes.get(0)).toEqual(box);
+    expect(manualTrackFromBox(1, 42, box, 10).keyframes.get(10)).toEqual(box);
   });
 
   it('without a usable duration it degrades to [0, max(t, min-span)]', () => {
@@ -1952,5 +1965,428 @@ describe('track-list filter + summary (v1.21.0)', () => {
     expect(formatTrackSummary(counts)).toBe('2 faces · 1 plate · 1 manual');
     expect(formatTrackSummary(trackSummaryCounts([face]))).toBe('1 face');
     expect(formatTrackSummary(trackSummaryCounts([]))).toBe('No tracks');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sparse manual keyframes (v1.22.0 REQ-201) — interpolation model
+// ---------------------------------------------------------------------------
+
+const {
+  interpolateBetween,
+  interpolatedBoxAt,
+  upsertKeyframe,
+  densifyManualTracks,
+  KEYFRAME_DENSE_STEP_S,
+} = await import('../../src/editor.js');
+import { pixelateFrame } from '../../src/redact.js';
+
+describe('sparse manual keyframes (v1.22.0 REQ-201)', () => {
+  const boxA = { x: 10, y: 20, w: 100, h: 50 };
+  const boxB = { x: 30, y: 60, w: 200, h: 150 };
+  const MID = { x: 20, y: 40, w: 150, h: 100 }; // exact 0.5 lerp A→B
+  const lerp = (f) => interpolateBetween({ t: 2, box: boxA }, { t: 6, box: boxB }, 2 + f * 4);
+
+  /** A manual track with keyframes {2: boxA, 6: boxB} over a 10 s video. */
+  function manualTwoKf() {
+    return upsertKeyframe([manualTrackFromBox(1, 2, boxA, 10)], 1, 6, boxB, 10)[0];
+  }
+
+  describe('interpolateBetween', () => {
+    it('returns exact endpoint copies at the neighbor times', () => {
+      expect(lerp(0)).toEqual(boxA);
+      expect(lerp(1)).toEqual(boxB);
+      expect(lerp(0)).not.toBe(boxA); // copies — inputs never shared
+      expect(lerp(1)).not.toBe(boxB);
+    });
+
+    it('lerps every channel at the midpoint', () => {
+      expect(lerp(0.5)).toEqual(MID);
+      expect(lerp(0.25)).toEqual({ x: 15, y: 30, w: 125, h: 75 });
+    });
+
+    it('extrapolation clamps to the nearest endpoint (never overshoots)', () => {
+      expect(interpolateBetween({ t: 2, box: boxA }, { t: 6, box: boxB }, 0)).toEqual(boxA);
+      expect(interpolateBetween({ t: 2, box: boxA }, { t: 6, box: boxB }, 99)).toEqual(boxB);
+    });
+
+    it('degenerate inputs resolve to an endpoint copy, never NaN', () => {
+      expect(interpolateBetween({ t: 5, box: boxA }, { t: 5, box: boxB }, 5)).toEqual(boxA);
+      expect(interpolateBetween({ t: 2, box: boxA }, null, 4)).toEqual(boxA);
+      expect(interpolateBetween(null, { t: 6, box: boxB }, 4)).toEqual(boxB);
+      expect(interpolateBetween(null, null, 4)).toEqual({ x: 0, y: 0, w: 0, h: 0 });
+      expect(interpolateBetween({ t: 2, box: boxA }, { t: 6, box: boxB }, NaN)).toEqual(boxA);
+    });
+  });
+
+  describe('interpolatedBoxAt', () => {
+    it('resolves linearly between bracketing keyframes; exact at keyframes', () => {
+      const track = manualTwoKf();
+      expect(interpolatedBoxAt(track, 2)).toEqual(boxA);
+      expect(interpolatedBoxAt(track, 6)).toEqual(boxB);
+      expect(interpolatedBoxAt(track, 4)).toEqual(MID);
+      // Outside the outermost keyframes → the nearest endpoint (clamp).
+      expect(interpolatedBoxAt(track, 0)).toEqual(boxA);
+      expect(interpolatedBoxAt(track, 10)).toEqual(boxB);
+    });
+
+    it('single keyframe is a constant box; outside the span → null', () => {
+      const track = manualTrackFromBox(1, 2, boxA, 10);
+      for (const t of [0, 0.5, 2, 5, 9.999, 10]) {
+        expect(interpolatedBoxAt(track, t)).toEqual(boxA);
+      }
+      // Span gate ([start, end] inclusive — mirrors redact.tracksAt).
+      const trimmed = { ...manualTwoKf(), start: 3, end: 5 };
+      expect(interpolatedBoxAt(trimmed, 1)).toBeNull();
+      expect(interpolatedBoxAt(trimmed, 7)).toBeNull();
+      expect(interpolatedBoxAt(trimmed, 4)).toEqual(MID);
+    });
+
+    it('degrades to null on no keyframes / no Map / non-finite t', () => {
+      expect(interpolatedBoxAt({ ...manualTwoKf(), keyframes: new Map() }, 4)).toBeNull();
+      expect(interpolatedBoxAt({ ...manualTwoKf(), keyframes: null }, 4)).toBeNull();
+      expect(interpolatedBoxAt(null, 4)).toBeNull();
+      expect(interpolatedBoxAt(manualTwoKf(), NaN)).toBeNull();
+    });
+  });
+
+  describe('upsertKeyframe', () => {
+    it('adds a keyframe at the playhead in min-order and is PURE', () => {
+      const track = manualTrackFromBox(1, 2, boxA, 10);
+      const snapshot = [...track.keyframes];
+      const out = upsertKeyframe([track], 1, 4, boxB, 10);
+      expect(out).toHaveLength(1);
+      expect(out[0]).not.toBe(track); // track copied
+      expect(out[0].keyframes).not.toBe(track.keyframes); // Map rebuilt
+      expect([...track.keyframes]).toEqual(snapshot); // input untouched
+      const entries = [...out[0].keyframes.entries()];
+      expect(entries.map(([t]) => t)).toEqual([2, 4]); // sorted ascending
+      expect(entries[1][1]).toEqual(boxB);
+      expect(entries[1][1]).not.toBe(boxB);
+    });
+
+    it('overwrites at the same time (nearest-keyframe update semantics)', () => {
+      const track = upsertKeyframe([manualTrackFromBox(1, 2, boxA, 10)], 1, 4, boxB, 10);
+      const updated = upsertKeyframe(track, 1, 4, { x: 0, y: 0, w: 1, h: 1 }, 10)[0];
+      expect(updated.keyframes.size).toBe(2); // replaced, not duplicated
+      expect(updated.keyframes.get(4)).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+      expect(updated.keyframes.get(2)).toEqual(boxA);
+    });
+
+    it('clamps t into [0, durationSec]', () => {
+      const track = manualTrackFromBox(1, 2, boxA, 10);
+      expect(upsertKeyframe([track], 1, -3, boxB, 10)[0].keyframes.get(0)).toEqual(boxB);
+      expect(upsertKeyframe([track], 1, 99, boxB, 10)[0].keyframes.get(10)).toEqual(boxB);
+      expect(upsertKeyframe([track], 1, -3, boxB)[0].keyframes.get(0)).toEqual(boxB);
+      // Non-finite t degrades to 0.
+      expect(upsertKeyframe([track], 1, NaN, boxB, 10)[0].keyframes.get(0)).toEqual(boxB);
+    });
+
+    it('unknown id or a box-less call → unchanged content (new array)', () => {
+      const track = manualTrackFromBox(1, 2, boxA, 10);
+      const res = upsertKeyframe([track], 99, 4, boxB, 10);
+      expect(res).not.toBe(track ? [track] : res); // new array
+      expect(res[0]).toBe(track); // untouched track object by reference
+      expect(res.map((t) => [...t.keyframes])).toEqual([[...track.keyframes]]);
+      const res2 = upsertKeyframe([track], 1, 4, null, 10);
+      expect(res2[0]).toBe(track);
+    });
+  });
+
+  describe('densifyManualTracks (the preview/export consumer-boundary upgrade)', () => {
+    it('materializes a sparse manual map onto the 1/30 s interpolated grid', () => {
+      const track = manualTwoKf();
+      const dense = densifyManualTracks([track])[0];
+      expect(dense).not.toBe(track);
+      expect(dense.source).toBe('manual');
+      expect(dense.keyframes.get(2)).toEqual(boxA); // exact keyframes preserved
+      expect(dense.keyframes.get(6)).toEqual(boxB);
+      expect(dense.keyframes.get(4)).toEqual(MID); // on-grid midpoint interpolated
+      // Grid coverage: strictly between the keyframes the max spacing is one
+      // step (mirrors the tracker's dense contract).
+      const keys = [...dense.keyframes.keys()].sort((a, b) => a - b);
+      for (let i = 1; i < keys.length; i++) {
+        expect(keys[i] - keys[i - 1]).toBeLessThanOrEqual(KEYFRAME_DENSE_STEP_S + 1e-9);
+      }
+    });
+
+    it('auto tracks and ≤ 1-keyframe manual tracks pass through by reference', () => {
+      const auto = makeTrack();
+      const single = manualTrackFromBox(2, 3, boxA, 10);
+      const out = densifyManualTracks([auto, single]);
+      expect(out[0]).toBe(auto);
+      expect(out[1]).toBe(single);
+      expect(densifyManualTracks([])).toEqual([]);
+      expect(densifyManualTracks(undefined)).toEqual([]);
+    });
+
+    it('KEYFRAME_DENSE_STEP_S mirrors the tracker grid step', () => {
+      expect(KEYFRAME_DENSE_STEP_S).toBe(1 / 30);
+    });
+  });
+
+  describe('INTEGRATION: sparse keyframes redact with interpolation (no gap at export)', () => {
+    /** Recording 2D-context (redact.test.js pattern, solid-style path). */
+    function makeRec() {
+      const calls = [];
+      const ctx = {
+        canvas: { width: 500, height: 500 },
+        save: () => calls.push(['save']),
+        restore: () => calls.push(['restore']),
+        fillRect: (x, y, w, h) => calls.push(['fillRect', x, y, w, h]),
+      };
+      let fillStyle;
+      Object.defineProperty(ctx, 'fillStyle', { get: () => fillStyle, set: (v) => { fillStyle = v; } });
+      return { ctx, calls };
+    }
+
+    it('redact.tracksAt over the DENSIFIED track interpolates mid-span', () => {
+      const track = manualTwoKf();
+      const dense = densifyManualTracks([track])[0];
+      expect(tracksAt([dense], 4)[0].box).toEqual(MID); // exact midpoint
+      expect(tracksAt([dense], 3)[0].box).toEqual(lerp(0.25));
+      // NO GAP: every instant of the span resolves to exactly one box.
+      for (const t of [0, 2, 2.5, 4, 5.9, 6, 9.999, 10]) {
+        expect(tracksAt([dense], t)).toHaveLength(1);
+      }
+      expect(tracksAt([dense], -0.5)).toEqual([]); // span gate intact
+    });
+
+    it('pixelateFrame (the export burn-in seam) receives the interpolated box', () => {
+      const frame = { width: 500, height: 500 };
+      const rec = makeRec();
+      // The export path shape: densify → pixelateFrame(ctx, tracks, t, frame).
+      pixelateFrame(rec.ctx, densifyManualTracks([manualTwoKf()]), 4, frame);
+      const fills = rec.calls.filter((c) => c[0] === 'fillRect');
+      expect(fills).toHaveLength(1);
+      // The burned region is the DILATED interpolated midpoint box.
+      expect(fills[0].slice(1)).toEqual([...Object.values(dilate(MID, 0.15, frame))]);
+    });
+
+    it('a sparse manual track burned WITHOUT densification would step (guard: dense input is the contract)', () => {
+      // Documenting the seam requirement: the RAW sparse track nearest-lookup
+      // jumps to boxB at t=4 (|4-6| < |4-2| is false → boxA actually); either
+      // way it is an ENDPOINT box, never the interpolation. The densified
+      // input is what carries the feature — pin both facts.
+      const track = manualTwoKf();
+      const rawHits = tracksAt([track], 4);
+      expect(rawHits[0].box).toEqual(boxA); // nearest-only, NOT the midpoint
+      const denseHits = tracksAt([densifyManualTracks([track])[0]], 4);
+      expect(denseHits[0].box).toEqual(MID);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// View window: zoom / pan / pct mapping (v1.22.0 REQ-204)
+// ---------------------------------------------------------------------------
+
+describe('pctToTime / timeToPct (view-window mapping, v1.22.0 REQ-204)', () => {
+  const ZOOMED = { start: 2.5, end: 7.5 };
+
+  it('round-trips pct ⇄ time inside a zoomed view', () => {
+    for (const p of [0, 12.5, 50, 87.5, 100]) {
+      expect(timeToPct(pctToTime(p, ZOOMED), ZOOMED)).toBeCloseTo(p, 10);
+    }
+    expect(pctToTime(50, ZOOMED)).toBeCloseTo(5, 10);
+    expect(pctToTime(0, ZOOMED)).toBeCloseTo(2.5, 10);
+    expect(pctToTime(100, ZOOMED)).toBeCloseTo(7.5, 10);
+  });
+
+  it('clamps pct into [0,100] and times into the view', () => {
+    expect(pctToTime(-10, ZOOMED)).toBeCloseTo(2.5, 10); // underflow → start
+    expect(pctToTime(140, ZOOMED)).toBeCloseTo(7.5, 10); // overflow → end
+    expect(timeToPct(0, ZOOMED)).toBe(0); // before the view → left edge
+    expect(timeToPct(42, ZOOMED)).toBe(100); // after the view → right edge
+  });
+
+  it('degenerate/missing views degrade (never NaN)', () => {
+    expect(pctToTime(50, { start: 4, end: 4 })).toBe(4);
+    expect(pctToTime(50, null)).toBe(0);
+    expect(timeToPct(5, { start: 4, end: 4 })).toBe(0);
+    expect(timeToPct(5, undefined)).toBe(0);
+    expect(timeToPct(NaN, ZOOMED)).toBe(0); // non-finite time → left edge pct
+  });
+
+  it('normalizeView repairs garbage windows and clamps to the duration', () => {
+    expect(normalizeView(undefined, 10)).toEqual({ start: 0, end: 10 });
+    expect(normalizeView({ start: 8, end: 3 }, 10)).toEqual({ start: 0, end: 10 }); // inverted → full
+    expect(normalizeView({ start: -5, end: 42 }, 10)).toEqual({ start: 0, end: 10 });
+    expect(normalizeView({ start: 2, end: NaN }, 10)).toEqual({ start: 2, end: 10 }); // one good bound survives
+    expect(normalizeView(null, 0)).toEqual({ start: 0, end: 0 });
+    expect(normalizeView({ start: 0, end: 10 }, -1)).toEqual({ start: 0, end: 0 }); // no duration → no view
+  });
+});
+
+describe('zoomWindow (anchor-preserving zoom, v1.22.0 REQ-204)', () => {
+  it('keeps the time under the anchor fixed while scaling the span', () => {
+    const next = zoomWindow({ start: 0, end: 10 }, 2, 50, 10);
+    expect(next.start).toBeCloseTo(2.5, 10);
+    expect(next.end).toBeCloseTo(7.5, 10);
+    // The anchor contract: the same strip position maps to the SAME time.
+    expect(pctToTime(50, next)).toBeCloseTo(pctToTime(50, { start: 0, end: 10 }), 10);
+  });
+
+  it('zooms at a non-center anchor (cursor position for wheel zoom)', () => {
+    const next = zoomWindow({ start: 0, end: 10 }, 2, 20, 10); // anchor t=2
+    expect(pctToTime(20, next)).toBeCloseTo(2, 10);
+    expect(next.end - next.start).toBeCloseTo(5, 10);
+  });
+
+  it('clamps the span at MIN_VIEW_SPAN_S on extreme zoom-in', () => {
+    const next = zoomWindow({ start: 0, end: 10 }, 1e9, 0, 10);
+    expect(next.end - next.start).toBeCloseTo(MIN_VIEW_SPAN_S, 10);
+    expect(next.start).toBe(0);
+  });
+
+  it('zoom-out clamps the window into [0, duration], preserving the span', () => {
+    // 2× out of [2,6] is an 8 s window anchored at 4 — it slides to the left
+    // edge, it does NOT snap to the full clip (the span is the zoom level).
+    expect(zoomWindow({ start: 2, end: 6 }, 0.5, 50, 10)).toEqual({ start: 0, end: 8 });
+    // Only a big-enough zoom-out (span/factor ≥ duration) reaches the full window.
+    expect(zoomWindow({ start: 2, end: 6 }, 0.1, 50, 10)).toEqual({ start: 0, end: 10 });
+    expect(zoomWindow({ start: 0, end: 10 }, 0.1, 50, 10)).toEqual({ start: 0, end: 10 });
+  });
+
+  it('clamps the window into [0, duration] when the anchor nears an edge', () => {
+    const low = zoomWindow({ start: 0, end: 4 }, 0.5, 50, 10); // would start < 0
+    expect(low).toEqual({ start: 0, end: 8 });
+    const high = zoomWindow({ start: 6, end: 10 }, 0.5, 50, 10); // would end > 10
+    expect(high).toEqual({ start: 2, end: 10 });
+  });
+
+  it('garbage factor is a no-op; garbage duration yields {0, 0}', () => {
+    expect(zoomWindow({ start: 1, end: 9 }, NaN, 50, 10)).toEqual({ start: 1, end: 9 });
+    expect(zoomWindow({ start: 1, end: 9 }, 0, 50, 10)).toEqual({ start: 1, end: 9 });
+    expect(zoomWindow({ start: 1, end: 9 }, 2, 50, 0)).toEqual({ start: 0, end: 0 });
+    expect(Number.isFinite(zoomWindow({ start: NaN, end: NaN }, 2, 50, 10).start)).toBe(true);
+  });
+
+  it('ZOOM_WHEEL_FACTOR is 1.2 (REQ-204 per-notch contract)', () => {
+    expect(ZOOM_WHEEL_FACTOR).toBe(1.2);
+  });
+});
+
+describe('panWindow (v1.22.0 REQ-204)', () => {
+  it('shifts both edges equally and preserves the span', () => {
+    const next = panWindow({ start: 2, end: 7 }, 1, 10);
+    expect(next.start).toBeCloseTo(3, 10);
+    expect(next.end).toBeCloseTo(8, 10);
+    const back = panWindow(next, -2.5, 10);
+    expect(back.start).toBeCloseTo(0.5, 10);
+    expect(back.end).toBeCloseTo(5.5, 10);
+  });
+
+  it('clamps at both boundaries without overshoot', () => {
+    expect(panWindow({ start: 2, end: 7 }, 5, 10)).toEqual({ start: 5, end: 10 });
+    expect(panWindow({ start: 2, end: 7 }, -5, 10)).toEqual({ start: 0, end: 5 });
+    expect(panWindow({ start: 0, end: 10 }, 3, 10)).toEqual({ start: 0, end: 10 }); // full view: no-op
+  });
+
+  it('garbage delta / duration degrade safely (never NaN)', () => {
+    expect(panWindow({ start: 2, end: 7 }, NaN, 10)).toEqual({ start: 2, end: 7 });
+    expect(panWindow({ start: 2, end: 7 }, 1, -1)).toEqual({ start: 0, end: 0 });
+  });
+});
+
+describe('zoomStep / fitWindow / isZoomed (v1.22.0 REQ-204 button models)', () => {
+  it('zoomStep zooms around the CENTER anchor by default', () => {
+    const next = zoomStep({ start: 0, end: 10 }, 2, undefined, 10);
+    expect(next.start).toBeCloseTo(2.5, 10);
+    expect(next.end).toBeCloseTo(7.5, 10);
+    expect(pctToTime(50, next)).toBeCloseTo(5, 10);
+  });
+
+  it('zoomStep honors an explicit anchor and clamps to the duration', () => {
+    expect(zoomStep({ start: 0, end: 10 }, 2, 0, 10)).toEqual({ start: 0, end: 5 });
+    expect(zoomStep({ start: 0, end: 10 }, 0.5, 50, 10)).toEqual({ start: 0, end: 10 });
+  });
+
+  it('fitWindow resets to the full clip', () => {
+    expect(fitWindow(10)).toEqual({ start: 0, end: 10 });
+    expect(fitWindow(0)).toEqual({ start: 0, end: 0 });
+  });
+
+  it('isZoomed distinguishes a zoomed window from the full clip', () => {
+    expect(isZoomed({ start: 0, end: 10 }, 10)).toBe(false);
+    expect(isZoomed({ start: 2.5, end: 7.5 }, 10)).toBe(true);
+    expect(isZoomed(null, 10)).toBe(false);
+    expect(isZoomed({ start: 0, end: 10 }, 0)).toBe(false);
+  });
+});
+
+describe('renderTimeline under a view window (v1.22.0 REQ-204)', () => {
+  it('maps chip + playhead percentages view-relative', () => {
+    const vm = renderTimeline([makeTrack({ start: 3, end: 5 })], 10, 6, { start: 2.5, end: 7.5 });
+    expect(vm.chips[0].startPct).toBeCloseTo(10, 10); // (3−2.5)/5
+    expect(vm.chips[0].endPct).toBeCloseTo(50, 10); // (5−2.5)/5
+    expect(vm.playheadPct).toBeCloseTo(70, 10); // (6−2.5)/5
+  });
+
+  it('clips chips partially outside the view to the view edges', () => {
+    const vm = renderTimeline([makeTrack({ start: 2, end: 4 })], 10, 5, { start: 2.5, end: 7.5 });
+    expect(vm.chips[0].startPct).toBe(0); // 2 < view.start → clipped to 0
+    expect(vm.chips[0].endPct).toBeCloseTo(30, 10);
+    const gone = renderTimeline([makeTrack({ start: 0, end: 2 })], 10, 5, { start: 2.5, end: 7.5 });
+    expect(gone.chips[0].endPct - gone.chips[0].startPct).toBe(0); // zero-width → renderer skips
+  });
+
+  it('FULL-view default is pixel-identical to the legacy math (regression pin)', () => {
+    const legacy = renderTimeline([makeTrack({ start: 2, end: 4 })], 10, 5);
+    for (const view of [undefined, null, { start: 0, end: 10 }]) {
+      const vm = renderTimeline([makeTrack({ start: 2, end: 4 })], 10, 5, view);
+      expect(vm.chips[0].startPct).toBe(legacy.chips[0].startPct);
+      expect(vm.chips[0].endPct).toBe(legacy.chips[0].endPct);
+      expect(vm.playheadPct).toBe(legacy.playheadPct);
+    }
+  });
+
+  it('zero/negative duration still degrades to all-zero percentages', () => {
+    const vm = renderTimeline([makeTrack()], 0, 5, { start: 0, end: 10 });
+    expect(vm.chips[0].startPct).toBe(0);
+    expect(vm.playheadPct).toBe(0);
+  });
+});
+
+describe('trimRegionViews under a view window (v1.22.0 REQ-204)', () => {
+  it('maps region geometry view-relative and clips at the edges', () => {
+    expect(trimRegionViews([{ id: 1, start: 0, end: 4 }], 10, { start: 2, end: 6 })).toEqual([
+      { id: 1, startPct: 0, widthPct: 50 },
+    ]);
+    const full = trimRegionViews([{ id: 1, start: 1, end: 3 }], 10);
+    expect(full[0].startPct).toBeCloseTo(10, 10); // legacy full-view numbers
+    expect(full[0].widthPct).toBeCloseTo(20, 10);
+  });
+});
+
+describe('hitTestTimeline under a view window (v1.22.0 REQ-204)', () => {
+  // Geometry: width=100 px, view [2.5, 7.5] → span 5 s, 1 px == 0.05 s; the
+  // default 6 px edge zone == 0.3 s (pixel zones shrink with the zoom).
+  it('maps pointer x → time through the view (body hit)', () => {
+    const a = makeTrack({ start: 3, end: 6 });
+    expect(hitTestTimeline(10, 5, 100, [a], 10, CHIP_EDGE_PX, { start: 2.5, end: 7.5 }))
+      .toEqual({ track: a, zone: 'start' }); // t=3.0 → exactly the start edge
+    expect(hitTestTimeline(50, 5, 100, [a], 10, CHIP_EDGE_PX, { start: 2.5, end: 7.5 }))
+      .toEqual({ track: a, zone: 'body' }); // t=5.0 → body
+    const b = makeTrack({ start: 0, end: 2 }); // entirely LEFT of the view
+    expect(hitTestTimeline(50, 5, 100, [b], 10, CHIP_EDGE_PX, { start: 2.5, end: 7.5 })).toBeNull();
+  });
+
+  it('edge zones are PIXEL widths — they cover less time when zoomed', () => {
+    const a = makeTrack({ start: 3, end: 6 });
+    // t=3.2: 0.2 s past the start edge. Full view (10 s span): zone = 0.6 s → 'start'.
+    expect(hitTestTimeline(32, 5, 100, [a], 10, CHIP_EDGE_PX, { start: 0, end: 10 }).zone).toBe('start');
+    // Zoomed view (5 s span): zone = 0.3 s → 0.2 s is inside; 0.5 s is not.
+    expect(hitTestTimeline(14, 5, 100, [a], 10, CHIP_EDGE_PX, { start: 2.5, end: 7.5 }).zone).toBe('start'); // t=3.2
+    expect(hitTestTimeline(20, 5, 100, [a], 10, CHIP_EDGE_PX, { start: 2.5, end: 7.5 }).zone).toBe('body'); // t=3.5
+  });
+
+  it('full-view default keeps the legacy verdicts (regression pin)', () => {
+    const a = makeTrack({ start: 2, end: 4 });
+    expect(hitTestTimeline(30, 10, 100, [a], 10)).toEqual({ track: a, zone: 'body' });
+    expect(hitTestTimeline(30, 10, 100, [a], 10, CHIP_EDGE_PX, { start: 0, end: 10 })).toEqual({
+      track: a,
+      zone: 'body',
+    });
   });
 });

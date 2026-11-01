@@ -6,6 +6,13 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.22.0] — 2026-11-01
+
+### Added
+- Keyframed manual regions (REQ-201): with a manual track selected (click its row), a drawn box arms a keyframe and `K` commits it at the playhead — draw at several times and the region follows the subject, interpolating linearly between keyframes in the preview AND the export (diamond markers on the timeline show the selected track's keyframes). Single-keyframe regions keep their constant-box behavior.
+- Per-track confidence (REQ-202): auto-track rows show the track's mean detection confidence ("· conf 0.87").
+- Per-track "Re-scan" (REQ-202): each auto track row gains a Re-scan button — re-runs detection only inside that track's span at a lowered threshold (mean conf − 0.15, floor 0.10) and merges newly found boxes into the track (duplicates at IoU ≥ 0.5 within 0.15 s are dropped; existing boxes are never replaced). The row reads "…" while scanning; Clear/file switch/analyze-cancel abort it.
+
 ## [1.18.2] — 2026-11-01
 
 ### Fixed

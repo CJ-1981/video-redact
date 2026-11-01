@@ -31,7 +31,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // instantly here. Nothing else in this file touches them.
 // ---------------------------------------------------------------------------
 
-const { FAKE_META, FAKE_INPUT, runAnalyzeMock } = vi.hoisted(() => ({
+const { FAKE_META, FAKE_INPUT, runAnalyzeMock, rescanSpanMock } = vi.hoisted(() => ({
   FAKE_META: {
     container: 'mp4',
     codec: 'avc1',
@@ -63,6 +63,8 @@ const { FAKE_META, FAKE_INPUT, runAnalyzeMock } = vi.hoisted(() => ({
     effectiveEp: 'webgpu',
     cancelled: false,
   })),
+  // v1.22.0 REQ-202: the span re-scan seam (default: nothing found).
+  rescanSpanMock: vi.fn(async () => ({ detections: [], frameCount: 0, cancelled: false })),
 }));
 
 vi.mock('../../src/ingest.js', () => ({
@@ -74,6 +76,7 @@ vi.mock('../../src/analyze.js', () => ({
   sampleFrameAt: async () => {
     throw new Error('unused in unit tests');
   },
+  rescanSpan: rescanSpanMock,
 }));
 
 // v1.17.0 REQ-129: the export button IS exercised below (startExport's
@@ -95,6 +98,32 @@ vi.mock('../../src/exporter.js', () => ({
   ExportError: FakeExportError,
   discardExportTemp: vi.fn(async () => true),
   runExport: runExportMock,
+  // v1.22.0 Wave 3: main.js imports the exporter's PURE plan seams
+  // (computeExportPlan uses them). The mocks mirror the real math —
+  // deterministic, and the exporter suite pins the real implementations.
+  exportGeometry: (resolution, width, height) => {
+    const caps = { full: Infinity, '1080p': 1920, '720p': 1280, '480p': 854 };
+    const long = Math.max(width, height);
+    const cap = caps[resolution] ?? Infinity;
+    const sf = cap < long ? cap / long : 1;
+    return {
+      sf,
+      outW: Math.max(1, Math.round(width * sf)),
+      outH: Math.max(1, Math.round(height * sf)),
+    };
+  },
+  normalizeWatermark: (raw) => {
+    const src = raw && typeof raw === 'object' ? raw : {};
+    const text = String(src.text ?? '').trim();
+    if (!text) return null;
+    const corners = ['tl', 'tr', 'bl', 'br'];
+    const opacityRaw = Number(src.opacity);
+    return {
+      text,
+      corner: corners.includes(src.corner) ? src.corner : 'br',
+      opacity: Number.isFinite(opacityRaw) ? Math.min(1, Math.max(0, opacityRaw)) : 0.5,
+    };
+  },
 }));
 
 const CAPS_FIXTURE = {
@@ -2653,7 +2682,7 @@ describe('mountApp (v1.17.0): project save/load (REQ-130)', () => {
       expect(payload.settings.pixelStrength).toBe('normal'); // app default
       expect(payload.trims).toEqual([{ id: 1, start: 1, end: 2 }]);
       expect(payload.tracks).toHaveLength(1);
-      expect(payload.tracks[0].keyframes).toEqual([[0, { x: 1, y: 1, w: 8, h: 8 }]]); // Map → [s, box]
+      expect(payload.tracks[0].keyframes).toEqual([[1.25, { x: 1, y: 1, w: 8, h: 8 }]]); // Map → [s, box]; v1.22.0 REQ-201: keyed AT the drawn time
       expect(payload.meta.videoName).toBe('clip.mp4');
       expect(payload.meta.videoSize).toBe(3);
 
@@ -2828,5 +2857,896 @@ describe('skip trimmed frames during playback (v1.20.0)', () => {
     const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
     expect(html).toMatch(/<input type="checkbox" id="skip-trims-toggle" \/>/); // no checked attr
     expect(html).toContain('Skip trimmed parts during playback');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.22.0 — REQ-201 keyframed manual regions + REQ-202 per-track confidence
+// and span re-scan
+// ---------------------------------------------------------------------------
+
+describe('main-wiring: mergeDetections + rescanThresholdFor (v1.22.0 REQ-202 model)', () => {
+  const box = { x: 10, y: 10, w: 40, h: 40 };
+  const detAt = (t, c = 0.9, b = box) => ({ t, box: b, cls: 'face', conf: c, pass: 'full' });
+
+  it('mergeDetections: non-overlapping new detections are added; output is min-order and PURE', () => {
+    const existing = new Map([[1, box]]);
+    const out = main.mergeDetections(existing, [detAt(3), detAt(2, 0.5, { x: 200, y: 200, w: 40, h: 40 })]);
+    expect([...out.keys()]).toEqual([1, 2, 3]); // sorted ascending
+    expect(out.get(1)).toBe(box); // existing preserved by reference
+    expect(out.get(3)).toEqual(box);
+    expect(out).not.toBe(existing);
+    expect(existing.size).toBe(1); // input untouched
+    expect(main.mergeDetections(null, [detAt(5)]).get(5)).toEqual(box);
+    expect(main.mergeDetections(existing, null).size).toBe(1);
+  });
+
+  it('mergeDetections: IoU ≥ 0.5 at |Δt| ≤ 0.15 s drops the duplicate; existing always wins', () => {
+    const existing = new Map([[2, box]]);
+    // Same instant, overlapping box → dropped (the track already covers it).
+    expect(main.mergeDetections(existing, [detAt(2.05)], { iou: 0.5, tEps: 0.15 }).size).toBe(1);
+    // Far in time OR far in space → kept.
+    expect(main.mergeDetections(existing, [detAt(5, 0.9, box)]).size).toBe(2);
+    expect(main.mergeDetections(existing, [detAt(2.05, 0.9, { x: 500, y: 500, w: 40, h: 40 })]).size).toBe(2);
+    // tEps gate: near-in-time dedup respects the window.
+    expect(main.mergeDetections(existing, [detAt(2.4, 0.9, box)], { tEps: 0.15 }).size).toBe(2);
+    // An exact-time collision below the IoU gate still never REPLACES existing.
+    const lowIou = { x: 400, y: 400, w: 40, h: 40 };
+    const merged = main.mergeDetections(existing, [detAt(2, 0.99, lowIou)]);
+    expect(merged.size).toBe(1);
+    expect(merged.get(2)).toBe(box);
+  });
+
+  it('mergeDetections: among colliding NEW detections the best conf wins', () => {
+    const strong = detAt(4, 0.95, { x: 10, y: 10, w: 40, h: 40 });
+    const weak = detAt(4.05, 0.4, { x: 12, y: 12, w: 40, h: 40 }); // IoU ≥ 0.5 with strong
+    const out = main.mergeDetections(new Map(), [weak, strong]);
+    expect(out.size).toBe(1);
+    expect(out.get(4)).toEqual(strong.box);
+  });
+
+  it('rescanThresholdFor: conf − 0.15, floor 0.10, unusable conf → 0.10', () => {
+    expect(main.rescanThresholdFor(0.9)).toBeCloseTo(0.75, 12);
+    expect(main.rescanThresholdFor(0.2)).toBe(0.1); // floored
+    expect(main.rescanThresholdFor(undefined)).toBe(0.1);
+    expect(main.rescanThresholdFor(null)).toBe(0.1);
+    expect(main.rescanThresholdFor(NaN)).toBe(0.1);
+  });
+});
+
+describe('mountApp (v1.22.0): K keyframe commit + selection hooks (REQ-201)', () => {
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+  function hooksHandle(refreshes, sink) {
+    return (_els, editorHooks) => {
+      sink.hooks = editorHooks;
+      return {
+        destroy() {},
+        refresh: () => refreshes.push('refresh'),
+        redraw() {},
+        getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+        setRescanBusy() {},
+      };
+    };
+  }
+
+  it('onSelectTrack sets selectedTrackId; onKeyframe upserts at the playhead (K-commit wiring)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const refreshes = [];
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(refreshes, sink) });
+      await openFile(fakeDoc);
+
+      // Draw a manual region at t=1.25 — v1.22.0: the box keys AT the time.
+      sink.hooks.onManualBox({ x: 1, y: 1, w: 8, h: 8 }, 1.25);
+      const id = sink.hooks.getState().tracks[0].id;
+      expect(sink.hooks.getState().selectedTrackId).toBeNull(); // nothing selected yet
+
+      sink.hooks.onSelectTrack(id);
+      expect(sink.hooks.getState().selectedTrackId).toBe(id);
+      expect(refreshes.length).toBeGreaterThan(0);
+
+      // K commit at the playhead: a new keyframe appears, input order kept.
+      sink.hooks.onKeyframe(id, { x: 2, y: 2, w: 9, h: 9 }, 3);
+      let track = sink.hooks.getState().tracks[0];
+      expect([...track.keyframes.keys()]).toEqual([1.25, 3]);
+      expect(track.keyframes.get(3)).toEqual({ x: 2, y: 2, w: 9, h: 9 });
+      expect(toastTexts(fakeDoc).some((t) => t.includes('Keyframe set at 0:03.0'))).toBe(true);
+
+      // Same-time commit REPLACES (nearest-keyframe update), clamped to duration.
+      sink.hooks.onKeyframe(id, { x: 5, y: 5, w: 6, h: 6 }, 1.25);
+      track = sink.hooks.getState().tracks[0];
+      expect([...track.keyframes.keys()]).toEqual([1.25, 3]);
+      expect(track.keyframes.get(1.25)).toEqual({ x: 5, y: 5, w: 6, h: 6 });
+      sink.hooks.onKeyframe(id, { x: 7, y: 7, w: 4, h: 4 }, 99); // duration 4 s
+      expect(sink.hooks.getState().tracks[0].keyframes.get(4)).toEqual({ x: 7, y: 7, w: 4, h: 4 });
+    } finally {
+      restoreGlobals();
+    }
+  });
+
+  it('onKeyframe ignores unknown ids and auto tracks (manual-only action)', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle([], sink) });
+      await openFile(fakeDoc);
+      sink.hooks.onManualBox({ x: 1, y: 1, w: 8, h: 8 }, 1);
+      const before = sink.hooks.getState().tracks.map((t) => [...t.keyframes]);
+
+      sink.hooks.onKeyframe(999, { x: 0, y: 0, w: 1, h: 1 }, 2); // unknown id
+      expect(sink.hooks.getState().tracks.map((t) => [...t.keyframes])).toEqual(before);
+
+      // An auto track (seeded through the analyze merge path) never accepts K.
+      runAnalyzeMock.mockResolvedValueOnce({
+        tracks: [{
+          id: 50, cls: 'face', label: 'Face #1', color: '#000',
+          keyframes: new Map([[1, { x: 0, y: 0, w: 5, h: 5 }]]),
+          start: 0.5, end: 2, enabled: true, source: 'auto', style: 'pixelate', conf: 0.9,
+        }],
+        frameCount: 3, effectiveEp: 'webgpu', cancelled: false,
+      });
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+      expect(sink.hooks.getState().tracks.some((t) => t.id === 50)).toBe(true);
+      sink.hooks.onKeyframe(50, { x: 9, y: 9, w: 9, h: 9 }, 2);
+      const auto = sink.hooks.getState().tracks.find((t) => t.id === 50);
+      expect([...auto.keyframes.keys()]).toEqual([1]); // untouched
+    } finally {
+      restoreGlobals();
+    }
+  });
+});
+
+describe('mountApp (v1.22.0): per-track Re-scan span wiring (REQ-202)', () => {
+  const saved = {};
+
+  function armGlobals(fakeView) {
+    saved.isSecureContext = globalThis.isSecureContext;
+    saved.window = globalThis.window;
+    globalThis.isSecureContext = true;
+    globalThis.window = fakeView;
+  }
+  function restoreGlobals() {
+    if ('isSecureContext' in saved) {
+      if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+      else globalThis.isSecureContext = saved.isSecureContext;
+    }
+    if ('window' in saved) {
+      if (saved.window === undefined) delete globalThis.window;
+      else globalThis.window = saved.window;
+    }
+  }
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+  function hooksHandle(sink) {
+    return (_els, editorHooks) => {
+      sink.hooks = editorHooks;
+      return {
+        destroy() {}, refresh() {}, redraw() {},
+        getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+        setRescanBusy() {},
+      };
+    };
+  }
+
+  function autoTrackFixture() {
+    return {
+      id: 9, cls: 'face', label: 'Face #1', color: '#123456',
+      keyframes: new Map([[1, { x: 10, y: 10, w: 40, h: 40 }]]),
+      start: 1, end: 3, enabled: true, source: 'auto', style: 'pixelate', conf: 0.9,
+    };
+  }
+
+  it('onRescanTrack runs rescanSpan on the track span at conf − 0.15 and merges new boxes', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(sink) });
+      runAnalyzeMock.mockResolvedValueOnce({
+        tracks: [autoTrackFixture()],
+        frameCount: 3, effectiveEp: 'webgpu', cancelled: false,
+      });
+      await openFile(fakeDoc);
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+      expect(sink.hooks.getState().tracks.some((t) => t.id === 9)).toBe(true);
+
+      // One NEW detection inside the span, disjoint from the existing box →
+      // merged; threshold = 0.9 − 0.15 = 0.75.
+      rescanSpanMock.mockResolvedValueOnce({
+        detections: [
+          { t: 2, box: { x: 300, y: 300, w: 40, h: 40 }, cls: 'face', conf: 0.8, pass: 'full' },
+          { t: 1.05, box: { x: 12, y: 12, w: 40, h: 40 }, cls: 'face', conf: 0.8, pass: 'full' }, // dup (IoU ≥ 0.5 @ |Δt| ≤ 0.15)
+        ],
+        frameCount: 2, cancelled: false,
+      });
+      sink.hooks.onRescanTrack(9);
+      await flushApp();
+
+      const call = rescanSpanMock.mock.calls.at(-1);
+      expect(call[0]).toBe(FAKE_INPUT);
+      expect(call[1]).toBe(1); // track.start
+      expect(call[2]).toBe(3); // track.end
+      expect(call[3]).toBeCloseTo(0.75, 12); // conf − 0.15
+      expect(call[5]).toMatchObject({ cls: 'face' });
+
+      const track = sink.hooks.getState().tracks.find((t) => t.id === 9);
+      expect([...track.keyframes.keys()].sort((a, b) => a - b)).toEqual([1, 2]); // dup dropped, new merged
+      expect(track.keyframes.get(1.05)).toBeUndefined(); // deduped
+      expect(track.keyframes.get(2)).toEqual({ x: 300, y: 300, w: 40, h: 40 }); // merged
+      expect(track.keyframes.get(1)).toEqual({ x: 10, y: 10, w: 40, h: 40 }); // preserved
+      expect(toastTexts(fakeDoc).some((t) => t.includes('merged 1 new box'))).toBe(true);
+    } finally {
+      rescanSpanMock.mockReset();
+      restoreGlobals();
+    }
+  });
+
+  it('a second re-scan while one is busy is ignored; non-auto tracks never reach rescanSpan', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    armGlobals(fakeView);
+    try {
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(sink) });
+      runAnalyzeMock.mockResolvedValueOnce({
+        tracks: [autoTrackFixture()],
+        frameCount: 3, effectiveEp: 'webgpu', cancelled: false,
+      });
+      await openFile(fakeDoc);
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      rescanSpanMock.mockReturnValueOnce(new Promise(() => {})); // pending pass
+      sink.hooks.onRescanTrack(9);
+      await flushApp();
+      expect(rescanSpanMock).toHaveBeenCalledTimes(1);
+      sink.hooks.onRescanTrack(9); // busy → ignored
+      await flushApp();
+      expect(rescanSpanMock).toHaveBeenCalledTimes(1);
+
+      // Manual tracks are not a detector class — the hook rejects them
+      // before any rescanSpan call.
+      sink.hooks.onManualBox({ x: 1, y: 1, w: 8, h: 8 }, 1);
+      const manualId = sink.hooks.getState().tracks.find((t) => t.source === 'manual').id;
+      sink.hooks.onRescanTrack(manualId);
+      await flushApp();
+      expect(rescanSpanMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rescanSpanMock.mockReset();
+      restoreGlobals();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.22.0 Wave 3 — REQ-137 export summary card (pure helpers)
+// ---------------------------------------------------------------------------
+
+describe('main-wiring: estimateSizeBytes (v1.22.0 REQ-137, ESTIMATE heuristic)', () => {
+  it('grows monotonically with duration and scales with resolution + quality', () => {
+    const full = main.estimateSizeBytes(10, 'full', 'high');
+    // 8 Mb/s video + 0.128 Mb/s audio → (8.128e6 / 8) * 10 bytes.
+    expect(full).toBe(10_160_000);
+    expect(main.estimateSizeBytes(20, 'full', 'high')).toBeGreaterThan(full);
+    // 720p halves the VIDEO term only: (8*0.5 + 0.128) Mb/s.
+    expect(main.estimateSizeBytes(10, '720p', 'high')).toBe(5_160_000);
+    // balanced ≈ half the video bitrate of high.
+    expect(main.estimateSizeBytes(10, 'full', 'balanced')).toBeLessThan(full);
+    expect(main.estimateSizeBytes(10, '1080p', 'high')).toBe(full); // 1080p ≈ full
+    expect(main.estimateSizeBytes(10, '480p', 'high')).toBeLessThan(
+      main.estimateSizeBytes(10, '720p', 'high'),
+    );
+  });
+
+  it('guards bad input to 0 and never goes negative', () => {
+    expect(main.estimateSizeBytes(0, 'full', 'high')).toBe(0);
+    expect(main.estimateSizeBytes(NaN, '720p', 'balanced')).toBe(0);
+    expect(main.estimateSizeBytes(-5, 'full', 'high')).toBe(0);
+  });
+});
+
+describe('main-wiring: buildExportSummary (v1.22.0 REQ-137)', () => {
+  it('emits the fixed row order with trimmed math, track counts, audio and watermark', () => {
+    const rows = main.buildExportSummary({
+      durationSec: 10,
+      trimmedOutSec: 8,
+      outW: 1280,
+      outH: 720,
+      resolution: '720p',
+      quality: 'high',
+      tracks: [
+        { cls: 'face' }, { cls: 'face' }, { cls: 'plate' }, { cls: 'manual' },
+      ],
+      audioOn: false,
+      watermarkText: 'CONFIDENTIAL',
+      trimsCount: 1,
+    });
+    expect(rows.map((r) => r.label)).toEqual([
+      'Output duration', 'Resolution', 'Quality', 'Tracks', 'Audio', 'Watermark', 'Estimated size',
+    ]);
+    expect(rows[0].value).toBe('0:08.0 (source 0:10.0 − trimmed 0:02.0)');
+    expect(rows[1].value).toBe('1280×720');
+    expect(rows[2].value).toBe('High');
+    expect(rows[3].value).toBe('2 faces · 1 plate · 1 manual');
+    expect(rows[4].value).toBe('Removed');
+    expect(rows[5].value).toBe('“CONFIDENTIAL”');
+    expect(rows[6].value).toMatch(/^≈ [0-9.]+ MB$/);
+    // Every row carries a non-empty value (the probe's assertion, pinned).
+    for (const row of rows) expect(row.value.length).toBeGreaterThan(0);
+  });
+
+  it('a no-trim, no-watermark plan reads plainly', () => {
+    const rows = main.buildExportSummary({
+      durationSec: 4,
+      trimmedOutSec: 4,
+      outW: 640,
+      outH: 360,
+      quality: 'balanced',
+      tracks: [],
+      audioOn: true,
+    });
+    expect(rows[0].value).toBe('0:04.0');
+    expect(rows[3].value).toBe('No tracks');
+    expect(rows[4].value).toBe('Included');
+    expect(rows[5].value).toBe('None');
+  });
+});
+
+describe('main-wiring: computeExportPlan (v1.22.0 REQ-137 + REQ-133 watermark)', () => {
+  it('builds the runExport settings and the matching summary from one input', () => {
+    const plan = main.computeExportPlan({
+      durationSec: 10,
+      sourceW: 1920,
+      sourceH: 1080,
+      quality: 'balanced',
+      resolution: '720p',
+      audioOn: false,
+      watermark: { text: ' HI ', corner: 'tl', opacity: 0.9 },
+      pixelStrength: 'coarse',
+      trims: [{ id: 1, start: 0, end: 2 }],
+      tracks: [{ cls: 'face' }],
+    });
+    expect(plan.settings).toEqual({
+      quality: 'balanced',
+      exportResolution: '720p',
+      removeAudio: true,
+      outputMode: 'stream',
+      trims: [{ id: 1, start: 0, end: 2 }],
+      pixelStrength: 'coarse',
+      watermark: { text: 'HI', corner: 'tl', opacity: 0.9 },
+    });
+    // kept([{0,2}] over 10 s) = 8 s output.
+    expect(plan.outSec).toBeCloseTo(8, 10);
+    expect(plan.outW).toBe(1280); // 720p long edge on 1920×1080
+    expect(plan.outH).toBe(720);
+    expect(plan.summary[0].value).toContain('0:08.0');
+    expect(plan.summary[5].value).toBe('“HI”');
+  });
+
+  it('a blank watermark yields NO settings.watermark at all; defaults normalize', () => {
+    const plan = main.computeExportPlan({
+      durationSec: 4,
+      sourceW: 640,
+      sourceH: 360,
+      watermark: { text: '   ' },
+    });
+    expect('watermark' in plan.settings).toBe(false);
+    expect(plan.settings.quality).toBe('high');
+    expect(plan.settings.exportResolution).toBe('full');
+    expect(plan.settings.removeAudio).toBe(false);
+    expect(plan.settings.pixelStrength).toBe('normal');
+    expect(plan.summary[5].value).toBe('None');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.22.0 Wave 3 — REQ-138 session autosave (pure helpers)
+// ---------------------------------------------------------------------------
+
+/** A serialized manual track like serializeAutosave writes (pairs, not Map). */
+function autosaveTrackFixture() {
+  return {
+    id: 7, cls: 'manual', label: 'Manual #7', color: '#A78BFA',
+    keyframes: [[1.25, { x: 1, y: 1, w: 8, h: 8 }]],
+    start: 1, end: 3, enabled: true, source: 'manual', style: 'solid',
+  };
+}
+
+describe('main-wiring: autosave pure model (v1.22.0 REQ-138)', () => {
+  const FILE = { name: 'a.mp4', size: 5, lastModified: 123 };
+
+  it('autosaveKeyFor builds "<name>:<size>" and rejects unusable files', () => {
+    expect(main.autosaveKeyFor(FILE)).toBe('a.mp4:5');
+    expect(main.autosaveKeyFor(null)).toBeNull();
+    expect(main.autosaveKeyFor({ name: 'x', size: NaN })).toBeNull();
+    expect(main.autosaveKeyFor({ name: '', size: 5 })).toBeNull();
+  });
+
+  it('serializeAutosave flattens Maps to sorted pairs and stores identity only', () => {
+    const track = {
+      id: 2, cls: 'manual', source: 'manual', enabled: true, style: 'solid',
+      keyframes: new Map([[2, { x: 2, y: 2, w: 4, h: 4 }], [0.5, { x: 1, y: 1, w: 8, h: 8 }]]),
+    };
+    const snap = main.serializeAutosave({
+      file: FILE,
+      settings: { minSizePx: 24, downscale: 'full', pixelStrength: 'normal' },
+      trims: [{ id: 1, start: 1, end: 2 }],
+      tracks: [track],
+      savedAt: 42,
+    });
+    expect(snap.videoName).toBe('a.mp4');
+    expect(snap.videoSize).toBe(5);
+    expect(snap.videoLastModified).toBe(123);
+    expect(snap.savedAt).toBe(42);
+    expect(snap.settings).toEqual({ minSizePx: 24, downscale: 'full', pixelStrength: 'normal' });
+    expect(snap.trims).toEqual([{ id: 1, start: 1, end: 2 }]);
+    expect(snap.tracks).toHaveLength(1);
+    expect(snap.tracks[0].keyframes).toEqual([
+      [0.5, { x: 1, y: 1, w: 8, h: 8 }],
+      [2, { x: 2, y: 2, w: 4, h: 4 }],
+    ]);
+    expect(JSON.stringify(snap)).toBeTypeOf('string'); // plain JSON-able — no Maps, no bytes
+  });
+
+  it('applyAutosaveSnapshot merges on name+size match and restores Map keyframes', () => {
+    const snapshot = {
+      videoName: 'a.mp4',
+      videoSize: 5,
+      videoLastModified: 999, // drifts — never compared (project.js rule)
+      settings: { minSizePx: 48, pixelStrength: 'coarse' },
+      trims: [{ id: 3, start: 1, end: 2 }, { id: 'x', start: 5, end: 1 }],
+      tracks: [autosaveTrackFixture()],
+      savedAt: 42,
+    };
+    const applied = main.applyAutosaveSnapshot(snapshot, { name: 'a.mp4', size: 5 });
+    expect(applied).not.toBeNull();
+    expect(applied.settings).toEqual({
+      minSizePx: 48, downscale: 'full', pixelStrength: 'coarse',
+    });
+    expect(applied.trims).toEqual([{ id: 3, start: 1, end: 2 }]); // malformed dropped
+    expect(applied.tracks).toHaveLength(1);
+    expect(applied.tracks[0].keyframes).toBeInstanceOf(Map);
+    expect(applied.tracks[0].keyframes.get(1.25)).toEqual({ x: 1, y: 1, w: 8, h: 8 });
+  });
+
+  it('applyAutosaveSnapshot returns null on ANY identity mismatch or garbage', () => {
+    const snapshot = {
+      videoName: 'a.mp4', videoSize: 5, settings: {}, trims: [], tracks: [], savedAt: 1,
+    };
+    expect(main.applyAutosaveSnapshot(snapshot, { name: 'a.mp4', size: 6 })).toBeNull();
+    expect(main.applyAutosaveSnapshot(snapshot, { name: 'b.mp4', size: 5 })).toBeNull();
+    expect(main.applyAutosaveSnapshot(null, { name: 'a.mp4', size: 5 })).toBeNull();
+    expect(main.applyAutosaveSnapshot(snapshot, null)).toBeNull();
+    expect(main.applyAutosaveSnapshot('junk', { name: 'a.mp4', size: 5 })).toBeNull();
+  });
+
+  it('autosaveIsMeaningful is false for defaults-only snapshots', () => {
+    expect(main.autosaveIsMeaningful(null)).toBe(false);
+    expect(
+      main.autosaveIsMeaningful({
+        settings: { minSizePx: 0, downscale: 'full', pixelStrength: 'normal' },
+        trims: [], tracks: [],
+      }),
+    ).toBe(false);
+    expect(
+      main.autosaveIsMeaningful({ settings: { minSizePx: 48 }, trims: [], tracks: [] }),
+    ).toBe(true);
+    expect(
+      main.autosaveIsMeaningful({ settings: {}, trims: [{ id: 1, start: 1, end: 2 }], tracks: [] }),
+    ).toBe(true);
+    expect(
+      main.autosaveIsMeaningful({ settings: {}, trims: [], tracks: [autosaveTrackFixture()] }),
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.22.0 Wave 3 — mountApp wiring through the fake DOM
+// (REQ-133 watermark inputs, REQ-137 summary card, REQ-138 autosave)
+// ---------------------------------------------------------------------------
+
+/** Shared arm/restore of the two globals mountApp reads in node. */
+function wave3Globals() {
+  const saved = {};
+  return {
+    arm(fakeView) {
+      saved.isSecureContext = globalThis.isSecureContext;
+      saved.window = globalThis.window;
+      globalThis.isSecureContext = true;
+      globalThis.window = fakeView;
+    },
+    restore() {
+      if ('isSecureContext' in saved) {
+        if (saved.isSecureContext === undefined) delete globalThis.isSecureContext;
+        else globalThis.isSecureContext = saved.isSecureContext;
+      }
+      if ('window' in saved) {
+        if (saved.window === undefined) delete globalThis.window;
+        else globalThis.window = saved.window;
+      }
+    },
+  };
+}
+
+describe('mountApp (v1.22.0): export summary card + watermark wiring (REQ-133/137)', () => {
+  const g = wave3Globals();
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  it('an export click renders #export-summary rows and carries settings.watermark', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      // REQ-137: nothing rendered before the click.
+      const summary = fakeDoc.getElementById('export-summary');
+      expect(summary.hidden).toBe(true);
+
+      // REQ-133: type the watermark AFTER the load (a file load resets the
+      // export choices — including the watermark inputs — by design).
+      fakeDoc.getElementById('watermark-text').value = '  CONFIDENTIAL  ';
+      fakeDoc.getElementById('watermark-corner').value = 'tr';
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp(); // → review
+      runExportMock.mockClear(); // earlier suites may have exercised the seam
+      fakeDoc.getElementById('export-button').dispatch('click');
+      await flushApp();
+
+      // Summary card: visible, title + 7 fixed rows, every value non-empty.
+      expect(summary.hidden).toBe(false);
+      expect(summary.children.length).toBe(8); // title + 7 rows
+      expect(summary.children[0].textContent).toContain('Export summary');
+      const byLabel = {};
+      for (const row of summary.children.slice(1)) {
+        byLabel[row.dataset.summaryLabel] = [
+          row.children[0].textContent,
+          row.children[1].textContent,
+        ];
+      }
+      expect(Object.keys(byLabel)).toEqual([
+        'Output duration', 'Resolution', 'Quality', 'Tracks', 'Audio', 'Watermark', 'Estimated size',
+      ]);
+      expect(byLabel['Output duration'][1]).toBe('0:04.0'); // FAKE_META.duration
+      expect(byLabel['Tracks'][1]).toBe('No tracks');
+      expect(byLabel['Audio'][1]).toBe('Included');
+      expect(byLabel['Watermark'][1]).toBe('“CONFIDENTIAL”'); // trimmed
+      expect(byLabel['Estimated size'][1]).toMatch(/^≈ /);
+
+      // REQ-133: the normalized watermark reaches runExport's settings.
+      expect(runExportMock).toHaveBeenCalledTimes(1);
+      const settings = runExportMock.mock.calls[0][0].settings;
+      expect(settings.watermark).toEqual({ text: 'CONFIDENTIAL', corner: 'tr', opacity: 0.5 });
+
+      // The card STAYS visible through completion.
+      expect(summary.hidden).toBe(false);
+    } finally {
+      runExportMock.mockReset();
+      runExportMock.mockResolvedValue({ bytes: 1 });
+      g.restore();
+    }
+  });
+
+  it('no watermark text → no settings.watermark; the card still renders', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      await openFile(fakeDoc);
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+      fakeDoc.getElementById('export-button').dispatch('click');
+      await flushApp();
+      const settings = runExportMock.mock.calls[0][0].settings;
+      expect('watermark' in settings).toBe(false);
+      const summary = fakeDoc.getElementById('export-summary');
+      expect(summary.hidden).toBe(false);
+      const watermarkRow = summary.children.find((c) => c.dataset?.summaryLabel === 'Watermark');
+      expect(watermarkRow.children[1].textContent).toBe('None');
+    } finally {
+      runExportMock.mockReset();
+      runExportMock.mockResolvedValue({ bytes: 1 });
+      g.restore();
+    }
+  });
+
+  it('file load and Clear reset the watermark inputs, the corner, and the summary card', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      await main.mountApp(fakeDoc, { mountEditor: () => null });
+      const wmText = fakeDoc.getElementById('watermark-text');
+      const wmCorner = fakeDoc.getElementById('watermark-corner');
+      const summary = fakeDoc.getElementById('export-summary');
+      wmText.value = 'LEAVE ME';
+      wmCorner.value = 'tl';
+      summary.hidden = false;
+      summary.replaceChildren(makeFakeEl('DIV'));
+
+      await openFile(fakeDoc); // file load resets the export choices
+      expect(wmText.value).toBe('');
+      expect(wmCorner.value).toBe('br');
+      expect(summary.hidden).toBe(true);
+      expect(summary.children).toHaveLength(0);
+
+      wmText.value = 'LEAVE ME';
+      wmCorner.value = 'tl';
+      fakeDoc.getElementById('clear-file').dispatch('click');
+      expect(wmText.value).toBe('');
+      expect(wmCorner.value).toBe('br');
+      expect(summary.hidden).toBe(true);
+    } finally {
+      g.restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.22.0 REQ-138 — session autosave wiring (fake IndexedDB)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal callback-shaped IndexedDB stand-in covering the exact surface the
+ * guarded helpers use: open → (upgrade skipped) → transaction → put/get/delete.
+ */
+function installFakeIdb(existing = {}) {
+  const store = new Map(Object.entries(existing));
+  const puts = [];
+  const deletes = [];
+  const fakeDb = {
+    objectStoreNames: { contains: () => true },
+    createObjectStore() {},
+    close() {},
+    transaction(_name, _mode) {
+      return {
+        objectStore() {
+          return {
+            put(value, key) {
+              puts.push({ key, value });
+              store.set(key, value);
+            },
+            get(key) {
+              const request = { result: store.has(key) ? store.get(key) : null };
+              queueMicrotask(() => request.onsuccess?.());
+              return request;
+            },
+            delete(key) {
+              deletes.push(key);
+              store.delete(key);
+            },
+          };
+        },
+        set oncomplete(fn) {
+          queueMicrotask(fn);
+        },
+        set onerror(_fn) {},
+        set onabort(_fn) {},
+      };
+    },
+  };
+  globalThis.indexedDB = {
+    open(_name, _version) {
+      const request = { result: fakeDb };
+      queueMicrotask(() => request.onsuccess?.());
+      return request;
+    },
+  };
+  return {
+    store,
+    puts,
+    deletes,
+    uninstall() {
+      delete globalThis.indexedDB;
+    },
+  };
+}
+
+/** Serialized manual-track snapshot matching the fixture manual box below. */
+function autosaveSnapshotFixture() {
+  return {
+    videoName: 'clip.mp4',
+    videoSize: 3,
+    videoLastModified: 0,
+    settings: { minSizePx: 48, downscale: '720p', pixelStrength: 'coarse' },
+    trims: [{ id: 1, start: 1, end: 2 }],
+    tracks: [
+      {
+        id: 7, cls: 'manual', label: 'Manual #7', color: '#A78BFA',
+        keyframes: [[1.25, { x: 1, y: 1, w: 8, h: 8 }]],
+        start: 1, end: 3, enabled: true, source: 'manual', style: 'solid',
+      },
+    ],
+    savedAt: 123,
+  };
+}
+
+describe('mountApp (v1.22.0): session autosave (REQ-138)', () => {
+  const g = wave3Globals();
+
+  function hooksHandle(sink) {
+    return (_els, editorHooks) => {
+      sink.hooks = editorHooks;
+      return {
+        destroy() {}, refresh() {}, redraw() {},
+        getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+        setRescanBusy() {},
+      };
+    };
+  }
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  it('the 10 s tick snapshots a DIRTY session under "<name>:<size>"', async () => {
+    const idb = installFakeIdb();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const { fakeDoc, fakeView } = makeFakeEnv();
+      g.arm(fakeView);
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(sink) });
+      await openFile(fakeDoc);
+      expect(idb.puts).toHaveLength(0); // clean session → the tick is a no-op
+      vi.advanceTimersByTime(11_000);
+      await flushApp();
+      expect(idb.puts).toHaveLength(0);
+
+      sink.hooks.onManualBox({ x: 1, y: 1, w: 8, h: 8 }, 1.25); // marks dirty
+      vi.advanceTimersByTime(11_000);
+      await flushApp();
+      expect(idb.puts).toHaveLength(1);
+      expect(idb.puts[0].key).toBe('clip.mp4:3');
+      const snap = idb.puts[0].value;
+      expect(snap.videoName).toBe('clip.mp4');
+      expect(snap.videoSize).toBe(3);
+      expect(snap.tracks).toHaveLength(1);
+      expect(snap.tracks[0].keyframes[0][0]).toBe(1.25); // Map → pairs
+      expect(snap.savedAt).toBeGreaterThan(0);
+      // A clean session never writes again.
+      vi.advanceTimersByTime(25_000);
+      await flushApp();
+      expect(idb.puts).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      idb.uninstall();
+      g.restore();
+    }
+  });
+
+  it('pagehide saves best-effort (even when clean); a non-hidden visibilitychange does not', async () => {
+    const idb = installFakeIdb();
+    try {
+      const { fakeDoc, fakeView } = makeFakeEnv();
+      g.arm(fakeView);
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(sink) });
+      await openFile(fakeDoc);
+      sink.hooks.onManualBox({ x: 1, y: 1, w: 8, h: 8 }, 1.25);
+
+      fakeDoc.__dispatch('visibilitychange'); // visibilityState undefined ≠ 'hidden'
+      await flushApp();
+      expect(idb.puts).toHaveLength(0);
+
+      fakeDoc.__dispatch('pagehide');
+      await flushApp();
+      expect(idb.puts).toHaveLength(1);
+      expect(idb.puts[0].key).toBe('clip.mp4:3');
+    } finally {
+      idb.uninstall();
+      g.restore();
+    }
+  });
+
+  it('a meaningful snapshot raises the toast; Restore applies tracks/trims/settings and steps to review', async () => {
+    const idb = installFakeIdb({ 'clip.mp4:3': autosaveSnapshotFixture() });
+    try {
+      const { fakeDoc, fakeView } = makeFakeEnv();
+      g.arm(fakeView);
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(sink) });
+      await openFile(fakeDoc);
+      await flushApp();
+
+      expect(toastTexts(fakeDoc).some((t) => t.includes('Unsaved session found'))).toBe(true);
+      const restoreToast = fakeDoc.getElementById('toast-region').children.find((el) =>
+        (el.children?.[0]?.textContent ?? '').includes('Unsaved session found'),
+      );
+      const restoreBtn = restoreToast.children[1]; // [text, Restore, Discard]
+      expect(restoreBtn.textContent).toBe('Restore');
+      restoreBtn.dispatch('click');
+
+      const state = sink.hooks.getState();
+      expect(state.tracks).toHaveLength(1);
+      expect(state.tracks[0].id).toBe(7);
+      expect(state.tracks[0].keyframes).toBeInstanceOf(Map);
+      expect(state.tracks[0].keyframes.get(1.25)).toEqual({ x: 1, y: 1, w: 8, h: 8 });
+      expect(state.trims).toEqual([{ id: 1, start: 1, end: 2 }]);
+      expect(state.pixelStrength).toBe('coarse'); // settings rode along
+      // Tracks exist → straight to review (Export armed without re-analyze).
+      expect(fakeDoc.getElementById('export-button').disabled).toBe(false);
+      expect(fakeDoc.getElementById('analyze-button').textContent).toBe('Re-analyze');
+      expect(toastTexts(fakeDoc).some((t) => t.includes('Session restored'))).toBe(true);
+      expect(idb.deletes).toHaveLength(0); // Restore keeps the snapshot
+    } finally {
+      idb.uninstall();
+      g.restore();
+    }
+  });
+
+  it('Discard deletes the stored key; a defaults-only snapshot never nags', async () => {
+    const idb = installFakeIdb({
+      'clip.mp4:3': {
+        videoName: 'clip.mp4',
+        videoSize: 3,
+        videoLastModified: 0,
+        settings: { minSizePx: 0, downscale: 'full', pixelStrength: 'normal' },
+        trims: [],
+        tracks: [],
+        savedAt: 5,
+      },
+      'other.mp4:9': autosaveSnapshotFixture(), // different video — never offered
+    });
+    try {
+      const { fakeDoc, fakeView } = makeFakeEnv();
+      g.arm(fakeView);
+      const sink = {};
+      await main.mountApp(fakeDoc, { mountEditor: hooksHandle(sink) });
+      await openFile(fakeDoc);
+      await flushApp();
+
+      // Defaults-only snapshot for THIS video → no toast at all.
+      expect(toastTexts(fakeDoc).some((t) => t.includes('Unsaved session found'))).toBe(false);
+
+      // A meaningful snapshot for a DIFFERENT video never surfaces either —
+      // store one for this video now and re-open to see the Discard path.
+      idb.store.set('clip.mp4:3', autosaveSnapshotFixture());
+      await openFile(fakeDoc);
+      await flushApp();
+      const discardToast = fakeDoc.getElementById('toast-region').children.find((el) =>
+        (el.children?.[0]?.textContent ?? '').includes('Unsaved session found'),
+      );
+      const discardBtn = discardToast.children[2];
+      expect(discardBtn.textContent).toBe('Discard');
+      discardBtn.dispatch('click');
+      await flushApp();
+      expect(idb.deletes).toEqual(['clip.mp4:3']);
+      expect(idb.store.has('clip.mp4:3')).toBe(false);
+      expect(sink.hooks.getState().tracks).toHaveLength(0); // nothing applied
+    } finally {
+      idb.uninstall();
+      g.restore();
+    }
   });
 });

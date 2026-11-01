@@ -53,6 +53,10 @@ export {};
  * @property {number} end                   Redacted span end, seconds.
  * @property {boolean} enabled              true = redact; false = keep visible (user toggle).
  * @property {'auto'|'manual'} source       Origin of the track.
+ * @property {number} [conf]                Mean detection confidence in [0, 1]
+ *     (v1.22.0 REQ-202, tracker.finalize): the mean of every detection that
+ *     fed an AUTO track; manual tracks carry none (undefined — the row omits
+ *     the readout). Also the basis of the re-scan-span threshold.
  * @property {'pixelate'|'solid'} [style]   Redaction style (REQ-101): 'solid'
  *     burns an opaque black box, 'pixelate' mosaic-blurs. Default 'pixelate'
  *     for auto-detected tracks, 'solid' for manual tracks (tracker.js sets

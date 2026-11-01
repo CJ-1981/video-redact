@@ -33,10 +33,31 @@
  *        setTrackStyle()       → immutable style flip (SPEC-VID-002 REQ-101)
  *        tracksAtForView()     → thin wrapper over redact.tracksAt
  *        manualTrackFromBox()  → manual Track factory (REQ-015 + REQ-103 +
- *                                REQ-109 palette colors)
+ *                                REQ-109 palette colors; v1.22.0 REQ-201:
+ *                                the box keys AT the drawn time)
+ *        interpolateBetween()  → linear box lerp between two keyed samples
+ *                                (v1.22.0 REQ-201 sparse-keyframe model)
+ *        interpolatedBoxAt()   → a track's interpolated box at t (REQ-201;
+ *                                null outside the span)
+ *        upsertKeyframe()      → immutable keyframe upsert at the playhead
+ *                                (v1.22.0 REQ-201 K action)
+ *        densifyManualTracks() → sparse manual keyframes → 1/30 s dense
+ *                                interpolated maps (v1.22.0 REQ-201: the
+ *                                preview/export consumer-boundary upgrade)
+ *        KEYFRAME_DENSE_STEP_S → that grid's step (mirrors tracker)
  *        parseClockInput()     → "m:ss.s" / "ss.s" text → seconds|null
  *                                (REQ-108)
  *        formatSpan()          → "0:04.2 – 0:07.8" readout (REQ-108)
+ *        normalizeView()       → safe {start, end} view window (v1.22.0
+ *                                REQ-204; missing view → full clip)
+ *        isZoomed()            → is the view window actually zoomed?
+ *        pctToTime()/timeToPct() → view-window ⇄ strip-percentage mapping
+ *                                (0–100, the ONE rule every renderer shares)
+ *        zoomWindow()          → anchor-preserving zoom (REQ-204; clamps
+ *                                span ≥ MIN_VIEW_SPAN_S, window in [0, dur])
+ *        panWindow()           → span-preserving pan (REQ-204)
+ *        zoomStep()/fitWindow() → the +/- and Fit button models
+ *        MIN_VIEW_SPAN_S / ZOOM_WHEEL_FACTOR → zoom constants (REQ-204)
  *
  *   2. Thin DOM adapters (guarded, NOT unit-tested — node has no DOM):
  *        mountEditor()    → wire playback/overlay sync + timeline events
@@ -44,7 +65,9 @@
  *
  * The editor NEVER owns AppState: it reads via `hooks.getState()` and emits
  * mutations via `hooks.onToggle / onSeek / onManualBox / onTrimTrack /
- * onSetStyle` (main.js's stepper state machine persists them).
+ * onSetStyle / onKeyframe / onSelectTrack / onRescanTrack` (main.js's stepper
+ * state machine persists them; the last three are v1.22.0 and optional —
+ * guarded like the rest).
  *
  * ---------------------------------------------------------------------------
  * INTERACTION MAP (review step; design-direction "signature element")
@@ -125,6 +148,14 @@
  *     drag on #overlay-canvas → rubber band → onManualBox(box, t)
  *                             (box in native display px; t = video.currentTime)
  *     Escape           → cancel the in-progress drag
+ *     v1.22.0 REQ-201 keyframing — while a MANUAL track is SELECTED (row
+ *     click → onSelectTrack; getState().selectedTrackId), a drawn box does
+ *     NOT create a new track: it arms a PENDING keyframe (kept visible as
+ *     the dashed overlay box). K (editor window keydown, typing-surface
+ *     guarded) commits it AT THE CURRENT PLAYHEAD → onKeyframe(trackId, box,
+ *     t) — main.js upserts through the pure upsertKeyframe. B draws, K
+ *     commits at the playhead. Escape clears the pending box. The selected
+ *     track's keyframes render as .kf-marker diamonds in the chips layer.
  *
  *   Playback sync: one loop via requestVideoFrameCallback (rAF fallback):
  *     per presented frame → draw the video frame into the overlay canvas,
@@ -347,6 +378,182 @@ export function thumbPinSettled(pinnedTimeSec, currentTimeSec) {
   return driftMs <= THUMB_PIN_EPSILON_S * 1000;
 }
 
+// ---------------------------------------------------------------------------
+// PURE: view window — zoom/pan mapping (v1.22.0 REQ-204)
+// ---------------------------------------------------------------------------
+
+/**
+ * Smallest view span zoomWindow can produce, seconds (v1.22.0 REQ-204): the
+ * zoom can never squeeze the window below this — a sub-frame window would
+ * make chip/edge interaction impossible.
+ * @type {number}
+ */
+export const MIN_VIEW_SPAN_S = 0.5;
+
+/**
+ * Per-notch zoom factor of the ctrl/cmd+wheel gesture (v1.22.0 REQ-204).
+ * @type {number}
+ */
+export const ZOOM_WHEEL_FACTOR = 1.2;
+
+/**
+ * Normalize a view window into a safe `{start, end}` pair. PURE. A missing
+ * (undefined/null) view is the FULL window over `durationSec`; a non-finite
+ * bound degrades to that side's full-window bound; a finite duration clamps
+ * both bounds into [0, durationSec]. A degenerate window (inverted or
+ * zero-width) resets to the FULL window. No usable duration (≤ 0/NaN)
+ * yields {0, 0} — the "no metadata" view every downstream mapping guards
+ * with `end > start`.
+ *
+ * @param {{start?: number, end?: number} | null | undefined} view
+ * @param {number} durationSec Video duration.
+ * @returns {{start: number, end: number}}
+ */
+export function normalizeView(view, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return { start: 0, end: 0 };
+  let start = view && Number.isFinite(view.start) ? view.start : 0;
+  let end = view && Number.isFinite(view.end) ? view.end : dur;
+  start = Math.min(Math.max(start, 0), dur);
+  end = Math.min(Math.max(end, 0), dur);
+  if (!(end > start)) return { start: 0, end: dur };
+  return { start, end };
+}
+
+/**
+ * Is the view window actually zoomed (span < duration − epsilon)? PURE.
+ * A missing/degenerate view or duration counts as NOT zoomed.
+ *
+ * @param {{start: number, end: number} | null | undefined} view
+ * @param {number} durationSec
+ * @returns {boolean}
+ */
+export function isZoomed(view, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return false;
+  const v = normalizeView(view, dur);
+  return v.end - v.start < dur - 1e-9;
+}
+
+/**
+ * Map a strip percentage (0–100, the pctToTime/timeToPct unit) to a time
+ * inside the view window. PURE. pct clamps into [0, 100]; a degenerate view
+ * (end ≤ start) resolves to view.start (never NaN).
+ *
+ * @param {number} pct 0–100 within the view.
+ * @param {{start: number, end: number} | null | undefined} view
+ * @returns {number} Seconds.
+ */
+export function pctToTime(pct, view) {
+  const start = view && Number.isFinite(view.start) ? view.start : 0;
+  const end = view && Number.isFinite(view.end) ? view.end : 0;
+  if (!(end > start)) return start;
+  const p = Number.isFinite(pct) ? Math.min(Math.max(pct, 0), 100) : 0;
+  return start + (p / 100) * (end - start);
+}
+
+/**
+ * Map a time to its strip percentage (0–100) inside the view window. PURE —
+ * the ONE clamp-and-scale rule every view-window renderer (chips, regions,
+ * playhead, thumb, keyframe markers, waveform) shares. `t` clamps into the
+ * view; a degenerate view yields 0.
+ *
+ * @param {number} t Seconds.
+ * @param {{start: number, end: number} | null | undefined} view
+ * @returns {number} 0–100.
+ */
+export function timeToPct(t, view) {
+  const start = view && Number.isFinite(view.start) ? view.start : 0;
+  const end = view && Number.isFinite(view.end) ? view.end : 0;
+  if (!(end > start)) return 0;
+  const clamped = Number.isFinite(t) ? Math.min(Math.max(t, start), end) : start;
+  return ((clamped - start) / (end - start)) * 100;
+}
+
+/**
+ * Anchor-preserving zoom of the view window (v1.22.0 REQ-204). PURE — the
+ * time under `anchorPct` (0–100 strip %, the cursor for wheel zoom) stays
+ * FIXED while the span scales by 1/factor. The new span clamps into
+ * [MIN_VIEW_SPAN_S, durationSec]; the window then clamps into
+ * [0, durationSec] preserving the clamped span (an anchor run past an edge
+ * slides the window instead of overshooting). Garbage factor → 1 (no-op);
+ * degenerate duration/view → the full window.
+ *
+ * @param {{start: number, end: number}} view Current view window.
+ * @param {number} factor Zoom factor (> 1 zooms in; 0 < f < 1 zooms out).
+ * @param {number} anchorPct Anchor position on the strip, 0–100.
+ * @param {number} durationSec Video duration (> 0).
+ * @returns {{start: number, end: number}} New view window.
+ */
+export function zoomWindow(view, factor, anchorPct, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return { start: 0, end: 0 };
+  const v = normalizeView(view, dur);
+  const span = v.end - v.start;
+  if (!(span > 0)) return { start: 0, end: dur };
+  const f = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  const anchor = pctToTime(anchorPct, v);
+  const nextSpan = Math.min(Math.max(span / f, MIN_VIEW_SPAN_S), dur);
+  const leftFrac = Math.min(Math.max((anchor - v.start) / span, 0), 1);
+  let start = anchor - nextSpan * leftFrac;
+  let end = start + nextSpan;
+  if (start < 0) {
+    start = 0;
+    end = nextSpan;
+  } else if (end > dur) {
+    end = dur;
+    start = Math.max(0, dur - nextSpan);
+  }
+  return { start, end };
+}
+
+/**
+ * Pan the view window by `deltaSec` (v1.22.0 REQ-204). PURE — both edges
+ * shift equally (span preserved) and the window clamps into [0, durationSec]
+ * without overshoot. Garbage delta → unchanged window (new object).
+ *
+ * @param {{start: number, end: number}} view Current view window.
+ * @param {number} deltaSec Shift in seconds (positive = later).
+ * @param {number} durationSec Video duration (> 0).
+ * @returns {{start: number, end: number}} New view window.
+ */
+export function panWindow(view, deltaSec, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0)) return { start: 0, end: 0 };
+  const v = normalizeView(view, dur);
+  const span = v.end - v.start;
+  const d = Number.isFinite(deltaSec) ? deltaSec : 0;
+  const start = Math.min(Math.max(v.start + d, 0), Math.max(0, dur - span));
+  return { start, end: start + span };
+}
+
+/**
+ * One zoom-step for the +/- buttons (v1.22.0 REQ-204): zoomWindow with a
+ * center anchor. PURE. `anchorPct` defaults to 50 (strip % — the pctToTime
+ * unit; the task spec's 0.5 shorthand would be 0.5% here, so the pct-unit
+ * default of 50 IS the intended center anchor).
+ *
+ * @param {{start: number, end: number}} view Current view window.
+ * @param {number} factor Zoom factor.
+ * @param {number} [anchorPct] Anchor, 0–100 (default 50 = center).
+ * @param {number} [durationSec] Video duration (clamps the result).
+ * @returns {{start: number, end: number}} New view window.
+ */
+export function zoomStep(view, factor, anchorPct = 50, durationSec) {
+  return zoomWindow(view, factor, anchorPct, durationSec);
+}
+
+/**
+ * Reset the view to the FULL clip (v1.22.0 REQ-204, the Fit button). PURE —
+ * a non-positive duration yields {0, 0} (the editor's "no metadata" view).
+ *
+ * @param {number} durationSec Video duration.
+ * @returns {{start: number, end: number}}
+ */
+export function fitWindow(durationSec) {
+  return normalizeView(null, durationSec);
+}
+
 /** Manual-drag rubber band (REQ-109: manual tracks themselves use the
  * categorical palette — alert red stays on the in-progress rubber band). */
 const ALERT_RED = '#E5484D';
@@ -380,27 +587,38 @@ function styleOf(track) {
  * range as percentages of `durationSec`, plus the playhead percentage.
  * PURE — no DOM, no mutation; the caller maps chips onto #track-chips.
  *
+ * v1.22.0 REQ-204: the optional `view` window (`{start, end}` seconds) makes
+ * every percentage VIEW-relative — chips/playhead map through timeToPct, so
+ * a zoomed window magnifies the strip around the visible span. Omitted /
+ * null / degenerate views degrade to the FULL window, which is
+ * pixel-identical to the pre-REQ-204 math (the existing full-view numbers
+ * are pinned by tests). Chip spans outside the view clamp to the view edges;
+ * a chip fully outside produces a zero-width chip the DOM renderer skips.
+ *
  * Chips keep the track's categorical `color` even when disabled; renderers
  * use `enabled === false` to apply the safe-green/dimmed state instead
  * (design-direction.md: safe green = keep visible).
  *
  * @param {import('./types.js').Track[]} tracks
  * @param {number} durationSec Video duration (> 0; 0/NaN → everything at 0%).
- * @param {number} currentTimeSec Playhead position (clamped to [0, duration]).
+ * @param {number} currentTimeSec Playhead position (clamped to the view).
+ * @param {{start: number, end: number} | null} [view] View window
+ *     (v1.22.0 REQ-204; omitted → full clip).
  * @returns {{chips: Array<{track: import('./types.js').Track,
  *                            startPct: number, endPct: number,
  *                            color: string, enabled: boolean}>,
  *            playheadPct: number}}
- *     Chip spans are clamped to [0, durationSec]; zero/negative duration puts
+ *     Chip spans are clamped to the view window; zero/negative duration puts
  *     every percentage at 0 (never NaN/Infinity).
  */
-export function renderTimeline(tracks, durationSec, currentTimeSec) {
+export function renderTimeline(tracks, durationSec, currentTimeSec, view) {
   const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
-  /** Clamp a seconds value into [0, dur] and express it as a percentage. */
+  const v = normalizeView(view, dur);
+  /** Clamp a seconds value into the view and express it as a percentage. */
   const pct = (sec) => {
-    if (dur <= 0 || !Number.isFinite(sec)) return 0;
-    const clamped = Math.min(Math.max(sec, 0), dur);
-    return (clamped / dur) * 100;
+    if (!(v.end > v.start) || !Number.isFinite(sec)) return 0;
+    const clamped = Math.min(Math.max(sec, v.start), v.end);
+    return ((clamped - v.start) / (v.end - v.start)) * 100;
   };
   const chips = (Array.isArray(tracks) ? tracks : []).map((track) => ({
     track,
@@ -420,22 +638,27 @@ export function renderTimeline(tracks, durationSec, currentTimeSec) {
  * Compute the trim-region view model: one greyed overlay per trim region
  * (v1.15.0 REQ-125) spanning its range as percentages of `durationSec`.
  * PURE — no DOM; the caller maps the views onto the #trim-regions layer.
+ * v1.22.0 REQ-204: the optional `view` window makes the percentages
+ * view-relative (omitted → full clip, identical numbers).
  *
  * @param {Array<{id: number, start: number, end: number}>} trims Trim
  *     regions (sorted, non-overlapping — main.js's pure model).
  * @param {number} durationSec Video duration (> 0; 0/NaN → no views).
+ * @param {{start: number, end: number} | null} [view] View window
+ *     (v1.22.0 REQ-204; omitted → full clip).
  * @returns {Array<{id: number, startPct: number, widthPct: number}>}
  */
-export function trimRegionViews(trims, durationSec) {
+export function trimRegionViews(trims, durationSec, view) {
   const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
   if (!(dur > 0)) return [];
+  const v = normalizeView(view, dur);
   return (Array.isArray(trims) ? trims : []).map((r) => {
-    const a = Math.min(Math.max(r.start, 0), dur);
-    const b = Math.min(Math.max(r.end, 0), dur);
+    const a = Math.min(Math.max(r.start, v.start), v.end);
+    const b = Math.min(Math.max(r.end, v.start), v.end);
     return {
       id: r.id,
-      startPct: (a / dur) * 100,
-      widthPct: ((b - a) / dur) * 100,
+      startPct: v.end > v.start ? ((a - v.start) / (v.end - v.start)) * 100 : 0,
+      widthPct: v.end > v.start ? ((b - a) / (v.end - v.start)) * 100 : 0,
     };
   });
 }
@@ -466,11 +689,12 @@ export function trimRegionViews(trims, durationSec) {
  * OUTWARD candidate with the smallest edge distance wins (ties → earlier
  * track). Span edges are inclusive (mirrors redact.tracksAt).
  *
- * Zone rule: an edge zone spans `edgePx / width * durationSec` seconds
- * inward — and outward — from each (clamped) span edge. When a chip is
- * narrower than both inward zones combined, the midpoint splits them (left
- * half 'start', right half 'end') so both handles stay reachable on tiny
- * chips.
+ * Zone rule: an edge zone spans `edgePx / width * viewSpan` seconds
+ * inward — and outward — from each (clamped) span edge (the zone is a PIXEL
+ * width, so under a zoomed view it covers proportionally less time —
+ * v1.22.0 REQ-204). When a chip is narrower than both inward zones combined,
+ * the midpoint splits them (left half 'start', right half 'end') so both
+ * handles stay reachable on tiny chips.
  *
  * @param {number} x Pointer x within the strip, CSS px.
  * @param {number} y Pointer y within the strip (unused, single lane).
@@ -478,30 +702,35 @@ export function trimRegionViews(trims, durationSec) {
  * @param {import('./types.js').Track[]} tracks
  * @param {number} durationSec Video duration (> 0).
  * @param {number} [edgePx] Edge-zone half-width in CSS px (CHIP_EDGE_PX).
+ * @param {{start: number, end: number} | null} [view] View window
+ *     (v1.22.0 REQ-204; omitted → full clip).
  * @returns {{track: import('./types.js').Track,
  *            zone: 'start'|'end'|'body'} | null}
  */
-export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_EDGE_PX) {
+export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_EDGE_PX, view) {
   void y;
   if (!(width > 0) || !(durationSec > 0)) return null;
-  const t = (x / width) * durationSec;
+  const v = normalizeView(view, durationSec);
+  const span = v.end - v.start;
+  if (!(span > 0)) return null;
+  const t = v.start + (x / width) * span;
   const all = Array.isArray(tracks) ? tracks : [];
   let best = null;
   let bestSpan = Infinity;
   for (const track of all) {
-    const start = Math.max(0, track.start); // clamp to the rendered window
-    const end = Math.min(durationSec, track.end);
+    const start = Math.max(v.start, track.start); // clamp to the rendered window
+    const end = Math.min(v.end, track.end);
     if (t < start || t > end) continue;
-    const span = end - start;
-    if (span < bestSpan) {
-      bestSpan = span;
+    const span2 = end - start;
+    if (span2 < bestSpan) {
+      bestSpan = span2;
       best = track;
     }
   }
   if (best) {
-    const start = Math.max(0, best.start);
-    const end = Math.min(durationSec, best.end);
-    const edgeSec = edgePx > 0 ? (edgePx / width) * durationSec : 0;
+    const start = Math.max(v.start, best.start);
+    const end = Math.min(v.end, best.end);
+    const edgeSec = edgePx > 0 ? (edgePx / width) * span : 0;
     const inStart = t - start <= edgeSec;
     const inEnd = end - t <= edgeSec;
     /** @type {'start'|'end'|'body'} */
@@ -514,13 +743,13 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
   // Outward pass (REQ-110): within `edgePx` OUTSIDE a (clamped) span edge —
   // nearest edge wins, ties resolve to the earlier track in array order.
   if (!(edgePx > 0)) return null;
-  const edgeSecOut = (edgePx / width) * durationSec;
+  const edgeSecOut = (edgePx / width) * span;
   /** @type {{track: import('./types.js').Track, zone: 'start'|'end'} | null} */
   let outward = null;
   let bestDist = Infinity;
   for (const track of all) {
-    const start = Math.max(0, track.start);
-    const end = Math.min(durationSec, track.end);
+    const start = Math.max(v.start, track.start);
+    const end = Math.min(v.end, track.end);
     if (t < start && start - t <= edgeSecOut && start - t < bestDist) {
       bestDist = start - t;
       outward = { track, zone: 'start' };
@@ -769,6 +998,178 @@ export function tracksAtForView(tracks, t) {
 }
 
 // ---------------------------------------------------------------------------
+// PURE: sparse manual keyframes — interpolation model (v1.22.0 REQ-201)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reference grid step for densifying SPARSE manual keyframe maps, seconds
+ * (v1.22.0 REQ-201). Mirrors the tracker's DENSE_STEP_S: the interpolated
+ * materialization lands on the same 1/30 s grid the auto tracks use, so
+ * every consumer downstream (redact.tracksAt's nearest-sample lookup) has
+ * the SAME ≤ half-step (≈16.7 ms) bound for manual and auto tracks alike.
+ * @type {number}
+ */
+export const KEYFRAME_DENSE_STEP_S = 1 / 30;
+
+/** Float guard for "reached the next keyframe" (mirrors tracker.js EPS). */
+const KF_EPS = 1e-9;
+
+/**
+ * Linear box interpolation between two keyed samples (v1.22.0 REQ-201). PURE.
+ * `a` / `b` are `{t, box}` samples with a.t < b.t; `t` is a time in seconds.
+ * The fraction is CLAMPED into [0, 1] — extrapolation before a.t (after b.t)
+ * resolves to a's (b's) box, so out-of-bracket queries degrade to the nearest
+ * endpoint instead of overshooting. Degenerate inputs (b.t ≤ a.t, missing
+ * boxes) resolve to a copy of the best available endpoint box; the result is
+ * always a NEW box — inputs are never shared or mutated.
+ *
+ * THE interpolation primitive for sparse manual keyframes: manual tracks keep
+ * keyframes only where the user drew/committed one (unlike auto tracks, whose
+ * finalized maps are dense), so preview and export resolve in-between
+ * instants through here (via interpolatedBoxAt / densifyManualTracks).
+ *
+ * @param {{t: number, box: import('./types.js').Box}} a Earlier keyframe sample.
+ * @param {{t: number, box: import('./types.js').Box}} b Later keyframe sample.
+ * @param {number} t Query time, seconds.
+ * @returns {import('./types.js').Box} Interpolated (or endpoint) box copy.
+ */
+export function interpolateBetween(a, b, t) {
+  const boxA = a && typeof a.box === 'object' ? a.box : null;
+  const boxB = b && typeof b.box === 'object' ? b.box : null;
+  if (!boxA) return boxB ? { ...boxB } : { x: 0, y: 0, w: 0, h: 0 };
+  if (!boxB) return { ...boxA };
+  const ta = Number.isFinite(a.t) ? a.t : 0;
+  const tb = Number.isFinite(b.t) ? b.t : ta;
+  const span = tb - ta;
+  const f =
+    !(span > 0) || !Number.isFinite(t)
+      ? 0
+      : Math.min(1, Math.max(0, (t - ta) / span));
+  return {
+    x: boxA.x + (boxB.x - boxA.x) * f,
+    y: boxA.y + (boxB.y - boxA.y) * f,
+    w: boxA.w + (boxB.w - boxA.w) * f,
+    h: boxA.h + (boxB.h - boxA.h) * f,
+  };
+}
+
+/**
+ * The box a track shows at time `t` under SPARSE-keyframe linear
+ * interpolation (v1.22.0 REQ-201). PURE. Outside the track's [start, end]
+ * span → null (the caller's span gate decides visibility — mirrors
+ * redact.tracksAt). Inside: exactly one keyframe → that box (a manual
+ * region's constant-box contract); before/after the outermost keyframes →
+ * the nearest endpoint box (extrapolation clamps); between two keyframes →
+ * interpolateBetween. Zero keyframes → null (this is a pure VIEW helper —
+ * the redact-side density invariant still throws where it must).
+ *
+ * @param {import('./types.js').Track} track
+ * @param {number} t Seconds.
+ * @returns {import('./types.js').Box | null}
+ */
+export function interpolatedBoxAt(track, t) {
+  if (!track || !(track.keyframes instanceof Map) || track.keyframes.size === 0) return null;
+  if (!Number.isFinite(t)) return null;
+  const { start, end } = track;
+  if (Number.isFinite(start) && Number.isFinite(end) && (t < start || t > end)) return null;
+  const pts = [...track.keyframes.entries()]
+    .filter(([kt, box]) => Number.isFinite(kt) && box && typeof box === 'object')
+    .sort((x, y) => x[0] - y[0]);
+  if (pts.length === 0) return null;
+  if (pts.length === 1) return { ...pts[0][1] };
+  if (t <= pts[0][0]) return { ...pts[0][1] };
+  const last = pts[pts.length - 1];
+  if (t >= last[0]) return { ...last[1] };
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ta, ba] = pts[i];
+    const [tb, bb] = pts[i + 1];
+    if (t >= ta && t <= tb) return interpolateBetween({ t: ta, box: ba }, { t: tb, box: bb }, t);
+  }
+  return { ...last[1] }; // unreachable with sorted pts — defensive
+}
+
+/**
+ * Add or update one track's keyframe at time `t` (v1.22.0 REQ-201, the K
+ * action's model half). PURE — returns a NEW array; only the target track
+ * object is copied (its keyframes Map is rebuilt with the upserted entry;
+ * "min-order": entries stay sorted ascending by time, and the upsert REPLACES
+ * any existing keyframe at the same clamped time — nearest-keyframe update
+ * semantics). `t` is clamped into [0, durationSec] (non-finite → 0; without
+ * a usable duration just ≥ 0). Unknown id or a box-less target → unchanged
+ * content (still a new array), mirroring toggleTrack.
+ *
+ * @param {import('./types.js').Track[]} tracks
+ * @param {number} trackId
+ * @param {number} t Keyframe time, seconds (the playhead).
+ * @param {import('./types.js').Box} box Box in native display px.
+ * @param {number} [durationSec] Video duration; clamps `t` when finite > 0.
+ * @returns {import('./types.js').Track[]}
+ */
+export function upsertKeyframe(tracks, trackId, t, box, durationSec) {
+  if (!box || typeof box !== 'object') {
+    return (Array.isArray(tracks) ? tracks : []).slice();
+  }
+  let ct = Number.isFinite(t) ? Math.max(t, 0) : 0;
+  if (Number.isFinite(durationSec) && durationSec > 0) ct = Math.min(ct, durationSec);
+  return (Array.isArray(tracks) ? tracks : []).map((track) => {
+    if (!track || track.id !== trackId) return track;
+    const entries = track.keyframes instanceof Map ? [...track.keyframes.entries()] : [];
+    /** @type {Array<[number, import('./types.js').Box]>} */
+    const merged = entries.filter(([kt]) => kt !== ct);
+    merged.push([ct, { ...box }]);
+    merged.sort((a, b) => a[0] - b[0]); // min-order
+    const next = new Map(merged);
+    return /** @type {import('./types.js').Track} */ ({ ...track, keyframes: next });
+  });
+}
+
+/**
+ * Materialize every MANUAL track's sparse keyframes onto the 1/30 s
+ * reference grid with linear interpolation (v1.22.0 REQ-201). PURE — auto
+ * tracks (and anything with ≤ 1 keyframe, whose interpolation is constant
+ * anyway) pass through UNCHANGED by reference.
+ *
+ * WHY THIS EXISTS — the interpolation decision: redact.tracksAt resolves a
+ * track's box with a NEAREST-keyframe lookup (and redact.js is the shared
+ * preview/export seam both consumers must go through). Sparse manual
+ * keyframes under nearest-lookup would STEP between drawn boxes instead of
+ * following the subject. redact.js is deliberately untouched; instead every
+ * consumer boundary in the files that OWN manual-track state densifies
+ * FIRST:
+ *   - preview: editor.drawPreview's tracksInCanvasPx memo (below), and
+ *   - export: main.js startExport passes densifyManualTracks(app.tracks).
+ * Both then run the SAME redact.pixelateFrame over dense maps — nearest
+ * lookup on a 1/30 s interpolated grid resolves any instant within half a
+ * step (≈16.7 ms) of the true linear interpolation, the exact AC-05 contract
+ * auto tracks already satisfy. Preview and export share densification AND
+ * the burn-in seam, so the pixels stay identical (REQ-016 / AC-04).
+ *
+ * @param {import('./types.js').Track[]} tracks
+ * @returns {import('./types.js').Track[]} New array; manual tracks with 2+
+ *     keyframes replaced by dense-grid copies.
+ */
+export function densifyManualTracks(tracks) {
+  return (Array.isArray(tracks) ? tracks : []).map((track) => {
+    if (!track || track.source !== 'manual' || !(track.keyframes instanceof Map)) return track;
+    if (track.keyframes.size <= 1) return track; // constant box — already dense-equivalent
+    const pts = [...track.keyframes.entries()].sort((a, b) => a[0] - b[0]);
+    const dense = new Map();
+    for (let i = 0; i < pts.length; i++) {
+      const [ta, ba] = pts[i];
+      dense.set(ta, { ...ba });
+      if (i + 1 >= pts.length) break;
+      const [tb, bb] = pts[i + 1];
+      for (let m = 1; ; m++) {
+        const t = ta + m * KEYFRAME_DENSE_STEP_S;
+        if (t >= tb - KF_EPS) break; // next keyframe (exact) reached — never duplicated
+        dense.set(t, interpolateBetween({ t: ta, box: ba }, { t: tb, box: bb }, t));
+      }
+    }
+    return /** @type {import('./types.js').Track} */ ({ ...track, keyframes: dense });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // PURE: manualTrackFromBox — manual region factory (REQ-015, AC-07)
 // ---------------------------------------------------------------------------
 
@@ -791,15 +1192,15 @@ export function tracksAtForView(tracks, t) {
  * visible through the "Manual #N" label (+ the dashed chip outline the
  * renderer adds for source === 'manual'), NOT through a color collision.
  *
- * SPARSE KEYFRAMES — verified against src/redact.js: `tracksAt` gates only on
- * `enabled` and `t ∈ [start, end]`, and `nearestBox` picks the keyframe
- * minimizing |kt − t| over whatever keyframes exist. With the single constant
- * keyframe `{0: box}` that nearest lookup returns the SAME box for every t
- * in the span — one keyframe suffices, no interpolation, and the density
- * invariant (an enabled covering track always yields a box) is never
- * violated: a manual track always has exactly one keyframe. This is the
- * documented exception to the tracker's dense-keyframe guarantee (manual
- * regions are FIXED boxes — no motion tracking, per spec exclusions).
+ * SPARSE KEYFRAMES (v1.22.0 REQ-201): the drawn box becomes a keyframe AT
+ * the drawn time `t` (clamped ≥ 0) — no longer forced to t=0. With a single
+ * keyframe the track still redacts as a CONSTANT box everywhere in the span
+ * (redact.tracksAt's nearest lookup returns it for every t; the density
+ * invariant never sees an empty map) — that remains the documented exception
+ * to the tracker's dense-keyframe guarantee. With 2+ keyframes (the K action,
+ * upsertKeyframe) the track FOLLOWS the subject: consumers densify via
+ * densifyManualTracks, which linearly interpolates between the sparse
+ * keyframes on the 1/30 s grid (see that helper for the full rationale).
  *
  * Without a usable duration the span degrades to [0, max(t, MIN_TRACK_SPAN_S)]
  * (cover at least up to the drawn frame); the caller can trim once duration
@@ -808,19 +1209,20 @@ export function tracksAtForView(tracks, t) {
  *
  * @param {number} trackIdCounter Id AND label number for the new track
  *     ("Manual #<trackIdCounter>"); caller increments its counter on accept.
- * @param {number} t Presentation time, seconds (the drawn frame; only used
- *     for the no-duration fallback span — the box itself is constant).
+ * @param {number} t Presentation time, seconds — the drawn frame AND the
+ *     keyframe time (clamped ≥ 0; also the no-duration fallback span end).
  * @param {import('./types.js').Box} box Box in native display px.
  * @param {number} [durationSec] Video duration; the default span end.
  * @returns {import('./types.js').Track}
  */
 export function manualTrackFromBox(trackIdCounter, t, box, durationSec) {
   let end;
+  let kt = Number.isFinite(t) ? Math.max(t, 0) : 0;
   if (Number.isFinite(durationSec) && durationSec > 0) {
     end = durationSec;
+    kt = Math.min(kt, durationSec);
   } else {
-    const drawnAt = Number.isFinite(t) ? Math.max(t, 0) : 0;
-    end = Math.max(drawnAt, MIN_TRACK_SPAN_S);
+    end = Math.max(kt, MIN_TRACK_SPAN_S);
   }
   return /** @type {import('./types.js').Track} */ ({
     id: trackIdCounter,
@@ -829,7 +1231,9 @@ export function manualTrackFromBox(trackIdCounter, t, box, durationSec) {
     // REQ-109: same categorical slot rule as the tracker's auto tracks —
     // manual regions are no longer a shared fixed alert red.
     color: TRACK_COLORS[(trackIdCounter - 1) % TRACK_COLORS.length],
-    keyframes: new Map([[0, { ...box }]]),
+    // v1.22.0 REQ-201: the box is keyed AT the drawn time (the constant-box
+    // behavior for single-keyframe regions is unchanged — see above).
+    keyframes: new Map([[kt, { ...box }]]),
     start: 0,
     end,
     enabled: true,
@@ -1021,7 +1425,8 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  *
  * @param {object} els Stable DOM handles:
  *     `{ video, overlayCanvas, timeline, chipsContainer, playhead, trackList,
- *        timelineThumb?, trimRegions? }`. The timeline strip is the trim-handle
+ *        timelineThumb?, trimRegions?, zoomIn?, zoomOut?, zoomFit?,
+ *        waveform? }`. The timeline strip is the trim-handle
  *     gesture surface (REQ-103, and REQ-110: bound to #timeline so
  *     boundary-edge grabs on full-span chips are seen); pointer geometry still
  *     maps through the chips layer. `timelineThumb` (v1.7.0) is the draggable
@@ -1030,6 +1435,10 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  *     REQ-125) is the greyed trim-region layer — when omitted it is resolved
  *     as the static `#trim-regions` inside the strip markup; a missing layer
  *     disables only the trim UI (chips/playhead/list are unaffected).
+ *     v1.22.0 REQ-204: `zoomIn`/`zoomOut`/`zoomFit` are the optional zoom
+ *     buttons (missing markup → the wheel/pan gestures still zoom).
+ *     v1.22.0 REQ-206: `waveform` is the optional waveform strip canvas —
+ *     absent → the waveform feature is off.
  * @param {object} hooks Callbacks into main.js:
  *     `{ onToggle(trackId, enabled), onSeek(t), onManualBox(box, t),
  *        onTrimTrack(trackId, start, end), onSetStyle(trackId, style),
@@ -1042,17 +1451,33 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
  *     `getState().trimMode` drive the greyed regions, the crosshair strip and
  *     the preview veil; `onTrimAdd(start, end)` / `onTrimEdge(id, which, t)` /
  *     `onTrimRemove(id)` (optional) mutate the region model — all optional,
- *     guarded like the other hooks.
+ *     guarded like the other hooks. v1.22.0 REQ-201: `getState()
+ *     .selectedTrackId` names the SELECTED track (row click →
+ *     `onSelectTrack(trackId)`) — the K-keyframe target and the only track
+ *     whose `.kf-marker` diamonds render; `onKeyframe(trackId, box, t)`
+ *     commits a drawn box as a keyframe at the playhead (B draws, K commits).
+ *     v1.22.0 REQ-202: `onRescanTrack(trackId)` fires from the auto-track
+ *     rows' Re-scan buttons. v1.22.0 REQ-204: `getState().viewStart`/
+ *     `viewEnd` carry the host-owned view window (omitted → full clip) and
+ *     `onZoomView(view)` (optional) receives the next window from the wheel
+ *     zoom / shift-drag pan / zoom buttons — the editor never mutates the
+ *     window itself.
  * @returns {{destroy: () => void, refresh: () => void,
  *            redraw: () => void, getGestureState: () => {dragging: boolean,
- *            pinRemainingMs: number}}} `destroy` tears all listeners/frames
- *     down on step change; `refresh` re-renders chips + track list + playhead
- *     from getState() (main calls it on state change); `redraw` re-runs the
- *     preview draw + playhead at the CURRENT element layout — main calls it
- *     after fullscreen/zoom/viewport resizes (the per-frame loop only fires
- *     on presented frames, so a paused video needs this explicit kick to
- *     re-size the overlay canvas); `getGestureState` (v1.9.0) exposes the
- *     live thumb drag + release-pin state for the host's ?debug=1 diag line.
+ *            pinRemainingMs: number},
+ *            setRescanBusy: (trackId: number | null) => void,
+ *            setPeek: (on: boolean) => void}}
+ *     `destroy` tears all listeners/frames down on step change; `refresh`
+ *     re-renders chips + track list + playhead from getState() (main calls
+ *     it on state change); `redraw` re-runs the preview draw + playhead at
+ *     the CURRENT element layout — main calls it after fullscreen/zoom/
+ *     viewport resizes (the per-frame loop only fires on presented frames,
+ *     so a paused video needs this explicit kick to re-size the overlay
+ *     canvas); `getGestureState` (v1.9.0) exposes the live thumb drag +
+ *     release-pin state for the host's ?debug=1 diag line; `setRescanBusy`
+ *     (v1.22.0 REQ-202) flips the row Re-scan button's "…" busy state;
+ *     `setPeek` (v1.22.0 REQ-205) drives hold-to-peek (main wires the
+ *     #peek-button hold + the A key).
  */
 export function mountEditor(els, hooks) {
   const video = (els && els.video) || null;
@@ -1075,6 +1500,14 @@ export function mountEditor(els, hooks) {
   // wrong node in partial-els embeds); an absent layer disables only the trim
   // UI (chips/playhead/list are unaffected).
   const trimRegions = (els && els.trimRegions) || null;
+  // v1.22.0 REQ-204: the zoom controls (+ / − / Fit). All optional — missing
+  // markup disables only the buttons; wheel zoom + shift-drag pan still work.
+  const zoomInBtn = (els && els.zoomIn) || null;
+  const zoomOutBtn = (els && els.zoomOut) || null;
+  const zoomFitBtn = (els && els.zoomFit) || null;
+  // v1.22.0 REQ-206: the waveform strip canvas (optional — absent → the
+  // waveform feature is off entirely).
+  const waveformCanvas = (els && els.waveform) || null;
 
   const hasHook = (name) => !!(hooks && typeof hooks[name] === 'function');
   const getState = () =>
@@ -1098,6 +1531,16 @@ export function mountEditor(els, hooks) {
   const callSetStyle = (id, style) => {
     if (hasHook('onSetStyle')) hooks.onSetStyle(id, style);
   };
+  // v1.22.0 REQ-201: row click selects a track (K-keyframe targeting + the
+  // keyframe markers' subject); optional hook — absent → selection stays a
+  // no-op and the editor never renders markers.
+  const callSelect = (id) => {
+    if (hasHook('onSelectTrack')) hooks.onSelectTrack(id);
+  };
+  // v1.22.0 REQ-202: the row's "Re-scan" button (auto tracks only).
+  const callRescan = (id) => {
+    if (hasHook('onRescanTrack')) hooks.onRescanTrack(id);
+  };
   // v1.15.0 REQ-125 trim hooks: region create / edge move / remove.
   const callTrimAdd = (start, end) => {
     if (hasHook('onTrimAdd')) hooks.onTrimAdd(start, end);
@@ -1107,6 +1550,13 @@ export function mountEditor(els, hooks) {
   };
   const callTrimRemove = (id) => {
     if (hasHook('onTrimRemove')) hooks.onTrimRemove(id);
+  };
+  // v1.22.0 REQ-204: the host owns the view window (getState().viewStart/
+  // viewEnd); zoom/pan/fit interactions emit the NEXT window through this
+  // optional hook — absent → the editor renders through whatever view the
+  // host supplies but can never change it.
+  const callZoomView = (view) => {
+    if (hasHook('onZoomView') && view) hooks.onZoomView(view);
   };
   // v1.7.0 thumb keyboard: ±1 frame rides the host's step math (main.js's
   // stepFrame knows the source fps via app.meta); without the hook a ~30 fps
@@ -1137,6 +1587,29 @@ export function mountEditor(els, hooks) {
   };
   const clampTime = (t) => Math.min(duration(), Math.max(0, t));
 
+  // --- View window (v1.22.0 REQ-204) + peek flag (REQ-205) state ------------
+
+  /**
+   * The current view window, read LIVE from getState().viewStart/viewEnd
+   * (main.js owns it; both fields optional → full clip). Re-normalized so a
+   * stale/garbage host window can never produce NaN positions.
+   * @returns {{start: number, end: number}}
+   */
+  const getView = () => normalizeView(
+    { start: getState().viewStart, end: getState().viewEnd },
+    duration(),
+  );
+
+  /**
+   * v1.22.0 REQ-205: while true, drawPreview renders the RAW frame — no
+   * pixelation, no overlay boxes, no trim veil — plus a "RAW" badge. Set
+   * through the handle's setPeek (wired by main.js to the #peek-button
+   * hold gesture and the A key). Preview-only: the export burn path never
+   * consults it.
+   * @type {boolean}
+   */
+  let peeking = false;
+
   // --- Preview loop (video frame → pixelation → overlay → playhead) -------
 
   const ctx =
@@ -1148,6 +1621,21 @@ export function mountEditor(els, hooks) {
   let closed = false;
   /** Live manual-drag rubber band (canvas bitmap px) drawn above the frame. */
   let pendingBox = null;
+  /**
+   * v1.22.0 REQ-201: the ARMED keyframe box — a box drawn while a manual
+   * track is selected, waiting for K to commit it as a keyframe at the
+   * playhead (or Escape to discard). `{ trackId, box }` in NATIVE display
+   * px; the canvas-px twin stays visible through `pendingBox` until commit.
+   * @type {{trackId: number, box: import('./types.js').Box} | null}
+   */
+  let pendingKeyframe = null;
+  /**
+   * v1.22.0 REQ-202: the track id whose row is mid-re-scan (the row's
+   * .rescan-btn reads "…" while set); null when idle. main.js clears it via
+   * the handle's setRescanBusy.
+   * @type {number | null}
+   */
+  let rescanBusyId = null;
   /** Canvas px per native px — set by drawPreview once metadata exists. */
   let previewScale = 1;
   /**
@@ -1157,10 +1645,22 @@ export function mountEditor(els, hooks) {
    */
   let scaledMemo = { tracks: null, scale: -1, scaled: null };
 
-  /** Memoized scaleTracksToCanvas (see the pure helper for the AC-04 math). */
+  /**
+   * Memoized scaleTracksToCanvas (see the pure helper for the AC-04 math).
+   * v1.22.0 REQ-201: the state tracks densify FIRST (sparse manual keyframes
+   * → 1/30 s interpolated maps) so pixelateFrame/drawOverlay — both redact
+   * nearest-lookup consumers — resolve interpolated boxes in the preview
+   * exactly as the export will (main.js densifies the export tracks too).
+   * The memo key stays (state array identity, scale): densification runs
+   * only when the state actually changed.
+   */
   function tracksInCanvasPx(tracks, scale) {
     if (scaledMemo.tracks !== tracks || scaledMemo.scale !== scale) {
-      scaledMemo = { tracks, scale, scaled: scaleTracksToCanvas(tracks, scale) };
+      scaledMemo = {
+        tracks,
+        scale,
+        scaled: scaleTracksToCanvas(densifyManualTracks(tracks), scale),
+      };
     }
     return scaledMemo.scaled;
   }
@@ -1173,6 +1673,30 @@ export function mountEditor(els, hooks) {
     ctx.setLineDash([6, 4]);
     ctx.lineWidth = 2;
     ctx.strokeRect(pendingBox.x, pendingBox.y, pendingBox.w, pendingBox.h);
+    ctx.restore();
+  }
+
+  /**
+   * v1.22.0 REQ-205: the "RAW" peek badge — a small dark plate with red
+   * text in the canvas's top-right corner (bitmap px, so it tracks the
+   * drawn frame). Scaled by dpr so its CSS size stays constant.
+   * @param {number} bw Canvas bitmap width.
+   * @param {number} dpr Device pixel ratio (≥ 1).
+   */
+  function drawRawBadge(bw, dpr) {
+    if (!ctx) return;
+    const s = Math.max(1, dpr);
+    const pad = 8 * s;
+    const h = 20 * s;
+    ctx.save();
+    ctx.font = `600 ${12 * s}px system-ui, sans-serif`;
+    const label = 'RAW';
+    const tw = ctx.measureText(label).width;
+    const x = Math.max(0, bw - tw - pad * 3);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.fillRect(x, pad, tw + pad * 2, h);
+    ctx.fillStyle = '#FF5D5D';
+    ctx.fillText(label, x + pad, pad + h - 6 * s);
     ctx.restore();
   }
 
@@ -1211,6 +1735,16 @@ export function mountEditor(els, hooks) {
 
     ctx.clearRect(0, 0, bw, bh);
     ctx.drawImage(video, 0, 0, bw, bh); // canvas becomes the visible preview
+
+    // v1.22.0 REQ-205: HOLD-TO-PEEK — while the flag is set the preview is
+    // the RAW frame and nothing else (no pixelation, no track outlines, no
+    // trim veil): the user checks what the source actually looks like under
+    // the redactions. A small "RAW" badge keeps the state obvious. Preview
+    // ONLY — the export burn path never reads this flag.
+    if (peeking) {
+      drawRawBadge(bw, dpr);
+      return;
+    }
 
     const state = getState();
     const t = displayTime();
@@ -1288,7 +1822,10 @@ export function mountEditor(els, hooks) {
     }
     const d = duration();
     const t = displayTime();
-    if (thumb.style) thumb.style.left = `${thumbLeftPct(t, d)}%`;
+    // v1.22.0 REQ-204: the thumb maps through the VIEW window (it must sit
+    // over the same strip space the chips/playhead occupy). Its ARIA values
+    // stay in real seconds (media time), independent of the view.
+    if (thumb.style) thumb.style.left = `${timeToPct(t, getView())}%`;
     if (typeof thumb.setAttribute === 'function') {
       thumb.setAttribute('aria-valuemax', String(Number.isFinite(d) && d > 0 ? d : 0));
       thumb.setAttribute('aria-valuenow', String(thumbAriaValue(t)));
@@ -1297,9 +1834,12 @@ export function mountEditor(els, hooks) {
 
   function updatePlayhead() {
     updateThumb();
+    // v1.22.0 REQ-206: the played-portion tint follows the playhead — cheap
+    // (≈ one rect per bar) and keeps the waveform honest during playback.
+    drawWaveform();
     if (!playhead) return;
-    const d = duration();
-    const pct = d > 0 ? (clampTime(displayTime()) / d) * 100 : 0;
+    // v1.22.0 REQ-204: view-window position (full view → the old math).
+    const pct = timeToPct(displayTime(), getView());
     playhead.style.left = `${pct}%`;
   }
 
@@ -1414,7 +1954,11 @@ export function mountEditor(els, hooks) {
     if (closed || !doc) return;
     const state = getState();
     const d = duration();
-    const vm = renderTimeline(state.tracks, d, displayTime());
+    // v1.22.0 REQ-204: every strip mapping goes through the VIEW window —
+    // chips, playhead, keyframe markers, trim regions, waveform (full view →
+    // the exact pre-zoom numbers).
+    const view = getView();
+    const vm = renderTimeline(state.tracks, d, displayTime(), view);
 
     if (chipsContainer) {
       chipsContainer.textContent = '';
@@ -1447,18 +1991,55 @@ export function mountEditor(els, hooks) {
         }
         chipsContainer.appendChild(el);
       }
+
+      // v1.22.0 REQ-201: the SELECTED manual track's keyframes render as
+      // small diamond markers in the chips layer, positioned at their
+      // (clamped) keyframe times. Canvas-free divs with pointer-events:none
+      // — timeline gestures never hit them; they re-render with every
+      // refresh (upsertKeyframe fires a refresh via main.js). Nothing
+      // renders when nothing is selected, the selection is not a manual
+      // track, or the duration is unusable.
+      const selectedId = state.selectedTrackId;
+      const sel = (Array.isArray(state.tracks) ? state.tracks : []).find(
+        (tr) => tr && tr.id === selectedId && tr.source === 'manual',
+      );
+      if (sel && sel.keyframes instanceof Map && sel.keyframes.size > 0) {
+        const entries = [...sel.keyframes.entries()].sort((a, b) => a[0] - b[0]);
+        for (const [kt] of entries) {
+          if (!Number.isFinite(kt)) continue;
+          // v1.22.0 REQ-204: markers outside the view window are skipped
+          // (a clamped pile-up at the edges would lie about their times).
+          if (kt < view.start || kt > view.end) continue;
+          const marker = doc.createElement('div');
+          marker.className = 'kf-marker';
+          marker.dataset.trackId = String(sel.id);
+          marker.dataset.kfTime = String(kt);
+          marker.title = `${sel.label} keyframe @ ${fmtClock(kt)}`;
+          marker.style.cssText =
+            'position:absolute;top:50%;left:0;width:8px;height:8px;margin:0;padding:0;' +
+            'border:0;pointer-events:none;transform:translate(-50%, -50%) rotate(45deg);';
+          marker.style.left = `${timeToPct(kt, view)}%`;
+          marker.style.background = sel.color || '#E5484D';
+          chipsContainer.appendChild(marker);
+        }
+      }
     }
 
     if (playhead) playhead.style.left = `${vm.playheadPct}%`;
     updateThumb();
+    // v1.22.0 REQ-206: the waveform strip repaints on every refresh (view
+    // changes and peak arrivals both ride refresh). updatePlayhead covers the
+    // played-tint during playback; a PAUSED video presents no frames (rVFC
+    // idles), so the refresh path must own the unhide + redraw.
+    drawWaveform();
 
     // v1.15.0 REQ-125: greyed trim regions in the dedicated layer (above the
     // chips, below the playhead/thumb) + the trim-mode strip cursor. The
     // live-create ghost survives refreshes (edge drags fire hooks → render).
     if (trimRegions) {
       trimRegions.textContent = '';
-      for (const view of trimRegionViews(state.trims, d)) {
-        trimRegions.appendChild(buildTrimRegion(view));
+      for (const regionView of trimRegionViews(state.trims, d, view)) {
+        trimRegions.appendChild(buildTrimRegion(regionView));
       }
       if (trimCreate?.ghost) trimRegions.appendChild(trimCreate.ghost);
     }
@@ -1492,6 +2073,7 @@ export function mountEditor(els, hooks) {
     // unaffected — filtering is a list-finding aid only).
     const filtered = filterTracksByClass(tracks, trackFilter);
     const active = doc && doc.activeElement;
+    const selectedId = getState().selectedTrackId;
     const existing = new Map();
     for (const row of Array.from(trackList.querySelectorAll('li.track-row[data-track-id]'))) {
       existing.set(String(row.dataset.trackId), row);
@@ -1500,8 +2082,8 @@ export function mountEditor(els, hooks) {
     for (const track of filtered) {
       const idStr = String(track.id);
       keep.add(idStr);
-      const row = existing.get(idStr) ?? buildTrackRow(track.id);
-      syncTrackRow(row, track, d, active);
+      const row = existing.get(idStr) ?? buildTrackRow(track);
+      syncTrackRow(row, track, d, active, selectedId);
       trackList.appendChild(row); // moves new + existing rows into array order
     }
     for (const [idStr, row] of existing) {
@@ -1513,11 +2095,14 @@ export function mountEditor(els, hooks) {
    * Build one empty track row (structure only; syncTrackRow fills it in).
    * Row contract kept Playwright/E2E-compatible: li.track-row with
    * .swatch / .label / .span / .style-select / input[type=checkbox], plus
-   * the REQ-108 .times group with the start/end span inputs.
-   * @param {number} trackId
+   * the REQ-108 .times group with the start/end span inputs. v1.22.0
+   * REQ-202 adds the .rescan-btn (auto tracks only — visibility is decided
+   * per track in syncTrackRow, since rows are reused by id).
+   * @param {import('./types.js').Track} track
    * @returns {HTMLLIElement}
    */
-  function buildTrackRow(trackId) {
+  function buildTrackRow(track) {
+    const trackId = track.id;
     const row = doc.createElement('li');
     row.className = 'track-row';
     row.dataset.trackId = String(trackId);
@@ -1562,12 +2147,22 @@ export function mountEditor(els, hooks) {
       styleSelect.appendChild(opt);
     }
 
+    // v1.22.0 REQ-202: per-track "Re-scan span" action — auto tracks only
+    // (visibility decided in syncTrackRow). The click is consumed by the
+    // list's delegated click handler BEFORE the row-click seek.
+    const rescanBtn = doc.createElement('button');
+    rescanBtn.type = 'button';
+    rescanBtn.className = 'rescan-btn';
+    rescanBtn.dataset.trackId = String(trackId);
+    rescanBtn.title = 'Re-scan this span: re-run detection here at a lower threshold and merge new boxes';
+    rescanBtn.textContent = 'Re-scan';
+
     const checkbox = doc.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.dataset.trackId = String(trackId);
     checkbox.title = 'Redact this track';
 
-    row.append(swatch, label, span, times, styleSelect, checkbox);
+    row.append(swatch, label, span, times, styleSelect, rescanBtn, checkbox);
     return row;
   }
 
@@ -1575,21 +2170,34 @@ export function mountEditor(els, hooks) {
    * Sync one track row's live values in place (see renderTrackList for the
    * reconciliation rationale). `active` is the document's focused element —
    * a focused span input keeps its in-flight value (guard) and is synced
-   * from the model on the render following its commit/blur.
+   * from the model on the render following its commit/blur. `selectedId`
+   * (v1.22.0 REQ-201) drives the row's `.selected` highlight.
    * @param {HTMLLIElement} row
    * @param {import('./types.js').Track} track
    * @param {number} d Video duration (0 until metadata exists).
    * @param {Element | null} active Currently focused element, if any.
+   * @param {number | undefined} [selectedId] The app's selected track id.
    */
-  function syncTrackRow(row, track, d, active) {
-    row.className = 'track-row' + (track.enabled ? '' : ' enabled-off');
+  function syncTrackRow(row, track, d, active, selectedId) {
+    row.className =
+      'track-row' +
+      (track.enabled ? '' : ' enabled-off') +
+      (track.id === selectedId ? ' selected' : '');
 
     const swatch = /** @type {HTMLElement | null} */ (row.querySelector('.swatch'));
     if (swatch) swatch.style.background = track.enabled ? track.color : SAFE_GREEN;
 
     const label = row.querySelector('.label');
     if (label) {
-      label.textContent = track.enabled ? track.label : `${track.label} (visible)`;
+      const base = track.enabled ? track.label : `${track.label} (visible)`;
+      // v1.22.0 REQ-202: mean detection confidence readout — auto tracks
+      // carry `track.conf` (tracker.finalize); manual tracks have none and
+      // omit the suffix entirely (never an invented value).
+      const conf = Number(track.conf);
+      label.textContent =
+        track.source === 'auto' && Number.isFinite(conf)
+          ? `${base} · conf ${conf.toFixed(2)}`
+          : base;
     }
 
     const span = row.querySelector('.span');
@@ -1623,6 +2231,17 @@ export function mountEditor(els, hooks) {
     const checkboxEl = row.querySelector('input[type="checkbox"]');
     if (checkboxEl) {
       /** @type {HTMLInputElement} */ (checkboxEl).checked = !!track.enabled;
+    }
+
+    // v1.22.0 REQ-202: the re-scan action exists for AUTO tracks only and
+    // reads "…" while its pass is running (setRescanBusy).
+    const rescanEl = /** @type {HTMLButtonElement | null} */ (row.querySelector('.rescan-btn'));
+    if (rescanEl) {
+      const busy = rescanBusyId === track.id;
+      rescanEl.hidden = track.source !== 'auto';
+      rescanEl.disabled = busy;
+      const text = busy ? '…' : 'Re-scan';
+      if (rescanEl.textContent !== text) rescanEl.textContent = text;
     }
   }
 
@@ -1658,6 +2277,14 @@ export function mountEditor(els, hooks) {
     );
   /** Chip element whose inline cursor we overrode for the edge affordance. */
   let hoverChip = /** @type {HTMLElement | null} */ (null);
+  /**
+   * v1.22.0 REQ-204: live VIEW PAN drag (shift+drag on the strip) — the
+   * press point, the captured pointerId and the drag-start view window. The
+   * window the drag started from is the base (not the live state) so a slow
+   * host refresh can never compound the delta.
+   * @type {{pointerId: number, startX: number, view: {start: number, end: number}} | null}
+   */
+  let panDrag = null;
 
   function timelinePos(e) {
     if (!timeline || !timeline.getBoundingClientRect) return null;
@@ -1679,7 +2306,8 @@ export function mountEditor(els, hooks) {
   /**
    * Map a client x to a time through the CHIPS-layer rect — the SAME axis the
    * chips, playhead, thumb and every other timeline mapping use (v1.6.1 REG-1
-   * rule).
+   * rule). v1.22.0 REQ-204: the result maps through the VIEW window (full
+   * view → the old full-duration math).
    * @param {number} clientX
    * @returns {number | null} Seconds, or null when geometry/duration is unusable.
    */
@@ -1690,7 +2318,7 @@ export function mountEditor(els, hooks) {
         : null;
     const d = duration();
     if (!rect || !(rect.width > 0) || !(d > 0)) return null;
-    return timelineTimeAt(clientX - rect.left, rect.width, d);
+    return pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
   }
 
   /**
@@ -1755,7 +2383,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, getView());
     if (hit) callToggle(hit.track.id, !hit.track.enabled);
   }
 
@@ -1779,7 +2407,7 @@ export function mountEditor(els, hooks) {
     if (!(rect.width > 0) || !(d > 0)) return;
     const track = (getState().tracks || []).find((tr) => tr.id === trimDrag?.id);
     if (!track) return;
-    const t = clampTime(((clientX - rect.left) / rect.width) * d);
+    const t = pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
     const start = trimDrag.zone === 'start' ? Math.min(t, track.end - MIN_TRACK_SPAN_S) : track.start;
     const end = trimDrag.zone === 'end' ? Math.max(t, track.start + MIN_TRACK_SPAN_S) : track.end;
     callTrim(trimDrag.id, start, end);
@@ -1796,11 +2424,25 @@ export function mountEditor(els, hooks) {
       primary: e.button === 0,
     };
     if (!downPos.primary) return;
+    // v1.22.0 REQ-204: shift+press starts a VIEW PAN drag — orthogonal to
+    // every other strip gesture (thumb drag = seek still owns its own
+    // surface; chip edges = trim are skipped for a shift press; plain drag =
+    // nothing). At full view panWindow clamps to a no-op.
+    if (e.shiftKey) {
+      panDrag = { pointerId: e.pointerId, startX: e.clientX, view: getView() };
+      try {
+        timeline.setPointerCapture(e.pointerId);
+      } catch {
+        /* detached strip — capture is best-effort */
+      }
+      e.preventDefault();
+      return;
+    }
     const p = chipsPos(e);
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, getView());
     if (hit) {
       // Latch the press-time zone: an edge press hands the gesture to the
       // trim path (timelinePointerAction will never turn it into a seek),
@@ -1816,7 +2458,10 @@ export function mountEditor(els, hooks) {
       // shorter than MIN_TRACK_SPAN_S is ignored as a create and falls back
       // to the tap-seek verdict in onChipsPointerUp.
       if (getState().trimMode) {
-        trimCreate = { t0: clampTime(timelineTimeAt(p.x, p.width, d)), ghost: makeGhost() };
+        trimCreate = {
+          t0: pctToTime(timelineTimeAt(p.x, p.width, 100), getView()),
+          ghost: makeGhost(),
+        };
         try {
           timeline.setPointerCapture(e.pointerId);
         } catch {
@@ -1836,6 +2481,24 @@ export function mountEditor(els, hooks) {
   }
 
   function onChipsPointerMove(e) {
+    // v1.22.0 REQ-204: shift-drag pans the view window (1 px = span/width
+    // seconds, drag right = window moves earlier — content follows the
+    // pointer). Based on the DRAG-START view; the host persists + refreshes.
+    if (panDrag) {
+      if (e.pointerId !== panDrag.pointerId) return;
+      const rect =
+        chipsContainer && typeof chipsContainer.getBoundingClientRect === 'function'
+          ? chipsContainer.getBoundingClientRect()
+          : null;
+      const d = duration();
+      if (rect && rect.width > 0 && d > 0) {
+        const span = panDrag.view.end - panDrag.view.start;
+        const delta = ((panDrag.startX - e.clientX) / rect.width) * span;
+        callZoomView(panWindow(panDrag.view, delta, d));
+      }
+      e.preventDefault();
+      return;
+    }
     if (trimDrag) {
       trimDrag.moved = true;
       applyTrimDrag(e.clientX);
@@ -1875,6 +2538,18 @@ export function mountEditor(els, hooks) {
    * v1.6.1 REG-1).
    */
   function onChipsPointerUp(e) {
+    // v1.22.0 REQ-204: a pan drag CONSUMES its release (never a seek).
+    if (panDrag) {
+      const pointerId = panDrag.pointerId;
+      panDrag = null;
+      downPos = null; // exactly one verdict per press→release pair
+      try {
+        timeline.releasePointerCapture(pointerId);
+      } catch {
+        /* never captured or already released */
+      }
+      return;
+    }
     const start = downPos;
     endTrimDrag(e); // no-op unless this gesture is a chip-edge trim
     // v1.15.0 REQ-125: finish a trim-CREATE drag first. A region of at least
@@ -1906,21 +2581,23 @@ export function mountEditor(els, hooks) {
     // playhead is positioned in). Mapping through the full strip rect put
     // every seek off the tapped point by the timecodes + padding width
     // (field-reported REG-1); points on the labels/padding clamp to the ends.
+    // v1.22.0 REQ-204: the tap maps through the VIEW window.
     const p = chipsPos(e) ?? timelinePos(e);
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    callSeek(timelineTimeAt(p.x, p.width, d));
+    callSeek(pctToTime(timelineTimeAt(p.x, p.width, 100), getView()));
   }
 
   function onChipsPointerCancel() {
     // A canceled gesture (palm rejection, …) must leave NO residue: both the
     // trim drag and the pointerup anchor reset here, so a canceled press can
     // never turn a later tap into a trim or a seek (v1.6.1 REG-1). v1.15.0:
-    // the create-drag ghost dies with it too.
+    // the create-drag ghost dies with it too. v1.22.0 REQ-204: the pan drag.
     trimDrag = null;
     dropGhost();
     downPos = null;
+    panDrag = null;
     resetChipCursor();
   }
 
@@ -2043,6 +2720,159 @@ export function mountEditor(els, hooks) {
     if (Number.isFinite(id)) callTrimRemove(id);
   }
 
+  // --- View zoom controls + waveform strip (v1.22.0 REQ-204/206) ------------
+
+  /** One #zoom-in / #zoom-out click step (stronger than the wheel notch — a
+   * discrete click should travel; the wheel keeps REQ-204's 1.2). */
+  const ZOOM_BUTTON_FACTOR = 1.5;
+
+  /** Apply one zoom step around the strip center through the host hook. */
+  function zoomBy(factor) {
+    const d = duration();
+    if (!(d > 0)) return;
+    callZoomView(zoomStep(getView(), factor, 50, d));
+  }
+  function onZoomInClick() {
+    zoomBy(ZOOM_BUTTON_FACTOR);
+  }
+  function onZoomOutClick() {
+    zoomBy(1 / ZOOM_BUTTON_FACTOR);
+  }
+  function onZoomFitClick() {
+    const d = duration();
+    if (!(d > 0)) return;
+    callZoomView(fitWindow(d));
+  }
+
+  /**
+   * ctrl/cmd+wheel on the strip zooms AT THE CURSOR (REQ-204: the time under
+   * the pointer stays fixed — anchorPct from the pointer x). Plain wheel is
+   * untouched (page scroll); ctrl+wheel also carries trackpad pinch on
+   * Chromium. Registered non-passive so preventDefault can stop the
+   * browser's own page zoom.
+   * @param {WheelEvent} e
+   */
+  function onTimelineWheel(e) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const d = duration();
+    if (!(d > 0)) return;
+    const p = chipsPos(e) ?? timelinePos(e);
+    const anchorPct = p ? Math.min(Math.max((p.x / p.width) * 100, 0), 100) : 50;
+    const factor = e.deltaY < 0 ? ZOOM_WHEEL_FACTOR : 1 / ZOOM_WHEEL_FACTOR;
+    callZoomView(zoomWindow(getView(), factor, anchorPct, d));
+    e.preventDefault();
+  }
+
+  /**
+   * v1.22.0 REQ-206: draw the waveform strip from getState().waveform (the
+   * host's decoded peaks — decode/cache live in main.js + src/audio.js).
+   * Bars map through the VIEW window (re-render rides zoom/pan refreshes),
+   * sit symmetric around the vertical center, and tint the PLAYED portion
+   * (bar time ≤ playhead) in the accent color at 60% alpha. No peaks → the
+   * canvas hides itself (silent degrade for silent/undecodable audio).
+   */
+  function drawWaveform() {
+    if (!waveformCanvas || closed || typeof waveformCanvas.getContext !== 'function') return;
+    const peaks = getState().waveform;
+    const hasPeaks = !!peaks && typeof peaks.length === 'number' && peaks.length > 0;
+    if (waveformCanvas.hidden !== !hasPeaks) waveformCanvas.hidden = !hasPeaks;
+    if (!hasPeaks) return;
+    const d = duration();
+    if (!(d > 0)) return;
+    const dpr =
+      typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1;
+    const rect = waveformCanvas.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return;
+    const bw = Math.max(1, Math.round(rect.width * dpr));
+    const bh = Math.max(1, Math.round(rect.height * dpr));
+    if (waveformCanvas.width !== bw) waveformCanvas.width = bw;
+    if (waveformCanvas.height !== bh) waveformCanvas.height = bh;
+    const wctx = waveformCanvas.getContext('2d');
+    if (!wctx) return;
+    wctx.clearRect(0, 0, bw, bh);
+    const view = getView();
+    const t = displayTime();
+    const mid = bh / 2;
+    const n = peaks.length;
+    const barW = Math.max(1, bw / n - 1);
+    const styles =
+      typeof getComputedStyle === 'function' ? getComputedStyle(waveformCanvas) : null;
+    const accent = (styles?.getPropertyValue('--accent') || '').trim() || '#F5A623';
+    for (let i = 0; i < n; i++) {
+      const barTime = ((i + 0.5) / n) * d;
+      const x = (timeToPct(barTime, view) / 100) * bw;
+      if (x < -barW || x > bw + barW) continue; // outside the view window
+      const amp = Math.min(1, Math.max(0, Number(peaks[i]) || 0));
+      const half = Math.max(1 * dpr, amp * (bh / 2 - 2 * dpr));
+      wctx.globalAlpha = barTime <= t ? 0.6 : 0.35;
+      wctx.fillStyle = barTime <= t ? accent : '#9AA4B2';
+      wctx.fillRect(x, mid - half, barW, half * 2);
+    }
+    wctx.globalAlpha = 1;
+  }
+
+  // Waveform seek: click/drag maps through the waveform element's own rect
+  // (the bars share the chips layer's width — same view mapping).
+  const WAVE_SEEK_THROTTLE_MS = 50;
+  /** @type {{pointerId: number, lastSeekAt: number} | null} */
+  let waveDrag = null;
+
+  function waveTimeAtClientX(clientX) {
+    if (!waveformCanvas || typeof waveformCanvas.getBoundingClientRect !== 'function') {
+      return null;
+    }
+    const rect = waveformCanvas.getBoundingClientRect();
+    const d = duration();
+    if (!(rect.width > 0) || !(d > 0)) return null;
+    return pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
+  }
+
+  function onWavePointerDown(e) {
+    if (e.button !== 0) return;
+    waveDrag = { pointerId: e.pointerId, lastSeekAt: 0 };
+    try {
+      waveformCanvas.setPointerCapture(e.pointerId);
+    } catch {
+      /* detached canvas — capture is best-effort */
+    }
+    const t = waveTimeAtClientX(e.clientX);
+    if (t != null) callSeek(t);
+    e.preventDefault();
+  }
+
+  function onWavePointerMove(e) {
+    if (!waveDrag || e.pointerId !== waveDrag.pointerId) return;
+    const now = Date.now();
+    if (now - waveDrag.lastSeekAt < WAVE_SEEK_THROTTLE_MS) return;
+    const t = waveTimeAtClientX(e.clientX);
+    if (t == null) return;
+    waveDrag.lastSeekAt = now;
+    callSeek(t);
+  }
+
+  /** End the waveform drag on any path; `seek` adds the exact endpoint. */
+  function endWaveDrag(e, seek) {
+    if (!waveDrag) return;
+    const pointerId = waveDrag.pointerId;
+    waveDrag = null;
+    try {
+      waveformCanvas.releasePointerCapture(pointerId);
+    } catch {
+      /* never captured or already released */
+    }
+    if (seek) {
+      const t = waveTimeAtClientX(e.clientX);
+      if (t != null) callSeek(t);
+    }
+  }
+
+  function onWavePointerUp(e) {
+    endWaveDrag(e, true);
+  }
+  function onWavePointerCancel(e) {
+    endWaveDrag(e, false);
+  }
+
   // --- Scrub thumb: drag = throttled scrub seeks + exact endpoint (v1.7.0) --
 
   /** Min interval between live scrub seeks during a thumb drag, ms. The exact
@@ -2121,6 +2951,7 @@ export function mountEditor(els, hooks) {
    * Map a client x to a seek time through the CHIPS-layer rect — the SAME axis
    * the strip tap-seek, hitTestTimeline, the playhead and the thumb itself are
    * positioned in (v1.6.1 REG-1 rule: never map through the full strip rect).
+   * v1.22.0 REQ-204: view-window mapping (full view → the old math).
    * @param {number} clientX Pointer client x, CSS px.
    * @returns {number | null} Seconds, or null when geometry/duration is unusable.
    */
@@ -2131,13 +2962,14 @@ export function mountEditor(els, hooks) {
         : null;
     const d = duration();
     if (!rect || !(rect.width > 0) || !(d > 0)) return null;
-    return timelineTimeAt(clientX - rect.left, rect.width, d);
+    return pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
   }
 
-  /** Move the thumb visually (no seek) — the drag's live follow. */
+  /** Move the thumb visually (no seek) — the drag's live follow.
+   * v1.22.0 REQ-204: view-window position. */
   function moveThumbToTime(t) {
     if (!thumb || !thumb.style) return;
-    thumb.style.left = `${thumbLeftPct(t, duration())}%`;
+    thumb.style.left = `${timeToPct(t, getView())}%`;
   }
 
   /**
@@ -2350,6 +3182,20 @@ export function mountEditor(els, hooks) {
     if (target && (target.type === 'checkbox' || target.tagName === 'SELECT' || isSpanInput(target))) {
       return;
     }
+    // v1.22.0 REQ-202: the row's Re-scan button owns its click (never a
+    // row-click seek; the row itself carries data-track-id too, so the
+    // button must be resolved first).
+    const rescanBtn =
+      target && typeof target.closest === 'function' ? target.closest('.rescan-btn') : null;
+    if (rescanBtn) {
+      const id = Number(rescanBtn.dataset && rescanBtn.dataset.trackId);
+      if (Number.isFinite(id)) {
+        rescanBusyId = id; // the row reads "…" until main.js clears the flag
+        callRescan(id);
+        render(); // repaint the busy button immediately
+      }
+      return;
+    }
     const row =
       target && typeof target.closest === 'function'
         ? target.closest('[data-track-id]')
@@ -2357,25 +3203,97 @@ export function mountEditor(els, hooks) {
     if (!row) return;
     const id = Number(row.dataset && row.dataset.trackId);
     const track = (getState().tracks || []).find((tr) => tr.id === id);
-    if (track) callSeek(clampTime(track.start));
+    if (track) {
+      // v1.22.0 REQ-201: a row click SELECTS the track (K-keyframe target +
+      // keyframe markers) in addition to the existing jump to its start.
+      callSelect(id);
+      callSeek(clampTime(track.start));
+    }
   }
 
   // --- Manual box: canvas-space box → native display px --------------------
 
+  /**
+   * The manual-box pointer commit (REQ-015 flow, unchanged gesture):
+   *   - default: a NEW manual track via hooks.onManualBox(box, t);
+   *   - v1.22.0 REQ-201: when a MANUAL track is SELECTED (getState()
+   *     .selectedTrackId) and the onKeyframe hook exists, the drawn box
+   *     instead ARMS a pending keyframe (B draws) — the dashed box stays
+   *     visible until K commits it AT THE PLAYHEAD (onKeyframe(trackId,
+   *     box, displayTime())) or Escape discards it. The drawn box never
+   *     becomes a track, and the drawn-at time is irrelevant (K supplies
+   *     the playhead time).
+   * @param {import('./types.js').Box} boxCanvas Canvas-bitmap-px box.
+   * @param {number} t Draw time (displayTime at pointerup).
+   */
   function commitManualBox(boxCanvas, t) {
-    if (!hasHook('onManualBox') || !video) return;
+    if (!video) return;
     const nw = video.videoWidth || 0;
     const nh = video.videoHeight || 0;
     if (!nw || !nh || !(previewScale > 0)) return; // no frame to map against
-    hooks.onManualBox(
-      {
-        x: boxCanvas.x / previewScale,
-        y: boxCanvas.y / previewScale,
-        w: boxCanvas.w / previewScale,
-        h: boxCanvas.h / previewScale,
-      },
-      t,
+    const native = {
+      x: boxCanvas.x / previewScale,
+      y: boxCanvas.y / previewScale,
+      w: boxCanvas.w / previewScale,
+      h: boxCanvas.h / previewScale,
+    };
+    const st = getState();
+    const selected = (Array.isArray(st.tracks) ? st.tracks : []).find(
+      (tr) => tr && tr.id === st.selectedTrackId && tr.source === 'manual',
     );
+    if (selected && hasHook('onKeyframe')) {
+      pendingKeyframe = { trackId: selected.id, box: native };
+      pendingBox = { ...boxCanvas }; // keep the drawn box visible until K/Escape
+      drawPending();
+      return;
+    }
+    if (!hasHook('onManualBox')) return;
+    hooks.onManualBox(native, t);
+  }
+
+  /**
+   * v1.22.0 REQ-201 keyframe keyboard (editor window-level, mirrors
+   * beginManualBox's Escape path): K commits the pending drawn box as a
+   * keyframe AT THE CURRENT PLAYHEAD through hooks.onKeyframe; Escape
+   * discards it. Typing surfaces (span inputs, selects) never trigger it —
+   * the same exclusion main.js's doc shortcuts apply (REG-2). Handled keys
+   * do not propagate, so main.js's doc handler can never double-fire.
+   * @param {KeyboardEvent} e
+   */
+  function onEditorKeyDown(e) {
+    if (e.key === 'Escape' && pendingKeyframe) {
+      pendingKeyframe = null;
+      pendingBox = null;
+      drawPending();
+      return;
+    }
+    if ((e.key === 'k' || e.key === 'K') && pendingKeyframe) {
+      const target = /** @type {Element | null} */ (/** @type {unknown} */ (e.target));
+      if (
+        target &&
+        typeof target.closest === 'function' &&
+        target.closest('input, select, textarea, [contenteditable]')
+      ) {
+        return; // typing surface — the keystroke means text, not a commit
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      const { trackId, box } = pendingKeyframe;
+      pendingKeyframe = null;
+      pendingBox = null;
+      drawPending();
+      if (hasHook('onKeyframe')) hooks.onKeyframe(trackId, box, displayTime());
+    }
+  }
+
+  /** Guarded window-keydown attach (node test env has no window). */
+  function armKeyframeKeys() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    window.addEventListener('keydown', onEditorKeyDown);
+  }
+  function disarmKeyframeKeys() {
+    if (typeof window === 'undefined' || typeof window.removeEventListener !== 'function') return;
+    window.removeEventListener('keydown', onEditorKeyDown);
   }
 
   const disposeManual =
@@ -2391,6 +3309,7 @@ export function mountEditor(els, hooks) {
 
   // --- Wire + first paint ---------------------------------------------------
 
+  armKeyframeKeys(); // v1.22.0 REQ-201: K commit / Escape discard (window-level)
   if (video && ctx) scheduleFrame();
   if (video) {
     video.addEventListener('seeked', onSeeked);
@@ -2410,6 +3329,25 @@ export function mountEditor(els, hooks) {
     timeline.addEventListener('pointerup', onChipsPointerUp);
     timeline.addEventListener('pointercancel', onChipsPointerCancel);
     timeline.addEventListener('pointerleave', onChipsPointerLeave);
+    // v1.22.0 REQ-204: ctrl/cmd+wheel zoom (non-passive — preventDefault
+    // must beat the browser's page zoom; plain wheel scrolls untouched).
+    timeline.addEventListener('wheel', onTimelineWheel, { passive: false });
+  }
+  if (zoomInBtn && typeof zoomInBtn.addEventListener === 'function') {
+    zoomInBtn.addEventListener('click', onZoomInClick);
+  }
+  if (zoomOutBtn && typeof zoomOutBtn.addEventListener === 'function') {
+    zoomOutBtn.addEventListener('click', onZoomOutClick);
+  }
+  if (zoomFitBtn && typeof zoomFitBtn.addEventListener === 'function') {
+    zoomFitBtn.addEventListener('click', onZoomFitClick);
+  }
+  if (waveformCanvas && typeof waveformCanvas.addEventListener === 'function') {
+    // v1.22.0 REQ-206: click/drag on the waveform seeks (thumb-like gesture).
+    waveformCanvas.addEventListener('pointerdown', onWavePointerDown);
+    waveformCanvas.addEventListener('pointermove', onWavePointerMove);
+    waveformCanvas.addEventListener('pointerup', onWavePointerUp);
+    waveformCanvas.addEventListener('pointercancel', onWavePointerCancel);
   }
   if (thumb && typeof thumb.addEventListener === 'function') {
     // v1.7.0 scrub handle: its own gesture surface. pointerdown stops
@@ -2470,6 +3408,22 @@ export function mountEditor(els, hooks) {
       timeline.removeEventListener('pointerup', onChipsPointerUp);
       timeline.removeEventListener('pointercancel', onChipsPointerCancel);
       timeline.removeEventListener('pointerleave', onChipsPointerLeave);
+      timeline.removeEventListener('wheel', onTimelineWheel);
+    }
+    if (zoomInBtn && typeof zoomInBtn.removeEventListener === 'function') {
+      zoomInBtn.removeEventListener('click', onZoomInClick);
+    }
+    if (zoomOutBtn && typeof zoomOutBtn.removeEventListener === 'function') {
+      zoomOutBtn.removeEventListener('click', onZoomOutClick);
+    }
+    if (zoomFitBtn && typeof zoomFitBtn.removeEventListener === 'function') {
+      zoomFitBtn.removeEventListener('click', onZoomFitClick);
+    }
+    if (waveformCanvas && typeof waveformCanvas.removeEventListener === 'function') {
+      waveformCanvas.removeEventListener('pointerdown', onWavePointerDown);
+      waveformCanvas.removeEventListener('pointermove', onWavePointerMove);
+      waveformCanvas.removeEventListener('pointerup', onWavePointerUp);
+      waveformCanvas.removeEventListener('pointercancel', onWavePointerCancel);
     }
     if (thumb && typeof thumb.removeEventListener === 'function') {
       thumb.removeEventListener('pointerdown', onThumbPointerDown);
@@ -2493,19 +3447,54 @@ export function mountEditor(els, hooks) {
       trimRegions.removeEventListener('dblclick', onTrimRegionDblClick);
     }
     if (disposeManual) disposeManual();
+    disarmKeyframeKeys(); // v1.22.0 REQ-201: K/Escape listener dies with the editor
     trimDrag = null;
     dropGhost(); // v1.15.0: no ghost residue past teardown
     regionDrag = null;
     downPos = null;
     hoverChip = null;
+    pendingKeyframe = null; // v1.22.0 REQ-201: no armed keyframe past teardown
+    rescanBusyId = null; // v1.22.0 REQ-202: no busy row past teardown
     disarmBlurGuard(); // v1.9.0: blur guard dies with the editor
     thumbDrag = null; // v1.9.0 residue rule: endThumbGesture minus the capture release
     disarmThumbNet(); // v1.8.0: a drag torn down mid-gesture leaves no net
     clearThumbPin();
     pendingBox = null;
+    panDrag = null; // v1.22.0 REQ-204: no pan drag past teardown
+    waveDrag = null; // v1.22.0 REQ-206: no waveform drag past teardown
+    peeking = false; // v1.22.0 REQ-205: a fresh mount never starts peeking
     if (ctx && canvas && canvas.width > 0) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
+  }
+
+  /**
+   * v1.22.0 REQ-202: flip the row Re-scan button's busy state ("…") for one
+   * track — main.js sets it when its pass starts and clears it (null) when
+   * the pass settles, then refreshes. No-op after destroy (a cleared editor
+   * has no rows to repaint; the next mount starts idle).
+   * @param {number | null} trackId Busy track id, or null to clear.
+   */
+  function setRescanBusy(trackId) {
+    if (closed) return;
+    rescanBusyId = Number.isFinite(trackId) ? trackId : null;
+    render();
+  }
+
+  /**
+   * v1.22.0 REQ-205: hold-to-peek — main.js wires the #peek-button hold
+   * gesture and the A key here. Idempotent (a repeated `true` from keyboard
+   * auto-repeat never restarts the draw); each transition redraws the
+   * preview IMMEDIATELY (the frame loop may be idle while paused), so press
+   * shows the RAW frame and release restores the redacted one in the same
+   * tick. No-op after destroy.
+   * @param {boolean} on True while the peek control is held.
+   */
+  function setPeek(on) {
+    const next = !!on;
+    if (peeking === next || closed) return;
+    peeking = next;
+    drawPreview();
   }
 
   /**
@@ -2523,5 +3512,5 @@ export function mountEditor(els, hooks) {
     };
   }
 
-  return { destroy, refresh: render, redraw, getGestureState };
+  return { destroy, refresh: render, redraw, getGestureState, setRescanBusy, setPeek };
 }

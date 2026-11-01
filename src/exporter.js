@@ -165,11 +165,15 @@ export { pixelateFrame };
  *     missing values resolve to the shared default 'normal' (×2 block size)
  *     inside redact.pixelStrengthMultiplier — preview and export land on the
  *     SAME multiplier (AC-04 shared-seam rule).
+ * @param {{text: string, corner: 'tl'|'tr'|'bl'|'br', opacity: number} | null}
+ *     [watermark] Normalized watermark (normalizeWatermark) drawn AFTER the
+ *     redaction mosaic on every frame (v1.22.0 REQ-133) — the overlay must
+ *     stay plain and legible, never pixelated with the faces. null → nothing.
  * @returns {{process: (sample: object) => OffscreenCanvas | HTMLCanvasElement,
  *            frameCanvas: OffscreenCanvas | HTMLCanvasElement,
  *            scratchCanvas: OffscreenCanvas | HTMLCanvasElement}}
  */
-function createBurnIn(tracks, width, height, stage, lockSize = false, strength) {
+function createBurnIn(tracks, width, height, stage, lockSize = false, strength, watermark = null) {
   const frameCanvas = createCanvas(width, height);
   const scratchCanvas = createCanvas(1, 1);
   const ctx = /** @type {CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D} */ (
@@ -177,6 +181,45 @@ function createBurnIn(tracks, width, height, stage, lockSize = false, strength) 
   );
   let knownW = width;
   let knownH = height;
+  const wm = normalizeWatermark(watermark);
+  // REQ-133: text is measured ONCE per canvas size (the font scales with the
+  // frame height), never per frame — the cache key is the frame height, which
+  // fully determines both the font px and the re-measure need.
+  let wmMeasuredH = -1;
+  let wmTextWidth = 0;
+
+  /**
+   * Draw the watermark overlay (REQ-133) in display space: 600-weight
+   * system-ui at 4% of the frame height, white at the configured opacity,
+   * inset 2% of the frame from the chosen corner's edges.
+   * @param {number} w Current frame width.
+   * @param {number} h Current frame height.
+   * @returns {void}
+   */
+  function drawWatermark(w, h) {
+    if (!wm) return;
+    const fontPx = Math.max(8, Math.round(h * 0.04));
+    const font = `600 ${fontPx}px system-ui`;
+    if (wmMeasuredH !== h) {
+      ctx.font = font;
+      wmTextWidth = Number(ctx.measureText?.(wm.text)?.width ?? 0);
+      wmMeasuredH = h;
+    } else {
+      ctx.font = font;
+    }
+    const mx = w * 0.02;
+    const my = h * 0.02;
+    const right = w - mx - wmTextWidth;
+    const top = my + fontPx; // baseline sits one font-height under the margin
+    const bottom = h - my;
+    const x = wm.corner === 'tl' || wm.corner === 'bl' ? mx : right;
+    const y = wm.corner === 'tl' || wm.corner === 'tr' ? top : bottom;
+    ctx.save();
+    ctx.globalAlpha = wm.opacity;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(wm.text, x, y);
+    ctx.restore();
+  }
 
   /**
    * @param {object} sample mediabunny VideoSample (timestamp in seconds;
@@ -202,6 +245,9 @@ function createBurnIn(tracks, width, height, stage, lockSize = false, strength) 
       // is upright display space, matching the display-oriented track boxes.
       sample.draw(ctx, 0, 0, w, h);
       pixelateFrame(ctx, tracks, sample.timestamp, { width: w, height: h }, { scratch: scratchCanvas, strength });
+      // REQ-133: the watermark renders AFTER pixelation (plain, legible —
+      // never mosaic-filtered with the redaction boxes).
+      drawWatermark(w, h);
       return frameCanvas;
     } catch (err) {
       // tracksAt density violation or renderer failure: wrap as ExportError so
@@ -215,6 +261,37 @@ function createBurnIn(tracks, width, height, stage, lockSize = false, strength) 
   }
 
   return { process, frameCanvas, scratchCanvas };
+}
+
+/**
+ * The legal watermark corners (REQ-133), in #watermark-corner select order.
+ * @type {Array<'tl'|'tr'|'bl'|'br'>}
+ */
+export const WATERMARK_CORNERS = ['tl', 'tr', 'bl', 'br'];
+
+/**
+ * Normalize the optional watermark settings (v1.22.0 REQ-133). PURE —
+ * returns a sanitized `{text, corner, opacity}` or **null** when no watermark
+ * should render (settings absent / text blank after trimming). An unknown
+ * corner falls back to 'br'; a non-finite or out-of-range opacity falls back
+ * to 0.5 (then clamped to [0, 1]). Exported so main.js wiring normalizes the
+ * UI values through the SAME rule the burn-in applies (one source of truth).
+ *
+ * @param {{text?: unknown, corner?: unknown, opacity?: unknown}} [raw]
+ * @returns {{text: string, corner: 'tl'|'tr'|'bl'|'br', opacity: number} | null}
+ */
+export function normalizeWatermark(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const text = String(src.text ?? '').trim();
+  if (!text) return null;
+  const corner = /** @type {typeof WATERMARK_CORNERS[number]} */ (
+    WATERMARK_CORNERS.includes(/** @type {any} */ (src.corner)) ? src.corner : 'br'
+  );
+  const opacityRaw = Number(src.opacity);
+  const opacity = Number.isFinite(opacityRaw)
+    ? Math.min(1, Math.max(0, opacityRaw))
+    : 0.5;
+  return { text, corner, opacity };
 }
 
 /**
@@ -804,7 +881,7 @@ async function runTrimmedExport({
         const { sf: segSf, outW: segOutW, outH: segOutH } = exportGeometry(
           settings.exportResolution, width, height,
         );
-        const burn = createBurnIn(scaleTracks(tracks, segSf), segOutW, segOutH, rung.stage, segSf !== 1, settings.pixelStrength);
+        const burn = createBurnIn(scaleTracks(tracks, segSf), segOutW, segOutH, rung.stage, segSf !== 1, settings.pixelStrength, normalizeWatermark(settings.watermark));
         // Same invariant as the single pass: NO `copy` override — the audio
         // track packet-copies within the segment window (REQ-017 / AC-08),
         // unless the user removed the audio track.
@@ -897,6 +974,7 @@ async function runTrimmedExport({
  *           exportResolution?: 'full'|'1080p'|'720p',
  *           removeAudio?: boolean,
  *           pixelStrength?: 'fine'|'normal'|'coarse'|'max',
+ *           watermark?: {text?: string, corner?: 'tl'|'tr'|'bl'|'br', opacity?: number},
  *           trims?: Array<{id?: number, start: number, end: number}>}} [opts.settings]
  *     `outputMode` 'stream' (default) stages into OPFS via chunked
  *     StreamTarget; 'buffer' holds the whole file in a BufferTarget (small
@@ -904,7 +982,12 @@ async function runTrimmedExport({
  *     probeLadder for `forceWebM`. v1.17.0 `pixelStrength` selects the
  *     pixelation block-size multiplier for the burn-in ('fine' ×1 preserves
  *     the v1.16 sizes; default 'normal' ×2; 'coarse' ×3; 'max' ×4) — honored
- *     identically by the preview seam (redact.pixelateFrame). v1.15.0
+ *     identically by the preview seam (redact.pixelateFrame). v1.22.0
+ *     REQ-133: optional `watermark` overlay — `text` (absent/blank → no
+ *     watermark), `corner` ('tl'|'tr'|'bl'|'br', invalid → 'br') and
+ *     `opacity` (0–1, default 0.5); normalized once per export via
+ *     normalizeWatermark and drawn plain AFTER the redaction mosaic on every
+ *     frame. v1.15.0
  *     REQ-126: non-empty `trims` switches to the multi-segment trimmed export
  *     — the output contains only the kept segments, concatenated with
  *     continuous timestamps; empty/undefined trims run the single-pass path
@@ -970,7 +1053,7 @@ export async function runExport(opts) {
       // processedWidth/Height hint the encoder.
       const { sf, outW, outH } = exportGeometry(settings.exportResolution, width, height);
       const exportTracks = scaleTracks(tracks, sf);
-      const burn = createBurnIn(exportTracks, outW, outH, rung.stage, sf !== 1, settings.pixelStrength);
+      const burn = createBurnIn(exportTracks, outW, outH, rung.stage, sf !== 1, settings.pixelStrength, normalizeWatermark(settings.watermark));
       let output;
       if (staging.kind === 'buffer') {
         output = new Output({ format: new rung.Format(), target: staging.target });

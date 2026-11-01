@@ -205,6 +205,7 @@ import {
   pixelateFrame,
   scaleTracks,
   exportGeometry,
+  normalizeWatermark,
 } from '../../src/exporter.js';
 import { dilate } from '../../src/redact.js';
 
@@ -225,8 +226,14 @@ function makeCtx(canvas) {
     restore: () => calls.push(['restore']),
     drawImage: (img, ...args) => calls.push(['drawImage', img, ...args]),
     fillRect: (x, y, w, h) => calls.push(['fillRect', x, y, w, h]),
+    // v1.22.0 REQ-133: the watermark path measures + fills text.
+    fillText: (text, x, y) => calls.push(['fillText', text, x, y]),
+    measureText: (text) => {
+      calls.push(['measureText', text]);
+      return { width: String(text).length * 10 };
+    },
   };
-  for (const key of ['imageSmoothingEnabled', 'fillStyle', 'strokeStyle']) {
+  for (const key of ['imageSmoothingEnabled', 'fillStyle', 'strokeStyle', 'font', 'globalAlpha']) {
     Object.defineProperty(ctx, key, {
       get: () => props[key],
       set: (v) => { props[key] = v; calls.push(['set', key, v]); },
@@ -581,6 +588,177 @@ describe('runExport — settings.pixelStrength flows into the burn-in (v1.17.0)'
 
   it("invalid pixelStrength falls back to 'normal' ×2 → scratch 5×5 (never throws, never ×1)", async () => {
     expect(await burnWithStrength({ pixelStrength: 'bogus' })).toEqual({ w: 5, h: 5 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.22.0 REQ-133 — watermark overlay (burn-in, AFTER pixelation)
+// ---------------------------------------------------------------------------
+
+describe('normalizeWatermark (v1.22.0 REQ-133)', () => {
+  it('keeps a trimmed text, a legal corner, and clamps opacity into [0, 1]', () => {
+    expect(normalizeWatermark({ text: '  CONFIDENTIAL ', corner: 'tl', opacity: 0.8 }))
+      .toEqual({ text: 'CONFIDENTIAL', corner: 'tl', opacity: 0.8 });
+    expect(normalizeWatermark({ text: 'x', corner: 'xx', opacity: 3 }))
+      .toEqual({ text: 'x', corner: 'br', opacity: 1 });
+    expect(normalizeWatermark({ text: 'x', corner: 'bl', opacity: -1 }))
+      .toEqual({ text: 'x', corner: 'bl', opacity: 0 });
+    expect(normalizeWatermark({ text: 'x' })).toEqual({ text: 'x', corner: 'br', opacity: 0.5 });
+  });
+
+  it('blank/absent text → null (no watermark at all)', () => {
+    expect(normalizeWatermark(undefined)).toBeNull();
+    expect(normalizeWatermark({})).toBeNull();
+    expect(normalizeWatermark({ text: '   ' })).toBeNull();
+    expect(normalizeWatermark({ text: '' })).toBeNull();
+  });
+});
+
+describe('runExport — watermark burn-in (v1.22.0 REQ-133)', () => {
+  /** One export with the given settings; drive ONE sample through process. */
+  async function burnWithWatermark(settings) {
+    const track = makeTrack({ keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]) });
+    let conv;
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      conv = new mb.Conversion(opts);
+      scriptExecute(conv, { onDone: () => conv.opts.video.process(fakeSample(0)) });
+      return conv;
+    });
+    await runExport({ input: fakeInput(), tracks: [track], settings });
+    return canvases[0].rec;
+  }
+
+  it('draws the watermark AFTER pixelation: white, 4% font, default 0.5 alpha, br corner', async () => {
+    const rec = await burnWithWatermark({
+      ...bufferSettings,
+      watermark: { text: 'CONFIDENTIAL', corner: 'br' },
+    });
+    const calls = rec.calls;
+    const fillIdx = calls.findIndex((c) => c[0] === 'fillText');
+    expect(fillIdx).toBeGreaterThan(-1);
+    // Draw order: the redaction mosaic's upscale (the LAST drawImage) must
+    // precede the text — the watermark stays plain and legible.
+    const lastDraw = calls.reduce(
+      (acc, c, i) => (c[0] === 'drawImage' ? i : acc),
+      -1,
+    );
+    expect(lastDraw).toBeGreaterThan(-1);
+    expect(fillIdx).toBeGreaterThan(lastDraw);
+    // Recording: 'CONFIDENTIAL'.length * 10 = 120; font 4% of 180 → 7 →
+    // min-clamped to 8; margin 2% of (320, 180) = (6.4, 3.6).
+    expect(calls[fillIdx][1]).toBe('CONFIDENTIAL');
+    expect(calls[fillIdx][2]).toBeCloseTo(193.6, 10); // 320 − 6.4 − 120
+    expect(calls[fillIdx][3]).toBeCloseTo(176.4, 10); // 180 − 3.6
+    expect(rec.props.font).toBe('600 8px system-ui');
+    expect(rec.props.globalAlpha).toBe(0.5); // spec default
+    expect(rec.props.fillStyle).toBe('#ffffff');
+    // The overlay brackets its state between save/restore — alpha never leaks.
+    expect(calls[fillIdx - 3]).toEqual(['save']);
+    expect(calls[fillIdx - 2]).toEqual(['set', 'globalAlpha', 0.5]);
+    expect(calls[fillIdx - 1]).toEqual(['set', 'fillStyle', '#ffffff']);
+    expect(calls[fillIdx + 1]).toEqual(['restore']);
+  });
+
+  it('positions the text per corner with the 2% frame margin', async () => {
+    const cases = [
+      ['tl', 6.4, 11.6],
+      ['tr', 193.6, 11.6],
+      ['bl', 6.4, 176.4],
+    ];
+    for (const [corner, x, y] of cases) {
+      canvases = []; // reset the created-canvas log between corners
+      const rec = await burnWithWatermark({
+        ...bufferSettings,
+        watermark: { text: 'CONFIDENTIAL', corner },
+      });
+      const fill = rec.calls.find((c) => c[0] === 'fillText');
+      expect(fill, `corner ${corner}`).toBeDefined();
+      expect(fill[2], `corner ${corner} x`).toBeCloseTo(x, 10);
+      expect(fill[3], `corner ${corner} y`).toBeCloseTo(y, 10);
+    }
+  });
+
+  it('absent/blank watermark → no text drawn at all', async () => {
+    const recAbsent = await burnWithWatermark({ ...bufferSettings });
+    expect(recAbsent.calls.some((c) => c[0] === 'fillText')).toBe(false);
+    expect(recAbsent.calls.some((c) => c[0] === 'measureText')).toBe(false);
+    canvases = [];
+    const recBlank = await burnWithWatermark({
+      ...bufferSettings,
+      watermark: { text: '   ', corner: 'br' },
+    });
+    expect(recBlank.calls.some((c) => c[0] === 'fillText')).toBe(false);
+  });
+
+  it('custom opacity rides through globalAlpha; text metrics measured ONCE per size', async () => {
+    const track = makeTrack({ keyframes: new Map([[0, { x: 100, y: 50, w: 40, h: 40 }]]) });
+    const s1 = fakeSample(0);
+    const s2 = fakeSample(0.1);
+    const s3 = fakeSample(0.2, { w: 640, h: 360 }); // mid-stream size change
+    let conv;
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      conv = new mb.Conversion(opts);
+      scriptExecute(conv, {
+        onDone: () => {
+          conv.opts.video.process(s1);
+          conv.opts.video.process(s2);
+          conv.opts.video.process(s3);
+        },
+      });
+      return conv;
+    });
+    await runExport({
+      input: fakeInput(),
+      tracks: [track],
+      settings: {
+        ...bufferSettings,
+        watermark: { text: 'DRAFT', corner: 'tl', opacity: 0.25 },
+      },
+    });
+    const rec = canvases[0].rec;
+    expect(rec.props.globalAlpha).toBe(0.25);
+    const fills = rec.calls.filter((c) => c[0] === 'fillText');
+    expect(fills).toHaveLength(3); // every frame carries the overlay
+    const measures = rec.calls.filter((c) => c[0] === 'measureText');
+    expect(measures).toHaveLength(2); // once for 180 px frames, once after the resize
+    expect(measures.map((m) => m[1])).toEqual(['DRAFT', 'DRAFT']);
+  });
+
+  it('settings.watermark reaches the TRIMMED path too (every segment burn-in)', async () => {
+    installOpfs();
+    const samples = [fakeSample(0.5), fakeSample(4.5)];
+    let sampleIdx = 0;
+    mb.Conversion.init.mockImplementation(async (opts) => {
+      const conv = new mb.Conversion(opts);
+      scriptExecute(conv, {
+        onDone: () => {
+          conv.opts.video.process(samples[sampleIdx]);
+          sampleIdx += 1;
+        },
+      });
+      return conv;
+    });
+    await runExport({
+      input: fakeTrimInput({ duration: 10 }),
+      tracks: [makeTrack({ keyframes: new Map([[0, { x: 10, y: 10, w: 30, h: 30 }]]) })],
+      settings: {
+        ...bufferSettings,
+        trims: [{ id: 1, start: 2, end: 4 }],
+        watermark: { text: 'CONFIDENTIAL', corner: 'bl', opacity: 0.7 },
+      },
+    });
+    expect(mb.Conversion.init).toHaveBeenCalledTimes(2); // kept segments [{0,2},{4,10}]
+    expect(sampleIdx).toBe(2); // both segment burn-ins ran
+    const frameCanvases = canvases.filter((c) => c.width === 320); // skip pixelation scratches (resized above 1×1 by applyPixelation)
+    expect(frameCanvases).toHaveLength(2); // one frame canvas per segment
+    for (const canvas of frameCanvases) {
+      const fill = canvas.rec.calls.find((c) => c[0] === 'fillText');
+      expect(fill).toBeDefined();
+      expect(fill[1]).toBe('CONFIDENTIAL');
+      expect(fill[2]).toBeCloseTo(6.4, 10);
+      expect(fill[3]).toBeCloseTo(176.4, 10);
+      expect(canvas.rec.props.globalAlpha).toBe(0.7);
+    }
   });
 });
 

@@ -227,6 +227,30 @@ function interpolateKeyframes(map) {
 }
 
 /**
+ * Mean detection confidence of a detection list (v1.22.0 REQ-202). PURE.
+ * Accepts Detection-like objects (`conf` field) or plain numbers; non-finite
+ * values are ignored. No finite value (manual tracks never carry detections,
+ * an empty list) → `undefined` — the UI omits the readout instead of showing
+ * an invented 0.
+ *
+ * @param {Array<import('./types.js').Detection | number> | null | undefined} detections
+ * @returns {number | undefined} Mean confidence in [0, 1], or undefined.
+ */
+export function avgConfidence(detections) {
+  const list = Array.isArray(detections) ? detections : [];
+  let sum = 0;
+  let n = 0;
+  for (const d of list) {
+    const c = typeof d === 'number' ? d : d?.conf;
+    if (Number.isFinite(c)) {
+      sum += c;
+      n += 1;
+    }
+  }
+  return n > 0 ? sum / n : undefined;
+}
+
+/**
  * Intersection-over-union of two xywh boxes (display space).
  *
  * @param {import('./types.js').Box} a
@@ -275,8 +299,10 @@ export function interpolate(track) {
 
 /**
  * Internal per-track record (not exported): `{ id, cls, state, hits, kf,
- * pred, firstT, lastT, keyframes }` — sparse keyframes (matched frames
- * only); dense materialization happens in `finalize()`.
+ * pred, firstT, lastT, confs, keyframes }` — sparse keyframes (matched
+ * frames only); dense materialization happens in `finalize()`. `confs`
+ * accumulates every feeding detection's confidence (v1.22.0 REQ-202) and
+ * finalizes into the track's mean `conf`.
  */
 
 /**
@@ -355,6 +381,7 @@ export class Tracker {
         tr.kf.update(dets[p.di].box);
         tr.hits += 1;
         tr.lastT = t;
+        tr.confs.push(dets[p.di].conf); // v1.22.0 REQ-202: per-track confidence sample
         tr.keyframes.set(t, { ...dets[p.di].box });
         if (tr.state === 'tentative' && tr.hits >= CONFIRM_HITS) tr.state = 'confirmed';
       }
@@ -381,6 +408,7 @@ export class Tracker {
           pred: null,
           firstT: t,
           lastT: t,
+          confs: [d.conf], // v1.22.0 REQ-202: per-track confidence samples
           keyframes: new Map([[t, { ...d.box }]]),
         };
         crec.live.push(tr);
@@ -424,6 +452,10 @@ export class Tracker {
         enabled: true,
         source: 'auto',
         style: 'pixelate', // REQ-101: auto-detected tracks default to pixelate
+        // v1.22.0 REQ-202: mean confidence of every detection that fed the
+        // track (row readout + the re-scan-span threshold basis). undefined
+        // only when no finite conf ever arrived — the UI omits it then.
+        conf: avgConfidence(tr.confs),
       });
     }
     return out;

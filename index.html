@@ -570,6 +570,33 @@
       outline-offset: 2px;
     }
 
+    /* ── Waveform strip (v1.22.0 REQ-206): decoded-audio peaks directly
+       under the timeline inside #stage-column — immediate scanability.
+       Hidden by default; the editor unhides it when peaks exist (silent
+       audio / decode failure keeps it hidden forever). Click/drag seeks
+       (same view mapping as the timeline), so touch-action: none. ── */
+    #waveform {
+      display: block;
+      width: 100%;
+      height: 44px;
+      padding: 0;
+      margin: -4px 0 0 0;
+      border: none;
+      border-radius: 6px;
+      background: var(--bg-inset);
+      cursor: pointer;
+      touch-action: none;
+    }
+    #waveform[hidden] { display: none; }
+
+    /* ── Hold-to-peek (v1.22.0 REQ-205): while held, the button lights up so
+       the RAW state is obvious even before the eyes reach the preview. ── */
+    #peek-button.peeking {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #0b0e12;
+    }
+
     /* ── Trim regions (v1.15.0 REQ-125): greyed deletion marks on the
        timeline. The layer sits between #track-chips and #playhead in DOM
        order (paint order = chips < regions < playhead < thumb); the layer
@@ -997,6 +1024,41 @@
     }
     #export-status { min-height: 1.2em; color: var(--ink); font-size: 12.5px; }
     #export-button { width: 100%; margin-top: 4px; }
+    /* v1.22.0 REQ-133: watermark controls (above #export-quality). */
+    #watermark-text {
+      flex: 1;
+      min-width: 0;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg-inset);
+      color: var(--ink-hi);
+      font-size: 12.5px;
+    }
+    #watermark-corner { flex: 1; min-width: 0; max-width: 60%; }
+    /* v1.22.0 REQ-137: the export summary card rows. */
+    #export-summary {
+      margin: 10px 0 4px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg-inset);
+      font-size: 12px;
+      color: var(--ink);
+    }
+    #export-summary .export-summary-title {
+      font-weight: 600;
+      color: var(--ink-hi);
+      margin-bottom: 4px;
+    }
+    #export-summary .export-summary-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      line-height: 1.5;
+    }
+    #export-summary .export-summary-row > span:first-child { color: var(--ink); flex: none; }
+    #export-summary .export-summary-row > span:last-child { text-align: right; overflow-wrap: anywhere; }
 
     /* v1.13.0: #model-attribution is its own full-width section BELOW the
        footer — same panel chrome as the rail panels. */
@@ -1226,6 +1288,15 @@
             <option value="4">4×</option>
           </select>
           <span id="transport-time" class="num">0:00.0 / 0:00.0</span>
+          <!-- v1.22.0 REQ-204: timeline view zoom (buttons + ctrl-wheel on the
+               strip; shift-drag pans). Fit resets the window to the whole
+               clip. The editor owns the gestures; main.js owns the window. -->
+          <button id="zoom-out" type="button" title="Zoom out the timeline view" aria-label="Zoom out timeline">🔍−</button>
+          <button id="zoom-in" type="button" title="Zoom in on the timeline view (ctrl+wheel zooms at the cursor)" aria-label="Zoom in timeline">🔍+</button>
+          <button id="zoom-fit" type="button" title="Fit the whole clip in the timeline view" aria-label="Fit timeline view">⤢ Fit</button>
+          <!-- v1.22.0 REQ-205: hold-to-peek — HOLD (pointer or the A key) to
+               see the RAW frame with no redactions; release restores. -->
+          <button id="peek-button" type="button" title="Hold to peek at the raw, unredacted frame (hold A)" aria-label="Hold to peek at raw frame">👁 Peek</button>
         </div>
         <p id="manual-hint" class="manual-hint">Missed a face? Pause (<kbd>Space</kbd>) and drag a box on the video — it becomes a solid redaction over the whole clip.</p>
         <!-- v1.15.1: trim mode belongs to the TIMELINE, not the redaction
@@ -1262,6 +1333,12 @@
           </div>
           <span id="timeline-duration" class="num timecode">0:00.0</span>
         </section>
+        <!-- v1.22.0 REQ-206: waveform strip — decoded-audio peaks, directly
+             under the timeline. Hidden until peaks decode (silent audio /
+             undecodable files keep it hidden forever — silent degrade).
+             main.js decodes lazily after the first review entry; the editor
+             renders bars through the view window and tints the played part. -->
+        <canvas id="waveform" hidden aria-label="Audio waveform — click or drag to seek"></canvas>
         <section id="below-timeline" aria-label="Threshold comparison and detected tracks">
           <!-- REQ-114 (v1.5.0): single-frame threshold comparison — one
                decode + one inference per model, five fixed-level panels.
@@ -1380,6 +1457,21 @@
 
         <details id="export-panel" class="panel-collapse" open aria-label="Export settings">
           <summary>Export</summary>
+          <!-- v1.22.0 REQ-133: optional watermark overlay — burned into the
+               export AFTER pixelation (plain, legible). Empty text = off. -->
+          <label class="slider-row" for="watermark-text">
+            <span class="slider-name">Watermark</span>
+            <input type="text" id="watermark-text" maxlength="40" placeholder="Optional text overlay" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="slider-row" for="watermark-corner">
+            <span class="slider-name">Corner</span>
+            <select id="watermark-corner">
+              <option value="tl">Top left</option>
+              <option value="tr">Top right</option>
+              <option value="bl">Bottom left</option>
+              <option value="br" selected>Bottom right</option>
+            </select>
+          </label>
           <label for="export-quality">Quality</label>
           <select id="export-quality">
             <option value="high" selected>High quality (larger file)</option>
@@ -1405,6 +1497,10 @@
             </span>
           </label>
           <p class="warn-note">Pixelation is burned into the exported video. The preview above is pixel-truthful: what you see is exactly what ships.</p>
+          <!-- v1.22.0 REQ-137: the export summary card — rendered by main.js
+               right before an export runs (informational estimate), kept
+               visible through completion. -->
+          <div id="export-summary" hidden></div>
           <div id="export-progress" class="progress-rail" role="progressbar" aria-valuemin="0" aria-valuemax="100">
             <div id="export-progress-bar" class="progress-bar"></div>
           </div>
@@ -1423,7 +1519,7 @@
 
   <footer id="keyboard-hints">
     <!-- v1.12.0 REQ-122: updated shortcut set (behavior wired by main.js). -->
-    <span class="hints"><kbd>←</kbd>/<kbd>→</kbd> jump 5s&ensp;·&ensp;<kbd>shift+←</kbd>/<kbd>shift+→</kbd> frame step&ensp;·&ensp;<kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>F</kbd> fullscreen&ensp;·&ensp;<kbd>M</kbd> mute&ensp;·&ensp;<kbd>B</kbd> draw box</span>
+    <span class="hints"><kbd>←</kbd>/<kbd>→</kbd> jump 5s&ensp;·&ensp;<kbd>shift+←</kbd>/<kbd>shift+→</kbd> frame step&ensp;·&ensp;<kbd>space</kbd> play/pause&ensp;·&ensp;<kbd>F</kbd> fullscreen&ensp;·&ensp;<kbd>M</kbd> mute&ensp;·&ensp;<kbd>B</kbd> draw box&ensp;·&ensp;<kbd>A</kbd> hold = peek raw</span>
     <span id="app-version" class="num"></span>
   </footer>
 

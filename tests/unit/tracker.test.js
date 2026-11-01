@@ -9,7 +9,7 @@
  * skeleton helper.
  */
 import { describe, it, expect } from 'vitest';
-import { Tracker, KalmanCV, iou, interpolate, TRACK_COLORS } from '../../src/tracker.js';
+import { Tracker, KalmanCV, iou, interpolate, TRACK_COLORS, avgConfidence } from '../../src/tracker.js';
 
 const FPS = 30;
 const frame = (f) => f / FPS;
@@ -474,5 +474,66 @@ describe('track style defaults (REQ-101: manual=solid, auto=pixelate)', () => {
     const b = tracker.finalize(0.05);
     expect(b).toEqual(a);
     expect(a[0].style).toBe('pixelate');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-track confidence (v1.22.0 REQ-202): avgConfidence + finalize conf
+// ---------------------------------------------------------------------------
+
+describe('avgConfidence (v1.22.0 REQ-202)', () => {
+  it('returns the mean of finite confidences', () => {
+    expect(avgConfidence([det(0, { x: 0, y: 0, w: 1, h: 1 }, 'face', 0.9),
+                          det(1, { x: 0, y: 0, w: 1, h: 1 }, 'face', 0.7)])).toBeCloseTo(0.8, 12);
+    // Plain numbers are accepted too (merge flows may pre-extract confs).
+    expect(avgConfidence([0.2, 0.4, 0.6])).toBeCloseTo(0.4, 12);
+  });
+
+  it('ignores non-finite values instead of poisoning the mean', () => {
+    expect(avgConfidence([0.9, NaN, undefined, 0.7])).toBeCloseTo(0.8, 12);
+    expect(avgConfidence([{ conf: NaN }, { conf: 'x' }])).toBeUndefined();
+  });
+
+  it('empty / non-array input → undefined (never an invented 0)', () => {
+    expect(avgConfidence([])).toBeUndefined();
+    expect(avgConfidence(null)).toBeUndefined();
+    expect(avgConfidence(undefined)).toBeUndefined();
+  });
+});
+
+describe('finalized auto tracks carry their mean confidence (v1.22.0 REQ-202)', () => {
+  it('conf is the mean of every detection that fed the track', () => {
+    const tracker = new Tracker();
+    tracker.update([det(0, { x: 0, y: 0, w: 40, h: 40 }, 'face', 0.9)], 0);
+    tracker.update([det(frame(1), { x: 1, y: 0, w: 40, h: 40 }, 'face', 0.7)], frame(1));
+    tracker.update([det(frame(2), { x: 2, y: 0, w: 40, h: 40 }, 'face', 0.2)], frame(2));
+
+    const [tr] = tracker.finalize(0);
+    expect(tr.source).toBe('auto');
+    expect(tr.conf).toBeCloseTo((0.9 + 0.7 + 0.2) / 3, 12);
+  });
+
+  it('a dropped tentative track never leaks a conf; keepTentative still carries one', () => {
+    const tracker = new Tracker();
+    tracker.update([det(0, { x: 0, y: 0, w: 40, h: 40 }, 'face', 0.55)], 0);
+    expect(tracker.finalize(0)).toHaveLength(0); // 1-hit tentative dropped
+
+    const kept = new Tracker().finalize(0, { keepTentative: true });
+    // No tracks at all here — the point is finalize never throws on a
+    // conf-less path; a kept tentative carries its single sample.
+    void kept;
+    const tracker2 = new Tracker();
+    tracker2.update([det(0, { x: 0, y: 0, w: 40, h: 40 }, 'face', 0.55)], 0);
+    const [tent] = tracker2.finalize(0, { keepTentative: true });
+    expect(tent.conf).toBeCloseTo(0.55, 12);
+  });
+
+  it('finalize stays idempotent with the conf field present', () => {
+    const tracker = new Tracker();
+    tracker.update([det(0, { x: 0, y: 0, w: 40, h: 40 }, 'face', 0.8)], 0);
+    tracker.update([det(frame(1), { x: 1, y: 0, w: 40, h: 40 }, 'face', 0.6)], frame(1));
+    const a = tracker.finalize(0.05);
+    const b = tracker.finalize(0.05);
+    expect(b).toEqual(a);
   });
 });

@@ -40,6 +40,13 @@
  * sane for 4K portrait. `settings.minSizePx` (0 = off) drops detections whose
  * display-space min(w, h) is below the threshold BEFORE the tracker
  * (`filterByMinSize`), so tiny false positives never become tracks.
+ *
+ * v1.22.0 (SPEC-VID-003 REQ-202): `rescanSpan(input, start, end,
+ * confThreshold, onSample, opts)` re-runs detection LIMITED to one span at a
+ * lowered confidence threshold — the per-track "Re-scan span" action's
+ * engine. Same loop shape, seams and close/cancel discipline as runAnalyze;
+ * it returns raw display-space detections for the caller's dedup merge
+ * (main.js mergeDetections) and never touches track state itself.
  */
 import { VideoSampleSink } from 'mediabunny';
 import { createDetectors, mergeTiles, tileGrid } from './detector.js';
@@ -452,4 +459,136 @@ export async function sampleFrameAt(input, t, maxSize = 0, seams = {}) {
   throw new Error(
     `sampleFrameAt: no video sample at t=${t}s (searched [${t}, ${Number(t) + 0.1}]s — past the end?).`,
   );
+}
+
+/**
+ * Re-run detection LIMITED to one span (v1.22.0 REQ-202, the track row's
+ * "Re-scan span" action): decode + infer every sample in [start, end] at the
+ * given (lowered) confidence threshold and return the raw detections for the
+ * caller to dedup-merge into the track (main.js mergeDetections — this
+ * function NEVER touches track state).
+ *
+ * Same loop shape and seams as runAnalyze (design §4.6): ONE reusable canvas
+ * (analysis-downscale aware — detections come back in native display px via
+ * the same ADR-9 rescale), `sample.close()` in a finally on every exit path,
+ * per-frame yield so cancellation stays alive, AbortSignal checked between
+ * frames (cancelled → partial detections returned, never thrown). Detector
+ * failures surface verbatim; `detectors.close()` runs on every exit path.
+ *
+ * `onSample` fires per processed frame ({frameCount, t, detections}) —
+ * progress is the caller's concern (the row button reads "…"); throttling
+ * is the caller's too.
+ *
+ * @param {object} input Mediabunny `Input` from ingest.openInput().
+ * @param {number} start Span start, seconds (clamped ≥ 0).
+ * @param {number} end Span end, seconds (must exceed start — an empty span
+ *     throws; the caller guards with the track's own span).
+ * @param {number} confThreshold Confidence gate for EVERY detect call
+ *     (REQ-202 wiring passes max(0.10, track.conf − 0.15)).
+ * @param {(evt: {frameCount: number, t: number,
+ *                detections: import('./types.js').Detection[]}) => void} [onSample]
+ *     Per-frame progress + detections callback.
+ * @param {{cls?: 'face'|'plate', meta?: import('./types.js').MediaMeta,
+ *          downscale?: 'full'|'1080p'|'720p', minSizePx?: number,
+ *          epPolicy?: string[], signal?: AbortSignal,
+ *          canvasFactory?: (width: number, height: number) =>
+ *            {canvas: object, ctx: object},
+ *          yieldNow?: () => Promise<void>}} [opts]
+ *     `cls` limits detection to one class (the wiring passes the track's
+ *     class; omitted → both); `meta` + `downscale` mirror runAnalyze's
+ *     REQ-117 analysis downscale (detections rescaled to display space);
+ *     `minSizePx` applies the REQ-120 filter (0 = off); `epPolicy` the ADR-5
+ *     override; `signal` cancellation; `canvasFactory`/`yieldNow` test seams.
+ * @returns {Promise<{detections: import('./types.js').Detection[],
+ *                    frameCount: number, cancelled: boolean}>}
+ *     Detections in DISPLAY space, sink-timestamp-stamped (ADR-3).
+ * @throws {Error} No primary video track, non-finite/empty span, or detector
+ *     failures (surfaced verbatim).
+ */
+export async function rescanSpan(
+  input,
+  start,
+  end,
+  confThreshold,
+  onSample,
+  opts = {},
+) {
+  const report = typeof onSample === 'function' ? onSample : () => {};
+  const makeCanvas = opts?.canvasFactory ?? defaultCanvasFactory;
+  const yield_ = opts?.yieldNow ?? defaultYieldNow;
+  const cls = opts?.cls;
+
+  const a = Number.isFinite(start) ? Math.max(start, 0) : NaN;
+  const b = Number.isFinite(end) ? end : NaN;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) {
+    throw new Error(`rescanSpan: empty span [${start}, ${end}] — nothing to re-scan.`);
+  }
+  const videoTrack = await input?.getPrimaryVideoTrack?.();
+  if (!videoTrack) throw new Error('rescanSpan: input has no primary video track.');
+
+  // Analysis raster: the runAnalyze REQ-117 rule — cap the LONG edge, infer
+  // on the scaled frame, rescale detections back to display space (ADR-9).
+  const width = Number(opts?.meta?.displayWidth) || Number(videoTrack.displayWidth) || 0;
+  const height = Number(opts?.meta?.displayHeight) || Number(videoTrack.displayHeight) || 0;
+  if (!(width > 0) || !(height > 0)) {
+    throw new Error('rescanSpan: no usable display size (meta or video track).');
+  }
+  const sf = scaleFactorFor(opts?.downscale, width, height);
+  const analysisW = sf === 1 ? width : Math.max(1, Math.round(width * sf));
+  const analysisH = sf === 1 ? height : Math.max(1, Math.round(height * sf));
+
+  const detectors = await createDetectors({ epPolicy: opts?.epPolicy });
+  try {
+    const sink = new VideoSampleSink(videoTrack);
+    const { ctx } = makeCanvas(analysisW, analysisH);
+    const faceOpts = { confThreshold };
+    const plateOpts = { confThreshold };
+
+    /** @type {import('./types.js').Detection[]} */
+    const detections = [];
+    let frameCount = 0;
+    let cancelled = false;
+
+    for await (const sample of sink.samples(a, b)) {
+      try {
+        if (opts?.signal?.aborted) {
+          cancelled = true;
+          break;
+        }
+        sample.draw(ctx, 0, 0, analysisW, analysisH);
+        const frame = ctx.getImageData(0, 0, analysisW, analysisH);
+        const t = sample.timestamp;
+        /** @type {import('./types.js').Detection[]} */
+        let kept = [];
+        if (cls !== 'plate') {
+          kept.push(...(await detectors.detectFace(frame, faceOpts)));
+        }
+        if (cls !== 'face') {
+          kept.push(...(await detectors.detectPlate(frame, plateOpts)));
+        }
+        // Scaled analysis space → native display px (ADR-9), then the
+        // REQ-120 min-size filter — identical to the main analyze loop.
+        if (sf !== 1) {
+          for (const d of kept) {
+            d.box = { x: d.box.x / sf, y: d.box.y / sf, w: d.box.w / sf, h: d.box.h / sf };
+          }
+        }
+        kept = filterByMinSize(kept, opts?.minSizePx ?? 0);
+        for (const d of kept) {
+          d.t = t; // sink timestamp is authoritative (detector t is a placeholder)
+          detections.push(d);
+        }
+        frameCount += 1;
+        report({ frameCount, t, detections: kept });
+        await yield_(); // P-5: Cancel stays alive
+      } finally {
+        // @MX:WARN memory discipline (same rule as runAnalyze): the decoded
+        // sample is closed on EVERY exit path — never retained.
+        sample.close();
+      }
+    }
+    return { detections, frameCount, cancelled };
+  } finally {
+    detectors.close();
+  }
 }

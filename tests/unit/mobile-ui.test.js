@@ -770,3 +770,59 @@ describe('v1.13.0: "Detection detail (analysis only)" wording', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.22.0 REQ-204/205/206: zoom controls, peek button, waveform strip
+// ---------------------------------------------------------------------------
+
+describe('v1.22.0 REQ-204: timeline zoom controls in the transport bar', () => {
+  it('ships #zoom-out / #zoom-in / #zoom-fit inside #transport-bar', () => {
+    const bar = HTML.slice(
+      HTML.indexOf('id="transport-bar"'),
+      HTML.indexOf('</div>', HTML.indexOf('id="transport-bar"')),
+    );
+    expect(bar).toContain('id="zoom-out"');
+    expect(bar).toContain('id="zoom-in"');
+    expect(bar).toContain('id="zoom-fit"');
+  });
+
+  it('the zoom buttons carry accessible names + zoom hints', () => {
+    expect(HTML).toContain('aria-label="Zoom in timeline"');
+    expect(HTML).toContain('aria-label="Zoom out timeline"');
+    expect(HTML).toContain('aria-label="Fit timeline view"');
+    expect(HTML).toContain('ctrl+wheel zooms at the cursor');
+  });
+});
+
+describe('v1.22.0 REQ-205: hold-to-peek button contract', () => {
+  it('ships #peek-button with a hold instruction', () => {
+    expect(HTML).toContain('id="peek-button"');
+    expect(HTML).toContain('Hold to peek at the raw, unredacted frame');
+  });
+
+  it('the .peeking held-state styling exists (accent fill)', () => {
+    expect(HTML).toContain('#peek-button.peeking');
+  });
+
+  it('the footer keyboard hints teach the A hold', () => {
+    expect(HTML).toContain('<kbd>A</kbd> hold = peek raw');
+  });
+});
+
+describe('v1.22.0 REQ-206: waveform strip contract', () => {
+  it('ships a hidden #waveform canvas between the timeline and #below-timeline', () => {
+    const start = HTML.indexOf('id="timeline"');
+    const wave = HTML.indexOf('id="waveform"');
+    const below = HTML.indexOf('id="below-timeline"');
+    expect(start).toBeGreaterThan(-1);
+    expect(wave).toBeGreaterThan(start);
+    expect(below).toBeGreaterThan(wave);
+    const tag = HTML.slice(wave - 8, wave + 120); // '<canvas ' is 8 chars
+    expect(tag).toMatch(/<canvas id="waveform"[^>]*hidden/);
+  });
+
+  it('the #waveform CSS rule exists (strip styling + hidden state)', () => {
+    expect(HTML).toContain('#waveform {');
+    expect(HTML).toContain('#waveform[hidden]');
+  });
+});

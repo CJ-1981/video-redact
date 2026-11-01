@@ -195,6 +195,11 @@
     }
     #header-actions .ha-group > * + * { border-left: 1px solid var(--line); }
     #header-actions .ha-group > *:hover { background: var(--bg-inset); }
+    /* v1.28.1: icons live in ::before (single source — never in the text),
+       so mobile glyph rules can't double them. */
+    #project-save::before { content: '\1F4BE  '; }
+    #project-load::before { content: '\1F4C2  '; }
+    #change-file::before { content: '\1F39B  '; }
     #header-actions .ha-primary { color: var(--accent); font-weight: 600; }
     #header-actions .ha-danger { color: var(--alert); }
     #header-actions .ha-danger:hover { background: var(--alert); color: #fff; }
@@ -1213,12 +1218,12 @@
          the far edge. Labels stay on desktop, glyph-only on mobile. -->
     <div id="header-actions">
       <div class="ha-group" id="ha-video">
-        <button id="change-file" type="button" class="ha-primary" hidden>🎬 Open video</button>
+        <button id="change-file" type="button" class="ha-primary" hidden>Open video</button>
         <button id="clear-file" type="button" class="ha-danger" hidden>✕ Clear</button>
       </div>
       <div class="ha-group" id="ha-project">
-        <button id="project-save" type="button" disabled title="Save settings, trims and tracks as a .vrproj project file">💾 Save</button>
-        <label id="project-load" for="project-load-input" title="Open a saved .vrproj project file">📂 Load<input type="file" id="project-load-input" accept=".vrproj,application/json" hidden /></label>
+        <button id="project-save" type="button" disabled title="Save settings, trims and tracks as a .vrproj project file">Save</button>
+        <label id="project-load" for="project-load-input" title="Open a saved .vrproj project file">Load<input type="file" id="project-load-input" accept=".vrproj,application/json" hidden /></label>
       </div>
       <button id="theme-toggle" type="button" class="ha-theme" title="Toggle light theme" aria-label="Toggle light theme" aria-pressed="false">☀️</button>
     </div>

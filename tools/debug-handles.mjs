@@ -19,6 +19,7 @@ const PORT = 8167;
 const BASE = `http://127.0.0.1:${PORT}`;
 const FIXTURE = join(ROOT, 'tests', 'fixtures', 'detectable.mp4');
 
+let failures = 0;
 const server = spawn(process.execPath, [resolve(ROOT, 'tools', 'serve.mjs')], {
   env: { ...process.env, HOST: '127.0.0.1', PORT: String(PORT) },
   stdio: 'ignore',
@@ -70,6 +71,25 @@ try {
   await page.click('#analyze-button');
   await page.waitForSelector('#stepper li#step-review[aria-current="step"]', { timeout: 240000 });
   console.log('--- review reached ---');
+  console.log('--- review reached ---');
+
+  // v1.28.1: header icon-duplication audit (field report on iOS)
+  const iconAudit = await page.evaluate(() => {
+    const out = [];
+    for (const sel of ['#project-save', '#project-load', '#change-file']) {
+      const el = document.querySelector(sel);
+      const textHasEmoji = /\p{Extended_Pictographic}/u.test(el.textContent);
+      const beforeContent = getComputedStyle(el, '::before').content;
+      out.push({ sel, text: el.textContent.trim().slice(0, 24), textHasEmoji, beforeContent });
+    }
+    return out;
+  });
+  console.log('HEADER ICON AUDIT:', JSON.stringify(iconAudit, null, 1));
+  for (const r of iconAudit) {
+    const ok = !r.textHasEmoji;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${r.sel}: text="${r.text}" ::before=${r.beforeContent}`);
+    if (!ok) failures += 1;
+  }
 
   for (const [sel, name] of [['#intake-resize', 'LEFT (intake)'], ['#rail-resize', 'RIGHT (rail)']]) {
     console.log(`\n=== ${name} handle ===`);
@@ -89,3 +109,5 @@ try {
   await browser.close();
   server.kill();
 }
+
+console.log(`SUMMARY: ${failures} failure(s)`);

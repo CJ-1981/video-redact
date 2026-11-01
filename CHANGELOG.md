@@ -52,6 +52,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 ### Changed
 - Header redesign: one cohesive action cluster — "🎬 Open video" + "✕ Clear" grouped as video actions, "💾 Save" / "📂 Load" grouped as project actions, theme toggle isolated at the far edge. Labels compact to glyphs on phones (with full titles on hover); touch targets ≥ 40px.
 
+## [1.28.1] — 2026-11-01
+
+### Fixed
+- iOS regression: duplicated 💾/📂/🎬 icons on the header action buttons — the emoji lived in the button text AND was re-added by the mobile glyph ::before rules. Icons now come solely from CSS ::before at every width; button text is plain. Verified via a computed-style audit: text has no emoji, ::before carries exactly one icon glyph.
+
 ## [1.20.1] — 2026-11-01
 
 ### Added

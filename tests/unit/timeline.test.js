@@ -325,6 +325,25 @@ describe('toggleTrack (immutable enabled flip)', () => {
     expect(tracks[0].enabled).toBe(true);
   });
 
+  it('NEVER reorders the array — the row keeps its list position (v1.40.2 field pin)', () => {
+    // Field report: "when track unchecked, it jumps to top of the tracks
+    // list, shall stay current position." The toggle is a position-preserving
+    // .map — pin the full id sequence through every toggle direction so no
+    // future refactor may sort/move tracks on enable/disable.
+    const tracks = [
+      makeTrack({ id: 3, cls: 'plate', label: 'Plate #3', color: '#A78BFA' }),
+      makeTrack({ id: 1 }),
+      makeTrack({ id: 2, cls: 'manual', label: 'Manual #2', color: '#E5484D' }),
+    ];
+    const off = toggleTrack(tracks, 1, false);
+    expect(off.map((t) => t.id)).toEqual([3, 1, 2]);
+    const on = toggleTrack(off, 3, true);
+    expect(on.map((t) => t.id)).toEqual([3, 1, 2]);
+    // and filterTracksByClass (the list renderer's input) preserves it too
+    expect(filterTracksByClass(on, 'all').map((t) => t.id)).toEqual([3, 1, 2]);
+    expect(filterTracksByClass(on, 'manual').map((t) => t.id)).toEqual([2]);
+  });
+
   it('round-trips both directions and works for unknown ids (content unchanged)', () => {
     const tracks = [makeTrack({ id: 1 })];
     const off = toggleTrack(tracks, 1, false);

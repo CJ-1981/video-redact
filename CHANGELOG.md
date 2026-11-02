@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.40.2] — 2026-11-02
+
+### Fixed
+- Track-row order is now a pinned contract: unchecking/re-checking a track can never move its row in the Tracks list (field report: "when track unchecked, it jumps to top of the tracks list, shall stay current position"). Exhaustive investigation could NOT reproduce a jump — the toggle is a position-preserving map (`toggleTrack`), the list renderer appends in array order, and the class filter preserves order; a 5-row probe exercised checkbox, timeline double-click and filtered surfaces across every direction with stable order throughout. The behavior the report expects is now locked by a unit pin (id sequence through toggle round-trips + filter) and a committed probe (`tools/debug-track-order.mjs`) so any future refactor that sorts or moves tracks on enable/disable fails the suite. If a jump is still seen in the field, the probe's exact steps reproduce the evidence needed.
+
 ## [1.40.1] — 2026-11-02
 
 ### Changed

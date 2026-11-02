@@ -441,14 +441,16 @@ describe('nms (greedy by score)', () => {
   });
 });
 
-describe('parsePlateRows (§4.3 — letterboxed rows, graph NMS, conf 0.25)', () => {
+describe('parsePlateRows (§4.3 — letterboxed rows, graph NMS, explicit conf)', () => {
   it('filters, un-letterboxes, converts to display-space Boxes', () => {
     const rows = new Float32Array([
       100, 240, 200, 280, 0, 0.9,  // → (200, 200, 200, 80)
       0, 0, 10, 10, 0, 0.2,        // filtered (< 0.25)
       300, 300, 400, 360, 3, 0.3,  // → (600, 320, 200, 120)
     ]);
-    const dets = parsePlateRows(rows, [3, 6], GEOM_1280x720);
+    // explicit 0.25: the row-structure assertions are independent of
+    // DEFAULT_CONF_PLATE (0.6 since v1.40.1 — the 0.2/0.3 rows would filter)
+    const dets = parsePlateRows(rows, [3, 6], GEOM_1280x720, { confThreshold: 0.25 });
     expect(dets).toHaveLength(2);
     expect(dets[0].box).toEqual({ x: 200, y: 200, w: 200, h: 80 });
     expect(dets[0].cls).toBe('plate');
@@ -463,13 +465,15 @@ describe('parsePlateRows (§4.3 — letterboxed rows, graph NMS, conf 0.25)', ()
       100, 240, 200, 280, 0, 0.9,
       110, 250, 190, 270, 0, 0.5, // ~90% IoU with row 0 — graph already NMS'd
     ]);
-    expect(parsePlateRows(rows, [2, 6], GEOM_1280x720)).toHaveLength(2);
+    expect(parsePlateRows(rows, [2, 6], GEOM_1280x720, { confThreshold: 0.25 })).toHaveLength(2);
   });
 
   it('honors a custom confThreshold', () => {
     const rows = new Float32Array([0, 0, 10, 10, 0, 0.3]);
     expect(parsePlateRows(rows, [1, 6], GEOM_1280x720, { confThreshold: 0.5 })).toHaveLength(0);
-    expect(parsePlateRows(rows, [1, 6], GEOM_1280x720)).toHaveLength(1);
+    // the DEFAULT is 0.6 now (v1.40.1) — a 0.3 row no longer passes it
+    expect(parsePlateRows(rows, [1, 6], GEOM_1280x720)).toHaveLength(0);
+    expect(parsePlateRows(rows, [1, 6], GEOM_1280x720, { confThreshold: 0.25 })).toHaveLength(1);
   });
 });
 
@@ -675,7 +679,7 @@ describe('createDetectors (mocked ORT — EP ladder, env pin, AC-17 fallback)', 
   it('detectPlate: parses end-to-end rows [1,N,6] into display-space plate Detections', async () => {
     const detectors = await createDetectors();
     const frame = { data: new Uint8ClampedArray(1280 * 720 * 4), width: 1280, height: 720 };
-    const dets = await detectors.detectPlate(frame);
+    const dets = await detectors.detectPlate(frame, { confThreshold: 0.25 });
     expect(dets).toHaveLength(2); // 0.2-score row filtered, NO extra NMS
     expect(dets[0].box).toEqual({ x: 200, y: 200, w: 200, h: 80 });
     expect(dets[0]).toMatchObject({ classId: 0, cls: 'plate', pass: 'full' });
@@ -714,9 +718,10 @@ describe('createDetectors — per-call confThreshold overrides (REQ-113)', () =>
     detectors.close();
   });
 
-  it('detectPlate honors opts.confThreshold; the default stays 0.25', async () => {
+  it('detectPlate honors opts.confThreshold; the default is 0.6 (v1.40.1)', async () => {
     const detectors = await createDetectors();
-    expect(await detectors.detectPlate(frame())).toHaveLength(2); // pre-1.5.0 behavior
+    expect(await detectors.detectPlate(frame())).toHaveLength(1); // only the 0.9 row clears 0.6
+    expect(await detectors.detectPlate(frame(), { confThreshold: 0.25 })).toHaveLength(2); // pre-1.40.1 default
     expect(await detectors.detectPlate(frame(), { confThreshold: 0.5 })).toHaveLength(1);
     expect(await detectors.detectPlate(frame(), { confThreshold: 0.15 })).toHaveLength(3); // 0.2 row back
     expect(await detectors.detectPlate(frame(), { confThreshold: 0.95 })).toHaveLength(0);

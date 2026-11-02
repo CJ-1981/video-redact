@@ -417,7 +417,7 @@ describe('main-wiring: threshold compare view model (v1.5.0 REQ-113/114)', () =>
 
   it('slider ranges match REQ-113 (face 0.10–0.90, plate 0.05–0.90, step 0.05, baked defaults)', () => {
     expect(main.THRESHOLD_FACE_RANGE).toEqual({ min: 0.1, max: 0.9, step: 0.05, default: 0.6 });
-    expect(main.THRESHOLD_PLATE_RANGE).toEqual({ min: 0.05, max: 0.9, step: 0.05, default: 0.25 });
+    expect(main.THRESHOLD_PLATE_RANGE).toEqual({ min: 0.05, max: 0.9, step: 0.05, default: 0.6 });
   });
 
   it('buildThresholdPanels counts faces/plates at or above each level', () => {
@@ -506,10 +506,10 @@ describe('main-wiring: CLEAR transition (v1.6.0 clear-all)', () => {
 });
 
 describe('main-wiring: DEFAULT_SETTINGS factory (v1.6.0)', () => {
-  it('returns the baked defaults: face 0.60, plate 0.25, dashcam off, plateStride unset', () => {
+  it('returns the baked defaults: face 0.60, plate 0.60 (v1.40.1), dashcam off, plateStride unset', () => {
     expect(main.DEFAULT_SETTINGS()).toEqual({
       confFace: 0.6,
-      confPlate: 0.25,
+      confPlate: 0.6,
       dashcamMode: false,
       detectFace: true, // v1.39.0 per-class detector toggles
       detectPlate: true,
@@ -525,7 +525,7 @@ describe('main-wiring: DEFAULT_SETTINGS factory (v1.6.0)', () => {
     a.dashcamMode = true;
     expect(main.DEFAULT_SETTINGS()).toEqual({
       confFace: 0.6,
-      confPlate: 0.25,
+      confPlate: 0.6,
       dashcamMode: false,
       detectFace: true, // v1.39.0 per-class detector toggles
       detectPlate: true,

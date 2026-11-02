@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.40.1] — 2026-11-02
+
+### Changed
+- The Plate detection-sensitivity default is now **0.60**, matching Face (field request: "make plate threshold default 0.60 as well"). The slider ships at 0.60, `DEFAULT_CONF_PLATE` is 0.6, and the pre-1.5.0 baked 0.25 gate is gone. Existing saved projects/autosaves carrying an explicit plate threshold are untouched — only the default moved. Lower the slider if 0.60 misses plates on your footage.
+
 ## [1.40.0] — 2026-11-02
 
 ### Fixed

@@ -319,7 +319,7 @@ describe('configurable thresholds (REQ-113) — settings.confFace/confPlate reac
     }
   });
 
-  it('omitted settings pass confThreshold: undefined (detector defaults 0.6 / 0.25 apply)', async () => {
+  it('omitted settings pass confThreshold: undefined (detector defaults 0.6 / 0.6 apply)', async () => {
     installSink([0]);
 
     await runAnalyze(baseOpts({}));

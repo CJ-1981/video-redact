@@ -899,7 +899,7 @@ export const THRESHOLD_LEVELS = [0.15, 0.3, 0.45, 0.6, 0.75];
 export const THRESHOLD_FACE_RANGE = { min: 0.1, max: 0.9, step: 0.05, default: 0.6 };
 
 /** Plate sensitivity slider bounds (REQ-113): 0.05–0.90 step 0.05, default 0.25. */
-export const THRESHOLD_PLATE_RANGE = { min: 0.05, max: 0.9, step: 0.05, default: 0.25 };
+export const THRESHOLD_PLATE_RANGE = { min: 0.05, max: 0.9, step: 0.05, default: 0.6 };
 
 /** Compare-panel canvas width as a fraction of the analyze panel width. */
 export const THRESHOLD_PANEL_FRACTION = 0.3;

@@ -30,7 +30,7 @@
  *
  * Plate (`yolo-v9-t-640-license-plates-end2end.onnx`, end-to-end):
  *   • Output rows: [x1, y1, x2, y2, class_id, score] in LETTERBOXED coords.
- *   • Filter score ≥ 0.25 (conf threshold).
+ *   • Filter score ≥ DEFAULT_CONF_PLATE (0.6 since v1.40.1).
  *   • Un-letterbox each row: v' = (v − pad) / ratio (v-pad per axis: x by
  *     horizontal pad, y by vertical pad), then convert (x1,y1,x2,y2) → Box.
  *   • No JS-side NMS — NMS is graph-embedded (end-to-end export).
@@ -108,14 +108,15 @@ const ORT_VERSION = '1.31.1';
 export const ORT_WASM_PATHS = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 
 /**
- * Default confidence thresholds (REQ-113): face 0.6, plate 0.25 — the values
+ * Default confidence thresholds (REQ-113): face 0.6, plate 0.6 (0.25 before
+ * v1.40.1) — the values
  * baked into every call before v1.5.0, preserved as defaults so existing call
  * sites behave identically. Per-call override: `detectFace(frame,
  * { confThreshold })` / `detectPlate(frame, { confThreshold })`; the analyze
  * pass forwards `settings.confFace` / `settings.confPlate` (analyze.js).
  */
 export const DEFAULT_CONF_FACE = 0.6;
-export const DEFAULT_CONF_PLATE = 0.25;
+export const DEFAULT_CONF_PLATE = 0.6;
 
 /**
  * Greedy non-maximum suppression.
@@ -402,12 +403,12 @@ export function decodeYunetOutputs(outputs, shapes, t, opts = {}) {
  * @param {ArrayLike<number>} rows Flat row-major tensor data.
  * @param {number[]} dims Tensor dims `[n, 6|7]`.
  * @param {{ratio: number, padX: number, padY: number}} t Letterbox transform.
- * @param {{confThreshold?: number}} [opts] Default: 0.25.
+ * @param {{confThreshold?: number}} [opts] Default: DEFAULT_CONF_PLATE (0.6).
  * @returns {Array<{box: import('./types.js').Box, conf: number, classId: number}>}
  *     Display space; `cls: 'plate'` on every detection.
  */
 export function parsePlateRows(rows, dims, t, opts = {}) {
-  const confThreshold = opts.confThreshold ?? 0.25;
+  const confThreshold = opts.confThreshold ?? DEFAULT_CONF_PLATE;
   const n = dims[0];
   const stride = dims.length > 1 ? dims[1] : 7;
   // 7-wide rows carry a leading batch index; 6-wide rows do not. The score

@@ -1495,7 +1495,8 @@
           <!-- REQ-113 (v1.5.0): configurable detection confidence thresholds.
                The slider values flow into settings.confFace / settings.confPlate
                on every analyze / re-analyze (defaults = the pre-1.5.0 baked
-               gates: face 0.60, plate 0.25). -->
+               gates: face 0.60, plate 0.60 — v1.40.1 raised the plate
+               default to match face; pre-1.5.0 it was baked 0.25). -->
           <details id="sensitivity" class="panel-collapse" open>
             <summary>Detection settings</summary>
             <div role="group" aria-label="Detection sensitivity">
@@ -1518,8 +1519,8 @@
               <input type="checkbox" id="detect-plate-toggle" class="detect-toggle" checked title="Detect license plates this pass — uncheck to skip the plate model entirely (faster analysis)" aria-label="Detect license plates" />
               <label class="slider-row" for="conf-plate">
                 <span class="slider-name">Plate</span>
-                <input type="range" id="conf-plate" min="0.05" max="0.90" step="0.05" value="0.25" />
-                <output id="conf-plate-out" for="conf-plate">0.25</output>
+                <input type="range" id="conf-plate" min="0.05" max="0.90" step="0.05" value="0.60" />
+                <output id="conf-plate-out" for="conf-plate">0.60</output>
               </label>
             </div>
 

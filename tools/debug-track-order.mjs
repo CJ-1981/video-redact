@@ -135,6 +135,31 @@ try {
     `scrollTop ${atBottom} → ${after.st}`,
   );
   check('bottom row stays at the bottom', after.bottomRow === '5', `last=${after.bottomRow}`);
+
+  // ── v1.42.0: the tracks-resize-handle adjusts the list height ──────────
+  const handleBox = await page.evaluate(() => {
+    const h = document.querySelector('#tracks-resize-handle');
+    h.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const r = h.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  await page.waitForTimeout(150);
+  const h0 = await page.evaluate(() => document.querySelector('#track-list').getBoundingClientRect().height);
+  await page.mouse.move(handleBox.x, handleBox.y);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x, handleBox.y + 120, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const h1 = await page.evaluate(() => ({
+    h: document.querySelector('#track-list').getBoundingClientRect().height,
+    aria: document.querySelector('#tracks-resize-handle').getAttribute('aria-valuenow'),
+  }));
+  check('tracks handle drag-down grows the list',
+    h1.h > h0 + 80, `height ${Math.round(h0)} → ${Math.round(h1.h)} (aria ${h1.aria})`);
+  await page.locator('#tracks-resize-handle').dblclick();
+  await page.waitForTimeout(250);
+  const h2 = await page.evaluate(() => document.querySelector('#track-list').getBoundingClientRect().height);
+  check('double-click resets the list height', Math.abs(h2 - 240) < 2, `height=${Math.round(h2)}`);
   console.log(failures === 0 ? 'SUMMARY: PASS' : `SUMMARY: ${failures} failure(s)`);
   process.exitCode = failures === 0 ? 0 : 1;
 } finally { await browser.close(); server.kill(); }

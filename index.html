@@ -482,6 +482,22 @@
       user-select: none;
       color: var(--ink);
     }
+    /* v1.42.0: tracks-panel bottom handle — same grip as the stage's. */
+    #tracks-resize-handle {
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 12px;
+      margin: -2px 0 2px;
+      border-radius: 7px;
+      cursor: ns-resize;
+      touch-action: none;
+      user-select: none;
+      color: var(--ink);
+    }
+    #tracks-resize-handle .grip { font-size: 11px; letter-spacing: 2px; }
+    #tracks-resize-handle:hover { color: var(--accent); }
     #stage-resize-handle .grip {
       font-size: 11px;
       line-height: 1;
@@ -1536,6 +1552,12 @@
             <ul id="track-list"></ul>
             <p id="track-list-empty">No tracks yet — run Analyze, then click a chip or row to toggle redaction.</p>
           </details>
+          <!-- v1.42.0: drag the tracks panel's bottom edge to resize the list
+               (same pattern as the stage/rail handles — double-click resets,
+               ArrowUp/Down steps on focus). Session-only like the others. -->
+          <div id="tracks-resize-handle" role="separator" aria-orientation="horizontal" tabindex="0" aria-valuemin="120" aria-valuemax="600" aria-valuenow="240" aria-label="Resize track list height" title="Drag to resize the track list — double-click resets">
+            <span class="grip" aria-hidden="true">⋮⋮</span>
+          </div>
 
           <details id="threshold-compare" class="panel-collapse" open role="group" aria-label="Single-frame threshold comparison">
             <summary>Compare thresholds</summary>

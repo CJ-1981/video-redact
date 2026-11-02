@@ -513,6 +513,49 @@ export function dragStageHeight(startY, clientY, startH) {
 }
 
 // ---------------------------------------------------------------------------
+// Track-list height model (pure; v1.42.0 — #tracks-resize-handle)
+// ---------------------------------------------------------------------------
+
+/** Lower clamp bound for the scrollable track list, CSS px. */
+export const TRACK_LIST_MIN_HEIGHT_PX = 120;
+/** Upper clamp bound for the scrollable track list, CSS px. */
+export const TRACK_LIST_MAX_HEIGHT_PX = 600;
+/** Default / double-click-reset track list height (matches the CSS). */
+export const DEFAULT_TRACK_LIST_HEIGHT_PX = 240;
+/** Keyboard step (ArrowUp / ArrowDown on the focused handle), CSS px. */
+export const TRACK_LIST_HEIGHT_STEP_PX = 24;
+
+/**
+ * Clamp a desired track-list height to the v1.42.0 bounds as an integer.
+ * PURE. Non-finite `px` degrades to the default (240) before clamping.
+ *
+ * @param {number} px Desired height, CSS px.
+ * @returns {number} Clamped integer height.
+ */
+export function clampTrackListHeight(px) {
+  if (!Number.isFinite(px)) return DEFAULT_TRACK_LIST_HEIGHT_PX;
+  return Math.min(
+    Math.max(Math.round(px), TRACK_LIST_MIN_HEIGHT_PX),
+    TRACK_LIST_MAX_HEIGHT_PX,
+  );
+}
+
+/**
+ * Step the track-list height by `dir` steps (PURE). dir > 0 grows (more rows
+ * visible), dir < 0 shrinks. Non-finite inputs degrade to the default.
+ *
+ * @param {number} px Current height, CSS px.
+ * @param {number} dir Step count (ArrowUp = −1 shrink? no: ArrowUp GROWS the
+ *     list — the handle sits at the panel's BOTTOM, so "up" = taller).
+ * @returns {number} Stepped + clamped height.
+ */
+export function nextTrackListHeight(px, dir) {
+  const from = Number.isFinite(px) ? px : DEFAULT_TRACK_LIST_HEIGHT_PX;
+  const d = Number.isFinite(dir) ? dir : 0;
+  return clampTrackListHeight(from + d * TRACK_LIST_HEIGHT_STEP_PX);
+}
+
+// ---------------------------------------------------------------------------
 // Rail-split width model (pure; v1.12.0 REQ-118)
 // ---------------------------------------------------------------------------
 
@@ -2338,6 +2381,7 @@ export async function mountApp(
     overlayCanvas: /** @type {HTMLCanvasElement | null} */ ($('overlay-canvas')),
     fullscreenButton: /** @type {HTMLButtonElement | null} */ ($('preview-fullscreen')),
     stageResizeHandle: /** @type {HTMLElement | null} */ ($('stage-resize-handle')),
+    tracksResizeHandle: /** @type {HTMLElement | null} */ ($('tracks-resize-handle')),
     transportStart: /** @type {HTMLButtonElement | null} */ ($('transport-start')),
     transportBack: /** @type {HTMLButtonElement | null} */ ($('transport-back')),
     transportPlay: /** @type {HTMLButtonElement | null} */ ($('transport-play')),
@@ -5700,6 +5744,72 @@ export async function mountApp(
       // frame-step the video in review/done (the handle is not a button).
       e.stopPropagation();
       applyStageHeight(nextStageHeight(stageHeight, step, stageViewportH(), stageReservedHeight()));
+    });
+  }
+
+  // --- Track-list resize (v1.42.0 #tracks-resize-handle) -----------------------
+  //
+  // Same pattern as the stage/rail handles above: pointer capture drag
+  // (drag DOWN = taller), double-click reset, ArrowUp/ArrowDown ±24 px on
+  // the focused handle. Session-only like the others (no localStorage).
+
+  let trackListHeight = DEFAULT_TRACK_LIST_HEIGHT_PX;
+
+  /** Single track-list mutation path: clamp → max-height on #track-list
+   *  (the CSS fallback stays 240 for unbuilt/dev parity). */
+  function applyTrackListHeight(px) {
+    trackListHeight = clampTrackListHeight(px);
+    if (els.trackList) els.trackList.style.maxHeight = `${trackListHeight}px`;
+    if (els.tracksResizeHandle) {
+      els.tracksResizeHandle.setAttribute('aria-valuenow', String(trackListHeight));
+    }
+  }
+
+  applyTrackListHeight(trackListHeight); // mount parity with the CSS default
+
+  const tracksHandle = els.tracksResizeHandle;
+  if (tracksHandle) {
+    /** Live pointer drag: pointerdown anchor + height at anchor. */
+    let tlDrag = /** @type {{startY: number, startH: number} | null} */ (null);
+
+    tracksHandle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      tlDrag = { startY: e.clientY, startH: trackListHeight };
+      try {
+        tracksHandle.setPointerCapture(e.pointerId);
+      } catch {
+        /* detached handle — capture is best-effort */
+      }
+      e.preventDefault();
+    });
+    tracksHandle.addEventListener('pointermove', (e) => {
+      if (!tlDrag) return;
+      // The handle IS the panel's bottom edge — drag DOWN = taller
+      // (dragStageHeight is the same follow-the-pointer math as the stage).
+      applyTrackListHeight(dragStageHeight(tlDrag.startY, e.clientY, tlDrag.startH));
+    });
+    const endTlDrag = (e) => {
+      if (!tlDrag) return;
+      tlDrag = null;
+      try {
+        tracksHandle.releasePointerCapture(e.pointerId);
+      } catch {
+        /* never captured or already released */
+      }
+      applyTrackListHeight(trackListHeight);
+      if (tracksHandle.blur) tracksHandle.blur(); // REG-2: keep shortcuts live
+    };
+    tracksHandle.addEventListener('pointerup', endTlDrag);
+    tracksHandle.addEventListener('pointercancel', endTlDrag);
+    tracksHandle.addEventListener('dblclick', () => {
+      applyTrackListHeight(DEFAULT_TRACK_LIST_HEIGHT_PX); // double-click reset
+    });
+    tracksHandle.addEventListener('keydown', (e) => {
+      const step = e.key === 'ArrowUp' ? 1 : e.key === 'ArrowDown' ? -1 : 0;
+      if (!step) return;
+      e.preventDefault(); // the handle scrolls nothing itself
+      e.stopPropagation();
+      applyTrackListHeight(nextTrackListHeight(trackListHeight, step));
     });
   }
 

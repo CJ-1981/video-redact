@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.42.0] — 2026-11-02
+
+### Added
+- **Tracks-panel resize handle** (field request): drag the ⋮⋮ handle at the bottom of the Tracks panel to adjust the track-list height — more rows visible for long detection lists, less for short ones. Same pattern as the stage/rail handles: drag down = taller, double-click resets to 240 px, ArrowUp/Down ±24 px on the focused handle, clamped 120–600 px. Session-only like the other handles.
+
 ## [1.41.3] — 2026-11-02
 
 ### Added

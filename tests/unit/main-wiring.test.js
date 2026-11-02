@@ -4024,6 +4024,35 @@ describe('v1.39.2: the analyze counter reads "N / M (−K trimmed)" — no doubl
   });
 });
 
+describe('v1.42.0: track-list height helpers (#tracks-resize-handle)', () => {
+  it('clamps to the 120–600 bounds as integers; garbage → the 240 default', () => {
+    expect(main.clampTrackListHeight(240)).toBe(240);
+    expect(main.clampTrackListHeight(80)).toBe(120);
+    expect(main.clampTrackListHeight(9999)).toBe(600);
+    expect(main.clampTrackListHeight(240.7)).toBe(241);
+    expect(main.clampTrackListHeight(Number.NaN)).toBe(240);
+    expect(main.clampTrackListHeight(undefined)).toBe(240);
+  });
+
+  it('steps ±24 px per ArrowUp/ArrowDown and clamps', () => {
+    expect(main.nextTrackListHeight(240, 1)).toBe(264);
+    expect(main.nextTrackListHeight(240, -1)).toBe(216);
+    expect(main.nextTrackListHeight(590, 1)).toBe(600);
+    expect(main.nextTrackListHeight(130, -1)).toBe(120);
+    expect(main.nextTrackListHeight(Number.NaN, 1)).toBe(264);
+  });
+
+  it('markup: the handle sits between #tracks-panel and the compare panel', () => {
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+    const panelEnd = html.indexOf('</details>', html.indexOf('id="tracks-panel"'));
+    const handleAt = html.indexOf('id="tracks-resize-handle"');
+    const compareAt = html.indexOf('id="threshold-compare"');
+    expect(handleAt).toBeGreaterThan(panelEnd);
+    expect(handleAt).toBeLessThan(compareAt);
+    expect(html).toContain('aria-label="Resize track list height"');
+  });
+});
+
 describe('v1.41.0: triage aids — class groups + review-queue button', () => {
   const g = wave3Globals();
 

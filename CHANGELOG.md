@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.40.3] — 2026-11-02
+
+### Fixed
+- **Tracks list no longer snaps to the top when a track is unchecked** (field report with an 11+ plate-track list). The renderer moved EVERY row on every render; the pluck-and-reinsert transiently shrank the scrollable content and the browser clamped `scrollTop` — a scrolled list jumped to the top on the first toggle. Rows are now placed with an anchored walk: a row already in its slot is left completely alone (zero DOM moves on the common toggle path — toggling never reorders), so the scroll position survives.
+- **Zoomed-timeline scrolling no longer "feels behind"**: the scroll⇄view glue treated every scrollbar drag as a view change to glide back to — each re-render could snap `scrollLeft` to a stale window mid-drag. Views derived from the strip's own scroll event are now marked as user-owned and skipped by the sync-back; zoom/fit still glide the scroll position.
+
 ## [1.40.2] — 2026-11-02
 
 ### Fixed

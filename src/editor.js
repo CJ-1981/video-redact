@@ -1626,7 +1626,16 @@ export function mountEditor(els, hooks) {
   // viewEnd); zoom/pan/fit interactions emit the NEXT window through this
   // optional hook — absent → the editor renders through whatever view the
   // host supplies but can never change it.
-  const callZoomView = (view) => {
+  /**
+   * v1.40.3: `fromScroll` marks views derived from the strip's OWN scroll
+   * event — the sync-back glue (syncScrollToView) skips those, so dragging
+   * the scrollbar never fights a re-render that would snap scrollLeft back
+   * to a stale window ("scrolling feels behind"). Zoom/fit/pan entry points
+   * leave it false: their view changes DO glide the scroll position.
+   */
+  let viewEmittedFromScroll = false;
+  const callZoomView = (view, fromScroll = false) => {
+    viewEmittedFromScroll = fromScroll;
     if (hasHook('onZoomView') && view) hooks.onZoomView(view);
   };
   // v1.7.0 thumb keyboard: ±1 frame rides the host's step math (main.js's
@@ -2165,8 +2174,11 @@ export function mountEditor(els, hooks) {
    *  is our own glide, not user input. @type {number | null} */
   let expectedScrollLeft = null;
 
-  /** Put the strip's scroll position where the view window says. */
+  /** Put the strip's scroll position where the view window says. Skipped
+   *  while the view was derived FROM scrolling — the user owns scrollLeft
+   *  then, and snapping it to a possibly-older window reads as lag. */
   function syncScrollToView(view) {
+    if (viewEmittedFromScroll) return;
     if (!zoomLane || !stripTrack || closed || typeof stripTrack.scrollLeft !== 'number') {
       return;
     }
@@ -2195,6 +2207,7 @@ export function mountEditor(els, hooks) {
     if (!(d > 0) || !(laneW > 0) || typeof stripTrack.scrollLeft !== 'number') return;
     callZoomView(
       scrollWindow(stripTrack.scrollLeft, stripTrack.clientWidth, laneW, d),
+      true, // fromScroll: the scroll position IS the user's intent — never glide it back
     );
   }
 
@@ -2220,12 +2233,26 @@ export function mountEditor(els, hooks) {
       existing.set(String(row.dataset.trackId), row);
     }
     const keep = new Set();
+    // v1.40.3: ANCHORED placement — a row already sitting at the walking
+    // cursor's next slot stays put (zero DOM moves). The old unconditional
+    // appendChild MOVED every row on every render; on a long list (11+ plate
+    // tracks) plucked-and-reinserted rows transiently shrank the scrollable
+    // content and the browser clamped scrollTop — the list snapped to the
+    // top the moment a track was unchecked (field report). Toggling never
+    // reorders, so the common path now moves nothing at all.
+    let cursor = null; // last correctly-placed row element (null = head)
     for (const track of filtered) {
       const idStr = String(track.id);
       keep.add(idStr);
       const row = existing.get(idStr) ?? buildTrackRow(track);
       syncTrackRow(row, track, d, active, selectedId);
-      trackList.appendChild(row); // moves new + existing rows into array order
+      const expected = cursor ? cursor.nextElementSibling : trackList.firstElementChild;
+      if (row === expected) {
+        cursor = row; // already in its slot — leave the DOM alone
+        continue;
+      }
+      trackList.insertBefore(row, expected); // expected null → append at the end
+      cursor = row;
     }
     for (const [idStr, row] of existing) {
       if (!keep.has(idStr)) row.remove();

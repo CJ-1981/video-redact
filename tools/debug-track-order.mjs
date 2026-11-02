@@ -101,4 +101,40 @@ try {
   await page.locator('#track-list li.track-row').last().locator('input[type=checkbox]').click();
   await page.waitForTimeout(300);
   console.log('after LAST on :', await order());
+
+  // ── v1.40.3: scrolled-list uncheck must NOT reset scrollTop ─────────────
+  // Field report (11+ plate tracks): unchecking a track snapped the list to
+  // the top — the old renderer MOVED every row on every render and the
+  // pluck-and-reinsert transiently shrank the scrollable content, so the
+  // browser clamped scrollTop. Shrink the list, scroll to the bottom,
+  // uncheck the bottom row: the scroll position must stay.
+  let failures = 0;
+  const check = (name, ok, detail) => {
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`);
+    if (!ok) failures += 1;
+  };
+  await page.evaluate(() => {
+    document.querySelector('#track-list').style.maxHeight = '120px';
+  });
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const list = document.querySelector('#track-list');
+    list.scrollTop = list.scrollHeight; // bottom
+  });
+  await page.waitForTimeout(200);
+  const atBottom = await page.evaluate(() => document.querySelector('#track-list').scrollTop);
+  await page.locator('#track-list li.track-row').last().locator('input[type=checkbox]').click();
+  await page.waitForTimeout(300);
+  const after = await page.evaluate(() => ({
+    st: document.querySelector('#track-list').scrollTop,
+    bottomRow: [...document.querySelectorAll('#track-list li.track-row')].pop().dataset.trackId,
+  }));
+  check(
+    'unchecking a bottom row keeps the list scroll position',
+    Math.abs(after.st - atBottom) <= 2,
+    `scrollTop ${atBottom} → ${after.st}`,
+  );
+  check('bottom row stays at the bottom', after.bottomRow === '5', `last=${after.bottomRow}`);
+  console.log(failures === 0 ? 'SUMMARY: PASS' : `SUMMARY: ${failures} failure(s)`);
+  process.exitCode = failures === 0 ? 0 : 1;
 } finally { await browser.close(); server.kill(); }

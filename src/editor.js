@@ -1294,12 +1294,36 @@ export function densifyManualTracks(tracks) {
  * @param {number} [durationSec] Video duration; the default span end.
  * @returns {import('./types.js').Track}
  */
-export function manualTrackFromBox(trackIdCounter, t, box, durationSec) {
+export function manualTrackFromBox(trackIdCounter, t, box, durationSec, span = null) {
   let end;
+  let start = 0;
   let kt = Number.isFinite(t) ? Math.max(t, 0) : 0;
-  if (Number.isFinite(durationSec) && durationSec > 0) {
-    end = durationSec;
-    kt = Math.min(kt, durationSec);
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  // v1.41.2: optional limited span (review-queue draw — the box applies to
+  // the REVIEWED track's frames instead of the whole clip). Valid only when
+  // it forms a ≥ MIN_TRACK_SPAN_S range inside the duration; otherwise the
+  // full-clip default applies.
+  const spanOk =
+    span != null &&
+    Number.isFinite(span.start) &&
+    Number.isFinite(span.end) &&
+    span.start >= 0 &&
+    span.end > span.start + MIN_TRACK_SPAN_S;
+  if (spanOk && dur > 0) {
+    start = Math.min(Math.max(span.start, 0), dur);
+    end = Math.min(Math.max(span.end, start + MIN_TRACK_SPAN_S), dur);
+    // a span clamping into a degenerate range (entirely past the duration)
+    // falls back to the full clip — never an empty track
+    if (end - start >= MIN_TRACK_SPAN_S) {
+      kt = Math.min(Math.max(kt, start), end);
+    } else {
+      start = 0;
+      end = dur;
+      kt = Math.min(kt, dur);
+    }
+  } else if (dur > 0) {
+    end = dur;
+    kt = Math.min(kt, dur);
   } else {
     end = Math.max(kt, MIN_TRACK_SPAN_S);
   }
@@ -1313,7 +1337,7 @@ export function manualTrackFromBox(trackIdCounter, t, box, durationSec) {
     // v1.22.0 REQ-201: the box is keyed AT the drawn time (the constant-box
     // behavior for single-keyframe regions is unchanged — see above).
     keyframes: new Map([[kt, { ...box }]]),
-    start: 0,
+    start,
     end,
     enabled: true,
     source: 'manual',

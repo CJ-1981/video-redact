@@ -16,6 +16,7 @@ let failures = 0;
 const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`); if (!ok) failures += 1; };
 const order = () => page.evaluate(() => [...document.querySelectorAll('#track-list li.track-row')].map((r) => `${r.dataset.trackId}:${r.querySelector('input[type=checkbox]')?.checked ? 'ON' : 'off'}`).join(' | '));
 try {
+  page.on('console', (m) => { if (m.text().startsWith('[rq-debug]')) console.log('BROWSER:', m.text()); });
   await page.goto(`http://127.0.0.1:${PORT}/dist/index.html`, { waitUntil: 'load' });
   await page.waitForSelector('#serve-gate', { state: 'hidden' });
   await page.setInputFiles('#file-input', join(ROOT, 'tests', 'fixtures', 'detectable.mp4'));
@@ -142,6 +143,75 @@ try {
   check('A keeps + queue completes with summary toast',
     endState.hidden && /Review complete — 1 kept redacting, 1 kept visible/.test(endState.toast) && endState.row0 === false,
     JSON.stringify(endState));
+
+  // v1.41.2: a box drawn mid-queue spans the REVIEWED track's frames only.
+  // Re-enable the manual track first (phase 1's S decision left it visible),
+  // give the face track a limited span, restart the queue, skip to the face,
+  // wait out its span, then draw.
+  await page.locator('#track-groups .track-group', { hasText: 'Manual' }).locator('.group-btn[data-action="redact"]').click();
+  await page.waitForTimeout(250);
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#track-list li.track-row')]
+      .find((r) => r.querySelector('.label')?.textContent.includes('Face'));
+    const start = row.querySelector('[data-role="start"]');
+    const end = row.querySelector('[data-role="end"]');
+    start.value = '1.0';
+    start.dispatchEvent(new Event('change', { bubbles: true }));
+    end.value = '2.0';
+    end.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  await page.click('#review-queue-button');
+  await page.waitForTimeout(400);
+  await page.keyboard.press('d'); // skip the manual track → face [1.0, 2.0]
+  console.log('RQ after d press:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
+  await page.waitForTimeout(2200); // the 1 s span plays out and pauses
+  const facePaused = await page.evaluate(() => ({
+    paused: document.querySelector('video').paused,
+    label: document.querySelector('#review-queue-label')?.textContent,
+    hidden: document.querySelector('#review-queue-card').hidden,
+    count: document.querySelector('#review-queue-count')?.textContent,
+  }));
+  check('face span presented + paused for consideration',
+    facePaused.paused === true && facePaused.hidden === false && facePaused.count === '2 / 2' && /Face/.test(facePaused.label ?? ''),
+    JSON.stringify(facePaused));
+  await page.evaluate(() => {
+    document.querySelector('#preview-stage').scrollIntoView({ block: 'center', behavior: 'instant' });
+  });
+  await page.waitForTimeout(200);
+  console.log('RQ before scroll:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
+  await page.evaluate(() => {
+    document.querySelector('#preview-stage').scrollIntoView({ block: 'center', behavior: 'instant' });
+  });
+  await page.waitForTimeout(200);
+  console.log('RQ after scroll:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
+  await page.keyboard.press('b');
+  console.log('RQ after b:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
+  console.log('RQ after d:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
+  const c2 = await page.evaluate(() => {
+    const r = document.querySelector('#overlay-canvas').getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  });
+  await page.mouse.move(c2.x + c2.width / 2, c2.y + c2.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(c2.x + c2.width / 2 + 80, c2.y + c2.height / 2 + 50, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const drawn = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#track-list li.track-row')];
+    const last = rows[rows.length - 1];
+    return {
+      label: last.querySelector('.label')?.textContent,
+      start: last.querySelector('[data-role="start"]')?.value,
+      end: last.querySelector('[data-role="end"]')?.value,
+      checked: last.querySelector('input[type=checkbox]')?.checked,
+    };
+  });
+  check('drawn box spans the reviewed frames only (1–2s, not full clip)',
+    /Manual/.test(drawn.label ?? '') && drawn.start === '0:01.0' && drawn.end === '0:02.0' && drawn.checked === true,
+    JSON.stringify(drawn));
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(250);
 
   // Esc closes a restarted queue; group order still intact.
   await page.evaluate(() => {

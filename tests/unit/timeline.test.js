@@ -307,6 +307,40 @@ describe('effectiveEdgePx (REQ-112 coarse-pointer edge zones)', () => {
 // toggleTrack (REQ-014, AC-06)
 // ---------------------------------------------------------------------------
 
+describe('manualTrackFromBox span (v1.41.2) — review-queue draw spans the reviewed frames', () => {
+  it('a valid span overrides the full-clip default (start/end + keyframe clamp)', () => {
+    const t = manualTrackFromBox(7, 3.0, { x: 5, y: 5, w: 6, h: 6 }, 10, { start: 2, end: 5 });
+    expect(t.start).toBe(2);
+    expect(t.end).toBe(5);
+    expect([...t.keyframes.keys()][0]).toBe(3); // inside the span — kept
+    expect(t.enabled).toBe(true);
+    expect(t.cls).toBe('manual');
+    // a draw-time OUTSIDE the span clamps into it (the keyframe must live
+    // inside the track — v1.41.2 review-queue semantics)
+    const clamped = manualTrackFromBox(7, 1.2, { x: 5, y: 5, w: 6, h: 6 }, 10, { start: 2, end: 5 });
+    expect([...clamped.keyframes.keys()][0]).toBe(2);
+  });
+
+  it('the drawn time clamps into the span', () => {
+    const t = manualTrackFromBox(7, 0.5, { x: 5, y: 5, w: 6, h: 6 }, 10, { start: 2, end: 5 });
+    expect([...t.keyframes.keys()][0]).toBe(2); // 0.5 → clamped to the span start
+    const t2 = manualTrackFromBox(7, 8, { x: 5, y: 5, w: 6, h: 6 }, 10, { start: 2, end: 5 });
+    expect([...t2.keyframes.keys()][0]).toBe(5);
+  });
+
+  it('too-short or invalid spans fall back to the full clip', () => {
+    const tooShort = manualTrackFromBox(7, 1, { x: 5, y: 5, w: 6, h: 6 }, 10, { start: 2, end: 2.05 });
+    expect(tooShort.start).toBe(0);
+    expect(tooShort.end).toBe(10);
+    const past = manualTrackFromBox(7, 1, { x: 5, y: 5, w: 6, h: 6 }, 10, { start: 11, end: 14 });
+    expect(past.start).toBe(0); // collapsed clamp → full-clip fallback
+    expect(past.end).toBe(10);
+    const noSpan = manualTrackFromBox(7, 1, { x: 5, y: 5, w: 6, h: 6 }, 10);
+    expect(noSpan.start).toBe(0);
+    expect(noSpan.end).toBe(10);
+  });
+});
+
 describe('toggleTrack (immutable enabled flip)', () => {
   it('sets the target track enabled flag and leaves siblings untouched', () => {
     const a = makeTrack({ id: 1 });

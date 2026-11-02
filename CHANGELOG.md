@@ -6,6 +6,14 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.41.2] — 2026-11-02
+
+### Added
+- **Review-queue draws span the reviewed frames only** (field request: "if manual box added then apply it only to the frames of the reviewed timestamps"). While the queue is open, a B-drawn box inherits the currently reviewed track's [start, end] as its span instead of the whole clip — the refinement lands exactly where you're looking, with zero tracks-panel time-range editing. Draw times outside the span clamp into it; degenerate spans (entirely past the duration) fall back to the full clip.
+
+### Fixed
+- The queue no longer swallows unrelated keyboard shortcuts: non-queue keys (B draw-mode, Space, F, M…) fall through to their normal handlers while the queue is open — only A/S/D/←/Esc are queue decisions.
+
 ## [1.41.1] — 2026-11-02
 
 ### Changed

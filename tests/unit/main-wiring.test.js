@@ -4133,6 +4133,51 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
     }
   });
 
+  it('v1.41.2: a box drawn DURING the review queue spans the reviewed track only', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      seedTriage(elsById);
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandle([]);
+        },
+      });
+      await openFile(fakeDoc);
+      // one 2-second face track [1.0, 2.0] — the reviewed span
+      runAnalyzeMock.mockResolvedValueOnce({
+        tracks: [
+          { id: 2, cls: 'face', label: 'Face #2', color: '#E5484D', start: 1.0, end: 2.0, enabled: true, source: 'auto', style: 'pixelate', keyframes: new Map([[1.0, { x: 5, y: 5, w: 6, h: 6 }]]) },
+        ],
+        frameCount: 3,
+        effectiveEp: 'webgpu',
+        cancelled: false,
+      });
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      // Start the queue (presents the face track's span).
+      fakeDoc.getElementById('review-queue-button').dispatch('click');
+      await flushApp();
+
+      // Draw a box mid-review: the new manual track inherits the REVIEWED
+      // span [1.0, 2.0] — no tracks-panel time-range editing needed.
+      hooks.onManualBox({ x: 3, y: 3, w: 5, h: 5 }, 1.5);
+      await flushApp();
+      const st = hooks.getState();
+      const drawn = st.tracks.find((t) => t.source === 'manual');
+      expect(drawn).toBeTruthy();
+      expect(drawn.start).toBe(1.0);
+      expect(drawn.end).toBe(2.0);
+      expect(drawn.enabled).toBe(true);
+      expect([...drawn.keyframes.keys()][0]).toBe(1.5); // drawn time inside
+    } finally {
+      g.restore();
+    }
+  });
+
   function groupsClick(line, action, fakeDoc) {
     const btn = line.children.find(
       (c) => c.dataset && c.dataset.action === action,

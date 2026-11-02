@@ -3630,26 +3630,25 @@ export async function mountApp(
   doc.addEventListener('keydown', (e) => {
     const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
     if (!shortcutEnabledFor(target)) return;
-    // v1.41.0: review-queue triage keys (A/S/D + Esc) take precedence —
-    // 'A' must not arm the peek hold while the queue owns it.
+    // v1.41.0: review-queue triage keys (A/S/D + ← + Esc) take precedence —
+    // 'A' must not arm the peek hold while the queue owns it. v1.41.2: OTHER
+    // keys fall through — B (draw a refinement box), Space, F and M keep
+    // working during the queue.
     if (reviewQueue) {
-      if (e.key === 'a' || e.key === 'A') {
+      const k = e.key;
+      const isQueueKey =
+        k === 'a' || k === 'A' || k === 's' || k === 'S' || k === 'd' || k === 'D' ||
+        k === 'ArrowLeft' || k === 'Escape';
+      if (isQueueKey) {
         e.preventDefault();
-        advanceReviewQueue('kept');
-      } else if (e.key === 's' || e.key === 'S') {
-        e.preventDefault();
-        advanceReviewQueue('visible');
-      } else if (e.key === 'd' || e.key === 'D') {
-        e.preventDefault();
-        advanceReviewQueue('skip');
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        advanceReviewQueue('skip', -1); // ◀ Last
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        closeReviewQueue();
+        if (k === 'a' || k === 'A') advanceReviewQueue('kept');
+        else if (k === 's' || k === 'S') advanceReviewQueue('visible');
+        else if (k === 'd' || k === 'D') advanceReviewQueue('skip');
+        else if (k === 'ArrowLeft') advanceReviewQueue('skip', -1); // ◀ Last
+        else closeReviewQueue();
+        return;
       }
-      return;
+      // non-queue keys continue below (B/Space/F/M + the ready-gating)
     }
     if (!els.video) return; // togglePlay/stepFrame guard internally too
     const reviewGated = app.step === 'review' || app.step === 'done';
@@ -3770,7 +3769,13 @@ export async function mountApp(
           v.currentTime = Math.min(Math.max(0, t), dur);
         },
         onManualBox: (box, t) => {
-          const track = manualTrackFromBox(app.manualNextId, t, box, app.meta?.duration);
+          // v1.41.2: in the review queue a drawn box applies ONLY to the
+          // reviewed track's frames — the user is refining THAT span, not the
+          // whole clip (saves the tracks-panel time-range editing entirely).
+          let span = null;
+          const reviewing = reviewQueue ? reviewCurrent() : null;
+          if (reviewing) span = { start: reviewing.start, end: reviewing.end };
+          const track = manualTrackFromBox(app.manualNextId, t, box, app.meta?.duration, span);
           app.manualNextId += 1;
           app.tracks = [...app.tracks, track];
           // v1.13.0: the first track enables the bulk restyle buttons
@@ -4368,6 +4373,7 @@ export async function mountApp(
   }
 
   function finishReviewQueue() {
+    console.warn('[rq-debug] finish', new Error().stack?.split('\n').slice(2, 4).join(' <- '));
     let kept = 0;
     let visible = 0;
     if (reviewQueue) {
@@ -4385,6 +4391,7 @@ export async function mountApp(
   }
 
   function closeReviewQueue(silent = false) {
+    console.warn('[rq-debug] close silent=' + silent, new Error().stack?.split('\n').slice(2, 4).join(' <- '));
     const wasActive = reviewQueue != null;
     reviewQueue = null;
     if (els.reviewQueueCard) els.reviewQueueCard.hidden = true;

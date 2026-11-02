@@ -833,6 +833,32 @@ describe('v1.22.0 REQ-205: hold-to-peek button contract', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// v1.40.0: #zoom-lane wraps EVERY strip layer — the single wide layer the
+// strip scrolls; all four position full-clip inside it.
+// ---------------------------------------------------------------------------
+
+describe('v1.40.0: #zoom-lane wraps chips/trim-regions/playhead/thumb', () => {
+  it('the lane exists inside #timeline-track and holds all four layers', () => {
+    const trackStart = HTML.indexOf('id="timeline-track"');
+    const trackEnd = HTML.indexOf('</section>', trackStart);
+    const block = HTML.slice(trackStart, trackEnd);
+    expect(block).toMatch(
+      /<div id="zoom-lane">\s*<div id="track-chips"><\/div>[\s\S]*<div id="trim-regions"><\/div>\s*<div id="playhead"><\/div>\s*<div id="timeline-thumb"/,
+    );
+    // The layers are NOT direct children of the scroll container anymore.
+    expect(block).not.toMatch(/<\/div>\s*<div id="trim-regions"/);
+  });
+
+  it('the lane CSS keeps it positioned + min-width:100% (the scroll base)', () => {
+    const rule = cssRule('#timeline-track > #zoom-lane');
+    expect(rule).toContain('position: relative');
+    expect(rule).toContain('min-width: 100%');
+    const chips = cssRule('#track-chips');
+    expect(chips).toContain('position: absolute');
+  });
+});
+
 describe('v1.22.0 REQ-206: waveform strip contract', () => {
   it('ships a hidden #waveform canvas between the timeline and #below-timeline', () => {
     const start = HTML.indexOf('id="timeline"');

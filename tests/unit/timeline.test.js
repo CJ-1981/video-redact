@@ -44,6 +44,8 @@ import {
   fitWindow,
   beginManualBox,
   mountEditor,
+  scrollWindow,
+  scrollLeftFor,
 } from '../../src/editor.js';
 import { TRACK_COLORS } from '../../src/tracker.js';
 import { tracksAt, dilate } from '../../src/redact.js';
@@ -2407,5 +2409,54 @@ describe('trimSkipTarget — chained skip-trimmed playback (v1.24.0)', () => {
     expect(trimSkipTarget([], 1)).toBeNull();
     expect(trimSkipTarget(undefined, 1)).toBeNull();
     expect(trimSkipTarget([{ start: 1, end: 2 }], Number.NaN)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.40.0: scroll ⇄ view glue (zoomed strip) — the view window IS the visible
+// slice of #zoom-lane; these pure helpers are the two directions of the glue.
+// ---------------------------------------------------------------------------
+
+describe('scrollWindow (v1.40.0) — visible slice of the zoomed lane → time window', () => {
+  it('maps scrollLeft + clientWidth through the lane width to seconds', () => {
+    // 12 s clip, lane 1200 px (4× zoom of a 300 px strip), scrolled 300 px:
+    // start = 300/1200·12 = 3 s, visible slice 300 px = 3 s wide.
+    expect(scrollWindow(300, 300, 1200, 12)).toEqual({ start: 3, end: 6 });
+  });
+
+  it('scroll 0 is the beginning; the far right clamps end at the duration', () => {
+    expect(scrollWindow(0, 300, 1200, 12)).toEqual({ start: 0, end: 3 });
+    expect(scrollWindow(900, 300, 1200, 12)).toEqual({ start: 9, end: 12 });
+  });
+
+  it('degenerate inputs degrade safely (never NaN)', () => {
+    expect(scrollWindow(Number.NaN, 300, 1200, 12)).toEqual({ start: 0, end: 3 }); // scroll → 0
+    expect(scrollWindow(0, 0, 1200, 12)).toEqual({ start: 0, end: 12 });
+    expect(scrollWindow(0, 300, 0, 12)).toEqual({ start: 0, end: 12 });
+    expect(scrollWindow(0, 300, 1200, 0)).toEqual({ start: 0, end: 0 });
+  });
+});
+
+describe('scrollLeftFor (v1.40.0) — view start → strip scroll position', () => {
+  it('is the inverse of scrollWindow (round-trips the visible slice)', () => {
+    const d = 12;
+    const lane = 1200;
+    for (const start of [0, 3, 7.5, 11.9]) {
+      expect(scrollLeftFor(start, lane, d)).toBeCloseTo((start / d) * lane, 6);
+    }
+    const win = scrollWindow(scrollLeftFor(3, lane, d), 300, lane, d);
+    expect(win.start).toBeCloseTo(3, 6);
+  });
+
+  it('clamps past the duration and degrades garbage to 0', () => {
+    expect(scrollLeftFor(99, 1200, 12)).toBe(1200);
+    expect(scrollLeftFor(Number.NaN, 1200, 12)).toBe(0);
+    expect(scrollLeftFor(3, 0, 12)).toBe(0);
+    expect(scrollLeftFor(3, 1200, 0)).toBe(0);
+  });
+
+  it('thumbLeftPct stays the full-clip position rule (v1.40.0 lane contract)', () => {
+    expect(thumbLeftPct(3, 12)).toBe(25);
+    expect(thumbLeftPct(15, 12)).toBe(100);
   });
 });

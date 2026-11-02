@@ -310,6 +310,45 @@ export function thumbLeftPct(currentTimeSec, durationSec) {
 }
 
 /**
+ * The view window a strip scroll position represents (v1.40.0 scroll ⇄ view
+ * glue). PURE — maps the visible slice of the zoomed lane back into seconds:
+ * `start = scrollLeft / laneWidth · duration`, the span follows the strip's
+ * client width through the same scale. Degenerate inputs → the full window.
+ *
+ * @param {number} scrollLeft Strip scroll position, CSS px (≥ 0).
+ * @param {number} clientWidth Visible slice width, CSS px (> 0).
+ * @param {number} laneWidth The zoomed lane's width, CSS px (> 0).
+ * @param {number} durationSec Video duration (> 0).
+ * @returns {{start: number, end: number}} The visible time window.
+ */
+export function scrollWindow(scrollLeft, clientWidth, laneWidth, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0) || !(laneWidth > 0) || !(clientWidth > 0)) return { start: 0, end: dur };
+  const x = Number.isFinite(scrollLeft) ? Math.max(0, scrollLeft) : 0;
+  const scale = dur / laneWidth;
+  const start = Math.min(x * scale, dur);
+  const end = Math.min(start + clientWidth * scale, dur);
+  return { start, end };
+}
+
+/**
+ * The strip scroll position that puts `startSec` at the lane's left edge
+ * (v1.40.0 scroll ⇄ view glue). PURE — the inverse of scrollWindow's start.
+ * Degenerate inputs → 0.
+ *
+ * @param {number} startSec View-window start, seconds.
+ * @param {number} laneWidth The zoomed lane's width, CSS px (> 0).
+ * @param {number} durationSec Video duration (> 0).
+ * @returns {number} Target strip scrollLeft, CSS px.
+ */
+export function scrollLeftFor(startSec, laneWidth, durationSec) {
+  const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (!(dur > 0) || !(laneWidth > 0) || !Number.isFinite(startSec)) return 0;
+  const t = Math.min(Math.max(startSec, 0), dur);
+  return (t / dur) * laneWidth;
+}
+
+/**
  * The scrub-handle thumb's `aria-valuenow` (v1.7.0): the playback position in
  * seconds. PURE — non-finite or negative input degrades to 0 (an ARIA value
  * must never be NaN; the upper bound lives in the separate `aria-valuemax`).
@@ -1507,6 +1546,15 @@ export function mountEditor(els, hooks) {
   const canvas = (els && els.overlayCanvas) || null;
   const timeline = (els && els.timeline) || null;
   const chipsContainer = (els && els.chipsContainer) || null;
+  // v1.40.0: #zoom-lane is the single WIDE layer the strip scrolls — render()
+  // widens it and every strip layer positions FULL-CLIP inside it; the scroll
+  // container is its parent (#timeline-track). Falls back to the chips layer
+  // for partial-hook embeds (no wrapper → legacy single-layer behavior).
+  const zoomLane =
+    (els && els.zoomLane) ||
+    (chipsContainer && chipsContainer.parentElement) ||
+    chipsContainer;
+  const stripTrack = zoomLane && zoomLane.parentElement ? zoomLane.parentElement : null;
   const playhead = (els && els.playhead) || null;
   // v1.7.0 scrub handle: an explicit handle wins; otherwise the static
   // #timeline-thumb inside the strip markup (main.js passes neither — the
@@ -1854,10 +1902,10 @@ export function mountEditor(els, hooks) {
     }
     const d = duration();
     const t = displayTime();
-    // v1.22.0 REQ-204: the thumb maps through the VIEW window (it must sit
-    // over the same strip space the chips/playhead occupy). Its ARIA values
-    // stay in real seconds (media time), independent of the view.
-    if (thumb.style) thumb.style.left = `${timeToPct(t, getView())}%`;
+    // v1.40.0: the thumb maps FULL-CLIP through #zoom-lane (same space the
+    // chips/playhead occupy). Its ARIA values stay in real seconds (media
+    // time), independent of the view.
+    if (thumb.style) thumb.style.left = `${thumbLeftPct(t, d)}%`;
     if (typeof thumb.setAttribute === 'function') {
       thumb.setAttribute('aria-valuemax', String(Number.isFinite(d) && d > 0 ? d : 0));
       thumb.setAttribute('aria-valuenow', String(thumbAriaValue(t)));
@@ -1870,8 +1918,9 @@ export function mountEditor(els, hooks) {
     // (≈ one rect per bar) and keeps the waveform honest during playback.
     drawWaveform();
     if (!playhead) return;
-    // v1.22.0 REQ-204: view-window position (full view → the old math).
-    const pct = timeToPct(displayTime(), getView());
+    // v1.40.0: full-clip position inside #zoom-lane (the visible slice
+    // scrolls; a view-relative left would double-map during playback).
+    const pct = thumbLeftPct(displayTime(), duration());
     playhead.style.left = `${pct}%`;
   }
 
@@ -1989,17 +2038,20 @@ export function mountEditor(els, hooks) {
     // v1.22.0 REQ-204: every strip mapping goes through the VIEW window —
     // chips, playhead, keyframe markers, trim regions, waveform (full view →
     // the exact pre-zoom numbers).
+    // v1.40.0: the STRIP layers are the exception — they position FULL-CLIP
+    // inside #zoom-lane (the strip scrolls the lane; the view window = the
+    // visible slice, kept in lockstep by the scroll glue). The waveform is
+    // its own view-strip below the timeline and keeps view semantics.
     const view = getView();
-    const vm = renderTimeline(state.tracks, d, displayTime(), view);
+    const vm = renderTimeline(state.tracks, d, displayTime());
 
-    if (chipsContainer) {
-      // v1.31.0: zoomed view widens the lane so all chips stay in the
-      // document flow (the strip scrolls — no clipping), and pointer x→time
-      // mapping divides by the same lane width.
+    if (zoomLane) {
       const zoomSpan = view.end - view.start;
       const laneScale = zoomSpan > 0 && zoomSpan < d ? d / zoomSpan : 1;
-      chipsContainer.style.width = `${laneScale * 100}%`;
-      chipsContainer.style.minWidth = '100%';
+      zoomLane.style.width = `${laneScale * 100}%`;
+      zoomLane.style.minWidth = '100%';
+    }
+    if (chipsContainer) {
       chipsContainer.textContent = '';
       for (const chip of vm.chips) {
         const widthPct = chip.endPct - chip.startPct;
@@ -2037,7 +2089,9 @@ export function mountEditor(els, hooks) {
       // — timeline gestures never hit them; they re-render with every
       // refresh (upsertKeyframe fires a refresh via main.js). Nothing
       // renders when nothing is selected, the selection is not a manual
-      // track, or the duration is unusable.
+      // track, or the duration is unusable. v1.40.0: FULL-CLIP positions —
+      // markers outside the visible slice simply live in the scrolled-away
+      // lane region (no view clamping, no pile-up at the strip edges).
       const selectedId = state.selectedTrackId;
       const sel = (Array.isArray(state.tracks) ? state.tracks : []).find(
         (tr) => tr && tr.id === selectedId && tr.source === 'manual',
@@ -2046,9 +2100,6 @@ export function mountEditor(els, hooks) {
         const entries = [...sel.keyframes.entries()].sort((a, b) => a[0] - b[0]);
         for (const [kt] of entries) {
           if (!Number.isFinite(kt)) continue;
-          // v1.22.0 REQ-204: markers outside the view window are skipped
-          // (a clamped pile-up at the edges would lie about their times).
-          if (kt < view.start || kt > view.end) continue;
           const marker = doc.createElement('div');
           marker.className = 'kf-marker';
           marker.dataset.trackId = String(sel.id);
@@ -2057,14 +2108,16 @@ export function mountEditor(els, hooks) {
           marker.style.cssText =
             'position:absolute;top:50%;left:0;width:8px;height:8px;margin:0;padding:0;' +
             'border:0;pointer-events:none;transform:translate(-50%, -50%) rotate(45deg);';
-          marker.style.left = `${timeToPct(kt, view)}%`;
+          marker.style.left = `${thumbLeftPct(kt, d)}%`;
           marker.style.background = sel.color || '#E5484D';
           chipsContainer.appendChild(marker);
         }
       }
     }
 
-    if (playhead) playhead.style.left = `${vm.playheadPct}%`;
+    // v1.40.0: the playhead positions FULL-CLIP inside #zoom-lane (the
+    // visible slice scrolls; a view-relative left would double-map).
+    if (playhead) playhead.style.left = `${thumbLeftPct(displayTime(), d)}%`;
     updateThumb();
     // v1.22.0 REQ-206: the waveform strip repaints on every refresh (view
     // changes and peak arrivals both ride refresh). updatePlayhead covers the
@@ -2075,9 +2128,10 @@ export function mountEditor(els, hooks) {
     // v1.15.0 REQ-125: greyed trim regions in the dedicated layer (above the
     // chips, below the playhead/thumb) + the trim-mode strip cursor. The
     // live-create ghost survives refreshes (edge drags fire hooks → render).
+    // v1.40.0: FULL-CLIP positions inside the scrolled lane.
     if (trimRegions) {
       trimRegions.textContent = '';
-      for (const regionView of trimRegionViews(state.trims, d, view)) {
+      for (const regionView of trimRegionViews(state.trims, d)) {
         trimRegions.appendChild(buildTrimRegion(regionView));
       }
       if (trimCreate?.ghost) trimRegions.appendChild(trimCreate.ghost);
@@ -2094,6 +2148,54 @@ export function mountEditor(els, hooks) {
     }
 
     if (trackList) renderTrackList(state.tracks, d, state.trackFilter);
+
+    // v1.40.0 scroll ⇄ view glue: the view window IS the visible slice of
+    // the lane. After every render (zoom/pan/fit changed the window, or the
+    // lane width moved) put the scroll position where the window says — the
+    // anchored zoom keeps the cursor's time fixed because zoomWindow kept it
+    // fixed in view space. User scrolling flows the OTHER way through
+    // onStripScroll → callZoomView, and the expected-value guard keeps the
+    // two directions from feeding back.
+    syncScrollToView(view);
+  }
+
+  // --- v1.40.0: scroll ⇄ view glue (zoomed strip) ----------------------------
+
+  /** Programmatic-scroll marker: the next scroll event matching this value
+   *  is our own glide, not user input. @type {number | null} */
+  let expectedScrollLeft = null;
+
+  /** Put the strip's scroll position where the view window says. */
+  function syncScrollToView(view) {
+    if (!zoomLane || !stripTrack || closed || typeof stripTrack.scrollLeft !== 'number') {
+      return;
+    }
+    const d = duration();
+    const laneW = typeof zoomLane.offsetWidth === 'number' ? zoomLane.offsetWidth : 0;
+    if (!(d > 0) || !(laneW > 0)) return;
+    const target = scrollLeftFor(view.start, laneW, d);
+    if (Math.abs(stripTrack.scrollLeft - target) < 0.5) return;
+    expectedScrollLeft = target;
+    stripTrack.scrollLeft = target;
+  }
+
+  /** Strip scrolled (user wheel/scrollbar/pan-drag): emit the visible slice
+   *  as the new view window through the same onZoomView hook the zoom
+   *  gestures use — the waveform, the tint and any view consumer stay honest
+   *  with what is actually on screen. */
+  function onStripScroll() {
+    if (!stripTrack || closed) return;
+    if (expectedScrollLeft != null) {
+      const ours = Math.abs(stripTrack.scrollLeft - expectedScrollLeft) < 1;
+      expectedScrollLeft = null;
+      if (ours) return;
+    }
+    const d = duration();
+    const laneW = zoomLane && typeof zoomLane.offsetWidth === 'number' ? zoomLane.offsetWidth : 0;
+    if (!(d > 0) || !(laneW > 0) || typeof stripTrack.scrollLeft !== 'number') return;
+    callZoomView(
+      scrollWindow(stripTrack.scrollLeft, stripTrack.clientWidth, laneW, d),
+    );
   }
 
   /**
@@ -2317,11 +2419,11 @@ export function mountEditor(els, hooks) {
   /** Chip element whose inline cursor we overrode for the edge affordance. */
   let hoverChip = /** @type {HTMLElement | null} */ (null);
   /**
-   * v1.22.0 REQ-204: live VIEW PAN drag (shift+drag on the strip) — the
-   * press point, the captured pointerId and the drag-start view window. The
-   * window the drag started from is the base (not the live state) so a slow
-   * host refresh can never compound the delta.
-   * @type {{pointerId: number, startX: number, view: {start: number, end: number}} | null}
+   * v1.22.0 REQ-204: live VIEW PAN drag (shift+drag on the strip).
+   * v1.40.0: the drag moves the STRIP's scroll position directly — content
+   * follows the pointer 1:1, and the scroll ⇄ view glue derives the new view
+   * window from the scroll event (no view math, no refresh-rate compounding).
+   * @type {{pointerId: number, startX: number, scrollLeft: number} | null}
    */
   let panDrag = null;
 
@@ -2357,7 +2459,7 @@ export function mountEditor(els, hooks) {
         : null;
     const d = duration();
     if (!rect || !(rect.width > 0) || !(d > 0)) return null;
-    return pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
+    return timelineTimeAt(clientX - rect.left, rect.width, d);
   }
 
   /**
@@ -2422,7 +2524,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, getView());
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
     if (hit) callToggle(hit.track.id, !hit.track.enabled);
   }
 
@@ -2446,7 +2548,7 @@ export function mountEditor(els, hooks) {
     if (!(rect.width > 0) || !(d > 0)) return;
     const track = (getState().tracks || []).find((tr) => tr.id === trimDrag?.id);
     if (!track) return;
-    const t = pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
+    const t = timelineTimeAt(clientX - rect.left, rect.width, d);
     const start = trimDrag.zone === 'start' ? Math.min(t, track.end - MIN_TRACK_SPAN_S) : track.start;
     const end = trimDrag.zone === 'end' ? Math.max(t, track.start + MIN_TRACK_SPAN_S) : track.end;
     callTrim(trimDrag.id, start, end);
@@ -2468,7 +2570,11 @@ export function mountEditor(els, hooks) {
     // surface; chip edges = trim are skipped for a shift press; plain drag =
     // nothing). At full view panWindow clamps to a no-op.
     if (e.shiftKey) {
-      panDrag = { pointerId: e.pointerId, startX: e.clientX, view: getView() };
+      panDrag = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        scrollLeft: stripTrack && typeof stripTrack.scrollLeft === 'number' ? stripTrack.scrollLeft : 0,
+      };
       try {
         timeline.setPointerCapture(e.pointerId);
       } catch {
@@ -2481,7 +2587,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, getView());
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
     if (hit) {
       // Latch the press-time zone: an edge press hands the gesture to the
       // trim path (timelinePointerAction will never turn it into a seek),
@@ -2498,7 +2604,7 @@ export function mountEditor(els, hooks) {
       // to the tap-seek verdict in onChipsPointerUp.
       if (getState().trimMode) {
         trimCreate = {
-          t0: pctToTime(timelineTimeAt(p.x, p.width, 100), getView()),
+          t0: timelineTimeAt(p.x, p.width, d),
           ghost: makeGhost(),
         };
         try {
@@ -2525,15 +2631,13 @@ export function mountEditor(els, hooks) {
     // pointer). Based on the DRAG-START view; the host persists + refreshes.
     if (panDrag) {
       if (e.pointerId !== panDrag.pointerId) return;
-      const rect =
-        chipsContainer && typeof chipsContainer.getBoundingClientRect === 'function'
-          ? chipsContainer.getBoundingClientRect()
-          : null;
-      const d = duration();
-      if (rect && rect.width > 0 && d > 0) {
-        const span = panDrag.view.end - panDrag.view.start;
-        const delta = ((panDrag.startX - e.clientX) / rect.width) * span;
-        callZoomView(panWindow(panDrag.view, delta, d));
+      // v1.40.0: content follows the pointer — the scroll ⇄ view glue
+      // (onStripScroll) derives and persists the new view window.
+      if (stripTrack && typeof stripTrack.scrollLeft === 'number') {
+        stripTrack.scrollLeft = Math.max(
+          0,
+          panDrag.scrollLeft + (panDrag.startX - e.clientX),
+        );
       }
       e.preventDefault();
       return;
@@ -2620,12 +2724,14 @@ export function mountEditor(els, hooks) {
     // playhead is positioned in). Mapping through the full strip rect put
     // every seek off the tapped point by the timecodes + padding width
     // (field-reported REG-1); points on the labels/padding clamp to the ends.
-    // v1.22.0 REQ-204: the tap maps through the VIEW window.
+    // v1.40.0: the lane percent IS the clip percent — map straight through
+    // the duration (the old view-relative conversion double-mapped: every
+    // seek at a zoomed/scrolled position landed off by the zoom factor).
     const p = chipsPos(e) ?? timelinePos(e);
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    callSeek(pctToTime(timelineTimeAt(p.x, p.width, 100), getView()));
+    callSeek(timelineTimeAt(p.x, p.width, d));
   }
 
   function onChipsPointerCancel() {
@@ -2792,11 +2898,35 @@ export function mountEditor(els, hooks) {
    * @param {WheelEvent} e
    */
   function onTimelineWheel(e) {
-    if (!(e.ctrlKey || e.metaKey)) return;
+    if (!(e.ctrlKey || e.metaKey)) {
+      // v1.40.0: horizontal wheel deltas (trackpad two-finger, shift+wheel)
+      // scroll the zoomed strip EXPLICITLY — the native default action left
+      // the strip motionless in the field (scrolling "didn't work"), and the
+      // scroll ⇄ view glue carries the new window to the rest of the app.
+      // shift+wheel keeps deltaY on the event (the vertical→horizontal
+      // conversion happens at the default-action level, which this
+      // non-passive listener's presence defeats in some browsers) — honor
+      // the same convention explicitly.
+      let dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0;
+      if (dx === 0 && e.shiftKey && e.deltaY !== 0) dx = e.deltaY;
+      if (dx !== 0 && stripTrack && typeof stripTrack.scrollLeft === 'number') {
+        stripTrack.scrollLeft += dx;
+        e.preventDefault();
+      }
+      return;
+    }
     const d = duration();
     if (!(d > 0)) return;
-    const p = chipsPos(e) ?? timelinePos(e);
-    const anchorPct = p ? Math.min(Math.max((p.x / p.width) * 100, 0), 100) : 50;
+    // v1.40.0: the zoom anchor is VISIBLE-SLICE-relative (zoomWindow maps it
+    // through the view) — the cursor's fraction of the strip, not the lane.
+    const stripR =
+      stripTrack && typeof stripTrack.getBoundingClientRect === 'function'
+        ? stripTrack.getBoundingClientRect()
+        : null;
+    const anchorPct =
+      stripR && stripR.width > 0
+        ? Math.min(Math.max(((e.clientX - stripR.left) / stripR.width) * 100, 0), 100)
+        : 50;
     const factor = e.deltaY < 0 ? ZOOM_WHEEL_FACTOR : 1 / ZOOM_WHEEL_FACTOR;
     callZoomView(zoomWindow(getView(), factor, anchorPct, d));
     e.preventDefault();
@@ -2863,7 +2993,7 @@ export function mountEditor(els, hooks) {
     const rect = waveformCanvas.getBoundingClientRect();
     const d = duration();
     if (!(rect.width > 0) || !(d > 0)) return null;
-    return pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
+    return timelineTimeAt(clientX - rect.left, rect.width, d);
   }
 
   function onWavePointerDown(e) {
@@ -3001,14 +3131,14 @@ export function mountEditor(els, hooks) {
         : null;
     const d = duration();
     if (!rect || !(rect.width > 0) || !(d > 0)) return null;
-    return pctToTime(timelineTimeAt(clientX - rect.left, rect.width, 100), getView());
+    return timelineTimeAt(clientX - rect.left, rect.width, d);
   }
 
   /** Move the thumb visually (no seek) — the drag's live follow.
-   * v1.22.0 REQ-204: view-window position. */
+   * v1.40.0: full-clip position inside #zoom-lane. */
   function moveThumbToTime(t) {
     if (!thumb || !thumb.style) return;
-    thumb.style.left = `${timeToPct(t, getView())}%`;
+    thumb.style.left = `${thumbLeftPct(t, duration())}%`;
   }
 
   /**
@@ -3371,6 +3501,11 @@ export function mountEditor(els, hooks) {
     // v1.22.0 REQ-204: ctrl/cmd+wheel zoom (non-passive — preventDefault
     // must beat the browser's page zoom; plain wheel scrolls untouched).
     timeline.addEventListener('wheel', onTimelineWheel, { passive: false });
+    // v1.40.0: strip scrolling (wheel deltas, scrollbar, pan drag) IS view
+    // navigation — the glue derives the visible slice and persists it.
+    if (stripTrack && typeof stripTrack.addEventListener === 'function') {
+      stripTrack.addEventListener('scroll', onStripScroll, { passive: true });
+    }
   }
   if (zoomInBtn && typeof zoomInBtn.addEventListener === 'function') {
     zoomInBtn.addEventListener('click', onZoomInClick);
@@ -3442,6 +3577,9 @@ export function mountEditor(els, hooks) {
     }
     if (timeline) {
       timeline.removeEventListener('dblclick', onTimelineDblClick);
+    if (stripTrack && typeof stripTrack.removeEventListener === 'function') {
+      stripTrack.removeEventListener('scroll', onStripScroll);
+    }
       timeline.removeEventListener('pointerdown', onChipsPointerDown);
       timeline.removeEventListener('pointermove', onChipsPointerMove);
       timeline.removeEventListener('pointerup', onChipsPointerUp);

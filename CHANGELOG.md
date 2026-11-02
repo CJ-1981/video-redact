@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.40.0] — 2026-11-02
+
+### Fixed
+- The zoomed timeline is coherent again (field report: "when timeline zoomed in after analysis, scrolling doesn't work to move to beginning. also position of marked track seems to be off in timeline"). The v1.31.0 zoom redesign was half-built: it widened ONLY the chips layer (via a `#zoom-lane` CSS rule targeting an id that did not exist in the markup) while chips, playhead, thumb and trim regions kept VIEW-relative positions inside a FULL-CLIP-scaled lane — every position was off by the zoom factor (marked-track chips land wrong), zoom-anchored seeks were wrong by the same factor, wheel/trackpad scrolling did nothing, and taps at a scrolled position never sought.
+- Rewritten as one coherent model: a real `#zoom-lane` wrapper holds ALL strip layers (chips, trim regions, playhead, thumb), every position is FULL-CLIP percent, the strip scroll IS view navigation — wheel deltas and shift-drag pan scroll the strip, a scroll⇄view glue derives the visible window (new pure `scrollWindow`/`scrollLeftFor` helpers, unit-pinned), zoom anchors on the cursor's visible-slice fraction, and tap-seek/chip-edge/trim-create/thumb mappings go straight through the lane. Verified by an extended probe: partial chip at full-clip percent, scroll reaches 0 and max, wheel scrolls, tap at a scrolled position seeks to the exact time; the zoom/pan/fit/peek/waveform regression probe passes 7/7 on the new contract.
+
 ## [1.39.3] — 2026-11-01
 
 ### Changed

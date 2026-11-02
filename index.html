@@ -553,15 +553,18 @@
       scrollbar-width: thin;
     }
     /* v1.31.0: zoomed-in view scrolls horizontally instead of clipping.
-       The chips layer is STATIC (sized by editor.js via chips.style.width) —
-       an absolutely-positioned layer would not create scrollable overflow. */
+       v1.40.0: #zoom-lane is the WIDE scrollable layer (width set by
+       editor.js = span/duration · 100%); #track-chips fills it absolutely.
+       The dead pre-v1.40.0 `#timeline-track > #zoom-lane` rule targeted an
+       id that did not exist in the markup — the wrapper is real now. */
     #track-chips {
-      position: relative;
-      height: 100%;
+      position: absolute;
+      inset: 0;
       min-width: 0;
     }
     /* When zoomed the strip is wider than the viewport — width set by
-       editor.js (span/duration · 100%). */
+       editor.js (span/duration · 100%). Every strip layer is absolutely
+       positioned inside it, so their %-left resolves against the LANE. */
     #timeline-track > #zoom-lane { position: relative; min-width: 100%; height: 100%; }
     #playhead {
       position: absolute;
@@ -1398,14 +1401,24 @@
         <section id="timeline" aria-label="Track timeline — click a chip to scrub and toggle its redaction; drag a chip edge to trim its span">
           <span id="timeline-current" class="num timecode">0:00.0</span>
           <div id="timeline-track">
-            <div id="track-chips"></div>
-            <!-- v1.15.0 REQ-125: greyed trim regions — painted above the
-                 chips, below the playhead/thumb (DOM order does the layering).
-                 main.js owns the regions; the editor renders .trim-region
-                 children (scissors edges + ✕) and the live-create ghost. -->
-            <div id="trim-regions"></div>
-            <div id="playhead"></div>
-            <div id="timeline-thumb" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="Drag to scrub · arrows step when focused"></div>
+            <!-- v1.40.0: #zoom-lane is the single WIDE layer the strip
+                 scrolls — editor.js widens it (span/duration · 100%) when
+                 zoomed, and EVERY strip layer (chips, trim regions, playhead,
+                 thumb) lives inside it positioned by FULL-CLIP percent.
+                 v1.31.0 widened only #track-chips and kept every layer and
+                 every gesture mapping view-relative — zoomed positions were
+                 off by the zoom factor and scrolling/seeking at a scrolled
+                 position broke (field report). -->
+            <div id="zoom-lane">
+              <div id="track-chips"></div>
+              <!-- v1.15.0 REQ-125: greyed trim regions — painted above the
+                   chips, below the playhead/thumb (DOM order does the layering).
+                   main.js owns the regions; the editor renders .trim-region
+                   children (scissors edges + ✕) and the live-create ghost. -->
+              <div id="trim-regions"></div>
+              <div id="playhead"></div>
+              <div id="timeline-thumb" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="Drag to scrub · arrows step when focused"></div>
+            </div>
           </div>
           <span id="timeline-duration" class="num timecode">0:00.0</span>
         </section>

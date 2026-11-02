@@ -54,6 +54,13 @@ const canvasSum = (sel) =>
   }, sel);
 
 /** First chip's left/width percentages (view-window mapping readout). */
+const laneRatio = () =>
+  page.evaluate(() => {
+    const strip = document.querySelector('#timeline-track');
+    const lane = document.querySelector('#zoom-lane') || document.querySelector('#track-chips');
+    return { laneW: lane.getBoundingClientRect().width, stripW: strip.clientWidth, scrollLeft: strip.scrollLeft };
+  });
+
 const chipPct = () =>
   page.evaluate(() => {
     // The NARROWEST chip is the sensitive readout: a full-span manual chip
@@ -67,10 +74,6 @@ const chipPct = () =>
     }
     return { left: parseFloat(best.style.left), width: parseFloat(best.style.width) };
   });
-
-/** The playhead's left percentage (time → view mapping readout). */
-const playheadPct = () =>
-  page.evaluate(() => parseFloat(document.querySelector('#playhead').style.left));
 
 /** Dispatch a ctrl+wheel with the given deltaY at the strip's center. */
 const ctrlWheel = (deltaY) =>
@@ -124,35 +127,34 @@ try {
   );
   check('analyze completed into review', !/failed/i.test(statusText), statusText);
 
-  // Park the playhead OFF-center: a zoom anchored at the strip center must
-  // move it (the time→view pct grows when the window shrinks around 50%).
-  await page.evaluate(() => {
-    const v = document.querySelector('#preview-video');
-    v.currentTime = Math.min(0.4, v.duration / 4);
-  });
-  await page.waitForTimeout(400);
-  const ph0 = await playheadPct();
 
   // ── Check 1: ctrl+wheel zoom ─────────────────────────────────────────────
+  // v1.40.0 contract: chips are FULL-CLIP positioned inside #zoom-lane, so
+  // their lane-% never changes — the LANE WIDENS by the zoom factor and the
+  // strip scrolls. The anchor math lives in view space (zoomWindow), the
+  // glue maps it to scroll.
   const full = await chipPct();
+  const f0 = await laneRatio();
   await ctrlWheel(-120); // one notch in (1.2×)
   await page.waitForTimeout(150);
   const z1 = await chipPct();
-  const ph1 = await playheadPct();
+  const f1 = await laneRatio();
   await ctrlWheel(-120);
   await page.waitForTimeout(150);
   const z2 = await chipPct();
+  const f2 = await laneRatio();
+  const ratio = (f) => (f && f.stripW > 0 ? f.laneW / f.stripW : 0);
   const consistent =
     full && z1 && z2 &&
-    ((z1.left !== full.left || z1.width !== full.width) ||
-      (ph1 > ph0 + 1 || ph1 < ph0 - 1)) &&
-    z2.width >= z1.width - 0.01 &&
+    ratio(f0) < 1.05 &&
+    ratio(f1) > ratio(f0) * 1.1 &&
+    ratio(f2) > ratio(f1) * 1.1 &&
     z2.left >= -0.01 &&
     z2.left + z2.width <= 100.01;
   check(
-    'REQ-204 ctrl+wheel zoom changes chips/playhead consistently (in-bounds)',
+    'REQ-204 ctrl+wheel zoom widens the lane (chips full-clip, in-bounds)',
     consistent,
-    `full=${JSON.stringify(full)} z1=${JSON.stringify(z1)} z2=${JSON.stringify(z2)} ph0=${ph0?.toFixed(1)} ph1=${ph1?.toFixed(1)}`,
+    `ratios=${ratio(f0)?.toFixed(2)}→${ratio(f1)?.toFixed(2)}→${ratio(f2)?.toFixed(2)} full=${JSON.stringify(full)} z2=${JSON.stringify(z2)}`,
   );
 
   // ── Check 2: shift+drag pans the zoomed window ──────────────────────────
@@ -165,22 +167,24 @@ try {
   await page.mouse.up();
   await page.keyboard.up('Shift');
   await page.waitForTimeout(150);
-  const panned = await chipPct();
-  const phPanned = await playheadPct();
+  const fPanned = await laneRatio();
   check(
-    'REQ-204 shift+drag pans the zoomed window',
-    (panned && z2 && (panned.left !== z2.left || panned.width !== z2.width)) ||
-      (phPanned != null && ph1 != null && Math.abs(phPanned - ph1) > 1),
-    `z2=${JSON.stringify(z2)} panned=${JSON.stringify(panned)} ph1=${ph1?.toFixed(1)} phPanned=${phPanned?.toFixed(1)}`,
+    'REQ-204 shift+drag pans the zoomed window (scroll follows the pointer)',
+    fPanned != null && f2 != null && fPanned.scrollLeft !== f2.scrollLeft,
+    `scroll ${f2?.scrollLeft} → ${fPanned?.scrollLeft}`,
   );
 
   // ── Check 3: zoom-fit resets ─────────────────────────────────────────────
   await page.locator('#zoom-fit').click();
   await page.waitForTimeout(150);
   const fitted = await chipPct();
+  const fFit = await laneRatio();
   const fitOk =
-    fitted && full && Math.abs(fitted.left - full.left) < 0.5 && Math.abs(fitted.width - full.width) < 0.5;
-  check('REQ-204 zoom-fit resets to the full clip', fitOk, `fitted=${JSON.stringify(fitted)} full=${JSON.stringify(full)}`);
+    fitted && full &&
+    Math.abs(fitted.left - full.left) < 0.5 && Math.abs(fitted.width - full.width) < 0.5 &&
+    Math.abs(fFit.laneW / fFit.stripW - 1) < 0.02 &&
+    fFit.scrollLeft < 2;
+  check('REQ-204 zoom-fit resets to the full clip', fitOk, `fitted=${JSON.stringify(fitted)} laneRatio=${(fFit.laneW / fFit.stripW).toFixed(3)} scrollLeft=${fFit.scrollLeft}`);
 
   // ── Check 4: hold-to-peek ────────────────────────────────────────────────
   // Play briefly (the REQ-205 hold rides playback), then pause for a

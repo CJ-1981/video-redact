@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.41.1] — 2026-11-02
+
+### Changed
+- The review queue is **user-paced** (field feedback: auto-continue was "too proactive and it can be too short to consider"): when a track's span finishes playing, the video **pauses and holds that frame** — advancing is always an explicit decision (A/S/D), never automatic. Decisions are recorded per track, so **◀ Last (←)** returns to the previous track for re-review and a re-decision there updates the summary. The queue card is also **draggable** (grab its body; buttons stay clickable) so it can sit anywhere over the stage instead of covering video content — the position persists for the session. Also fixed: the forward-advance clamp could never step past the last track, so the queue could not finish when the last decision came from a button.
+
 ## [1.41.0] — 2026-11-02
 
 ### Added

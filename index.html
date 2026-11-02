@@ -1121,7 +1121,15 @@
       color: var(--ink-hi);
       font-size: 12.5px;
       box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+      /* v1.41.1: the card is draggable (grab the body, not the buttons) so it
+         can sit anywhere over the stage — it must not hide video content. */
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
     }
+    #review-queue-card:active { cursor: grabbing; }
+    #review-queue-card .rq-hint { color: var(--ink); font-size: 11px; }
+    #review-queue-card button:disabled { opacity: 0.45; cursor: default; }
     #review-queue-card .rq-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1384,10 +1392,13 @@
           <canvas id="overlay-canvas"></canvas>
           <!-- v1.41.0: review-queue card — floats over the stage's bottom-left
                while the queue walks each redacting track's span. -->
-          <div id="review-queue-card" hidden role="dialog" aria-label="Review redactions queue">
+          <div id="review-queue-card" hidden role="dialog" aria-label="Review redactions queue"
+               title="Drag the card body to move it — it can sit anywhere over the stage">
             <span id="review-queue-count" class="num"></span>
             <span id="review-queue-label"></span>
+            <span class="rq-hint">Space replays the span · ← back</span>
             <div class="rq-actions">
+              <button id="rq-last" type="button" title="Go back to the previous track (←)">◀ Last (←)</button>
               <button id="rq-keep" type="button" title="Keep this track redacting (A)">Keep redacting (A)</button>
               <button id="rq-visible" type="button" title="Keep this track visible — remove its redaction (S)">Keep visible (S)</button>
               <button id="rq-skip" type="button" title="Decide later — next track (D)">Skip (D)</button>

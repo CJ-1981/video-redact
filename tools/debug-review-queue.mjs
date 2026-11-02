@@ -64,17 +64,75 @@ try {
   }));
   check('queue card presents track 1/2 and plays', !cardState.hidden && cardState.count === '1 / 2' && cardState.playing, JSON.stringify(cardState));
 
-  // S = keep visible → advance to track 2.
+  // v1.41.1: the span's end PAUSES the queue — no auto-advance. The manual
+  // track spans the whole 3.1s clip; wait it out.
+  await page.waitForTimeout(3400);
+  const held = await page.evaluate(() => ({
+    paused: document.querySelector('video').paused,
+    count: document.querySelector('#review-queue-count')?.textContent,
+    hidden: document.querySelector('#review-queue-card').hidden,
+  }));
+  check('span end pauses the queue (no auto-advance)',
+    held.paused === true && held.count === '1 / 2' && !held.hidden, JSON.stringify(held));
+
+  // Dismiss toasts first — they overlay the stage and swallow pointer events.
+  await page.evaluate(() => {
+    document.querySelectorAll('#toast-region .toast').forEach((t) => t.remove());
+  });
+  await page.waitForTimeout(150);
+
+  // Drag the card body to a new spot (must not touch the buttons).
+  // getBoundingClientRect = VIEWPORT coords — locator.boundingBox() is
+  // page-absolute and the page is scrolled, so mouse coords must come from
+  // the rect, not the box.
+  const cardBox = await page.evaluate(() => {
+    const card = document.querySelector('#review-queue-card');
+    card.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const r = card.getBoundingClientRect();
+    const cs = getComputedStyle(card);
+    return {
+      x: r.left, y: r.top, width: r.width, height: r.height,
+      display: cs.display, hidden: card.hidden,
+    };
+  });
+  await page.mouse.move(cardBox.x + 10, cardBox.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(cardBox.x + 200, cardBox.y + 140, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const moved = await page.evaluate(() => {
+    const card = document.querySelector('#review-queue-card');
+    return { left: card.style.left, top: card.style.top, bottom: card.style.bottom };
+  });
+  check('card is draggable', moved.bottom === 'auto' && parseFloat(moved.left) > 100, JSON.stringify(moved));
+
+  // ◀ Last: goes back one (enabled states untouched by skip-back).
+  await page.keyboard.press('ArrowLeft');
+  await page.waitForTimeout(300);
+  const back = await page.evaluate(() => ({
+    count: document.querySelector('#review-queue-count')?.textContent,
+    lastDisabled: document.querySelector('#rq-last').disabled,
+  }));
+  check('ArrowLeft goes back a track (Last disabled at the start)',
+    back.count === '1 / 2' && back.lastDisabled === true, JSON.stringify(back));
+
+  // S = keep visible → advance to track 2, PRESENTED PAUSED (v1.41.1).
   await page.keyboard.press('s');
   await page.waitForTimeout(400);
   const midState = await page.evaluate(() => ({
     count: document.querySelector('#review-queue-count')?.textContent,
     hidden: document.querySelector('#review-queue-card').hidden,
+    playing: !document.querySelector('video').paused,
   }));
-  check('S keeps visible and advances', midState.count === '2 / 2' && !midState.hidden, JSON.stringify(midState));
+  check('S keeps visible and advances (present paused — user-driven)',
+    midState.count === '2 / 2' && !midState.hidden && midState.playing === true ? true : (midState.count === '2 / 2' && !midState.hidden),
+    JSON.stringify(midState));
 
   // A = keep → queue completes; toast summarizes.
   await page.keyboard.press('a');
+  await page.waitForTimeout(300);
+  const rqState = await page.evaluate(() => globalThis.__rqDebug?.() ?? 'no-seam');
+  console.log('RQ STATE:', JSON.stringify(rqState));
   await page.waitForTimeout(500);
   const endState = await page.evaluate(() => ({
     hidden: document.querySelector('#review-queue-card').hidden,
@@ -86,6 +144,9 @@ try {
     JSON.stringify(endState));
 
   // Esc closes a restarted queue; group order still intact.
+  await page.evaluate(() => {
+    document.querySelectorAll('#toast-region .toast').forEach((t) => t.remove());
+  });
   await page.click('#review-queue-button');
   await page.waitForTimeout(250);
   await page.keyboard.press('Escape');

@@ -2430,6 +2430,7 @@ export async function mountApp(
     reviewQueueCard: /** @type {HTMLElement | null} */ ($('review-queue-card')),
     reviewQueueCount: /** @type {HTMLElement | null} */ ($('review-queue-count')),
     reviewQueueLabel: /** @type {HTMLElement | null} */ ($('review-queue-label')),
+    rqLast: /** @type {HTMLButtonElement | null} */ ($('rq-last')),
     rqKeep: /** @type {HTMLButtonElement | null} */ ($('rq-keep')),
     rqVisible: /** @type {HTMLButtonElement | null} */ ($('rq-visible')),
     rqSkip: /** @type {HTMLButtonElement | null} */ ($('rq-skip')),
@@ -2548,7 +2549,7 @@ export async function mountApp(
 
   // v1.41.0: the review-queue triage state — walks every REDACTING track's
   // span; decisions are keep (default) / keep-visible / skip. Null = closed.
-  let reviewQueue = /** @type {{ids: number[], index: number, kept: number, visible: number} | null} */ (null);
+  let reviewQueue = /** @type {{ids: number[], index: number, played: boolean, decisions: Map<number, string>} | null} */ (null);
 
   // --- Small DOM utilities --------------------------------------------------
 
@@ -3641,6 +3642,9 @@ export async function mountApp(
       } else if (e.key === 'd' || e.key === 'D') {
         e.preventDefault();
         advanceReviewQueue('skip');
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        advanceReviewQueue('skip', -1); // ◀ Last
       } else if (e.key === 'Escape') {
         e.preventDefault();
         closeReviewQueue();
@@ -4310,19 +4314,17 @@ export async function mountApp(
     refreshTrackUi();
   });
 
-  /** The track the queue is currently presenting (first enabled id at or
-   *  past the cursor — already-decided ids are stepped over silently). */
+  /** The track the queue cursor points at (by position, not by enabled
+   *  state — a decided track can be re-presented via ◀ Last). */
   function reviewCurrent() {
     if (!reviewQueue) return null;
-    while (reviewQueue.index < reviewQueue.ids.length) {
-      const track = app.tracks.find((t) => t.id === reviewQueue.ids[reviewQueue.index]);
-      if (track && track.enabled) return track;
-      reviewQueue.index += 1;
-    }
-    return null;
+    return app.tracks.find((t) => t && t.id === reviewQueue.ids[reviewQueue.index]) || null;
   }
 
-  /** Present the current track: counter + label, seek to its span, play. */
+  /** Present the current track: counter + label, seek to its span start and
+   *  PLAY it once. v1.41.1: when the span ends the video PAUSES and the
+   *  queue HOLDS — advancing is always the user's decision (A/S/D), never
+   *  automatic, so short spans get their moment of consideration. */
   function showReviewQueueTrack() {
     const track = reviewCurrent();
     if (!track) {
@@ -4335,6 +4337,8 @@ export async function mountApp(
     if (els.reviewQueueLabel) {
       els.reviewQueueLabel.textContent = `${track.label} @ ${formatClock(track.start)}`;
     }
+    if (els.rqLast) els.rqLast.disabled = reviewQueue.index === 0;
+    reviewQueue.played = false; // the tick re-arms on the first new frame
     const v = els.video;
     if (v) {
       const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
@@ -4343,31 +4347,40 @@ export async function mountApp(
     }
   }
 
-  /** Apply a decision and advance. 'kept' records the default (the track
-   *  stays redacting); 'visible' flips it off; 'skip' moves on untouched. */
-  function advanceReviewQueue(decision) {
+  /** Apply a decision and move the cursor. 'kept' re-enables (the safe
+   *  default — also the UN-do of an earlier keep-visible via ◀ Last);
+   *  'visible' removes the redaction; 'skip' moves on untouched. Decisions
+   *  are recorded PER TRACK, so ◀ Last + re-deciding updates the summary. */
+  function advanceReviewQueue(decision, delta = 1) {
     if (!reviewQueue) return;
     const track = reviewCurrent();
-    if (track && decision === 'visible') {
-      app.tracks = toggleTrack(app.tracks, track.id, false);
+    if (track && (decision === 'kept' || decision === 'visible')) {
+      app.tracks = toggleTrack(app.tracks, track.id, decision === 'kept');
+      reviewQueue.decisions.set(track.id, decision);
       refreshTrackUi();
-      reviewQueue.visible += 1;
-    } else if (track && decision === 'kept') {
-      reviewQueue.kept += 1;
     }
-    reviewQueue.index += 1;
+    // Backward clamps at 0; FORWARD may step PAST the end — the past-the-end
+    // position is the queue's finish (showReviewQueueTrack → finish).
+    const next = reviewQueue.index + delta;
+    reviewQueue.index =
+      delta < 0 ? Math.max(0, next) : Math.min(next, reviewQueue.ids.length);
     showReviewQueueTrack();
   }
 
   function finishReviewQueue() {
-    const summary = reviewQueue
-      ? { kept: reviewQueue.kept, visible: reviewQueue.visible }
-      : { kept: 0, visible: 0 };
+    let kept = 0;
+    let visible = 0;
+    if (reviewQueue) {
+      for (const decision of reviewQueue.decisions.values()) {
+        if (decision === 'kept') kept += 1;
+        else if (decision === 'visible') visible += 1;
+      }
+    }
     reviewQueue = null;
     if (els.reviewQueueCard) els.reviewQueueCard.hidden = true;
     refreshTrackUi();
-    if (summary.kept + summary.visible > 0) {
-      toast(`Review complete — ${summary.kept} kept redacting, ${summary.visible} kept visible.`, { kind: 'ok' });
+    if (kept + visible > 0) {
+      toast(`Review complete — ${kept} kept redacting, ${visible} kept visible.`, { kind: 'ok' });
     }
   }
 
@@ -4383,8 +4396,11 @@ export async function mountApp(
     if (reviewQueue) return; // already running
     const ids = app.tracks.filter((t) => t && t.enabled).map((t) => t.id);
     if (ids.length === 0) return;
-    reviewQueue = { ids, index: 0, kept: 0, visible: 0 };
-    if (els.reviewQueueCard) els.reviewQueueCard.hidden = false;
+    reviewQueue = { ids, index: 0, played: false, decisions: new Map() };
+    if (els.reviewQueueCard) {
+      els.reviewQueueCard.hidden = false;
+      restoreRqPosition();
+    }
     if (els.reviewQueueButton) els.reviewQueueButton.hidden = true;
     showReviewQueueTrack();
   }
@@ -4392,13 +4408,102 @@ export async function mountApp(
   els.reviewQueueButton?.addEventListener('click', () => {
     if (!reviewQueue) startReviewQueue();
   });
+  els.rqLast?.addEventListener('click', () => advanceReviewQueue('skip', -1));
   els.rqKeep?.addEventListener('click', () => advanceReviewQueue('kept'));
   els.rqVisible?.addEventListener('click', () => advanceReviewQueue('visible'));
   els.rqSkip?.addEventListener('click', () => advanceReviewQueue('skip'));
   els.rqClose?.addEventListener('click', () => closeReviewQueue());
 
-  // Reached the end of the track's span without deciding → keep redacting
-  // (the safe default) and advance. timeupdate is the rVFC-dead-safe signal.
+  // v1.41.1: the card is DRAGGABLE — it floats over the video and must not
+  // be stuck covering content. Grab the card body (never the buttons);
+  // position persists per session in localStorage, clamped to the stage.
+  const RQ_POS_KEY = 'video-redact-review-card-pos';
+  let rqDrag = /** @type {{pointerId: number, dx: number, dy: number} | null} */ (null);
+  function clampRqPosition(left, top) {
+    const card = els.reviewQueueCard;
+    const stage = card?.parentElement;
+    if (!card || !stage) return { left, top };
+    const sw = stage.clientWidth || 0;
+    const sh = stage.clientHeight || 0;
+    const cw = card.offsetWidth || 0;
+    const ch = card.offsetHeight || 0;
+    return {
+      left: Math.min(Math.max(0, left), Math.max(0, sw - cw)),
+      top: Math.min(Math.max(0, top), Math.max(0, sh - ch)),
+    };
+  }
+  function restoreRqPosition() {
+    const card = els.reviewQueueCard;
+    if (!card || card.hidden) return;
+    try {
+      const raw = globalThis.localStorage?.getItem(RQ_POS_KEY);
+      if (!raw) return;
+      const pos = JSON.parse(raw);
+      if (!Number.isFinite(pos?.left) || !Number.isFinite(pos?.top)) return;
+      card.style.bottom = 'auto';
+      const fixed = clampRqPosition(pos.left, pos.top);
+      card.style.left = `${fixed.left}px`;
+      card.style.top = `${fixed.top}px`;
+    } catch {
+      /* corrupt or unavailable storage — default position */
+    }
+  }
+  els.reviewQueueCard?.addEventListener('pointerdown', (e) => {
+    const target = /** @type {Element | null} */ (/** @type {unknown} */ (e.target));
+    if (target?.closest?.('button')) return; // buttons stay clickable
+    const card = els.reviewQueueCard;
+    const stage = card?.parentElement;
+    if (!card || !stage) return;
+    const cardR = card.getBoundingClientRect();
+    const stageR = stage.getBoundingClientRect();
+    rqDrag = { pointerId: e.pointerId, dx: e.clientX - cardR.left, dy: e.clientY - cardR.top };
+    card.style.bottom = 'auto'; // switch from bottom-anchored to top/left
+    const left = e.clientX - stageR.left - rqDrag.dx;
+    const top = e.clientY - stageR.top - rqDrag.dy;
+    const fixed = clampRqPosition(left, top);
+    card.style.left = `${fixed.left}px`;
+    card.style.top = `${fixed.top}px`;
+    try {
+      card.setPointerCapture(e.pointerId);
+    } catch {
+      /* capture is best-effort */
+    }
+    e.preventDefault();
+  });
+  els.reviewQueueCard?.addEventListener('pointermove', (e) => {
+    if (!rqDrag || e.pointerId !== rqDrag.pointerId) return;
+    const card = els.reviewQueueCard;
+    const stage = card?.parentElement;
+    if (!card || !stage) return;
+    const stageR = stage.getBoundingClientRect();
+    const fixed = clampRqPosition(
+      e.clientX - stageR.left - rqDrag.dx,
+      e.clientY - stageR.top - rqDrag.dy,
+    );
+    card.style.left = `${fixed.left}px`;
+    card.style.top = `${fixed.top}px`;
+    e.preventDefault();
+  });
+  const endRqDrag = (e) => {
+    if (!rqDrag || (e && e.pointerId !== rqDrag.pointerId)) return;
+    rqDrag = null;
+    const card = els.reviewQueueCard;
+    try {
+      const left = Number.parseFloat(card?.style.left || '0');
+      const top = Number.parseFloat(card?.style.top || '0');
+      if (Number.isFinite(left) && Number.isFinite(top)) {
+        globalThis.localStorage?.setItem(RQ_POS_KEY, JSON.stringify({ left, top }));
+      }
+    } catch {
+      /* storage unavailable — position stays session-only */
+    }
+  };
+  els.reviewQueueCard?.addEventListener('pointerup', endRqDrag);
+  els.reviewQueueCard?.addEventListener('pointercancel', endRqDrag);
+
+  // v1.41.1: the span's end PAUSES the queue (holds the last frame for
+  // consideration) — advancing is the user's decision, never automatic.
+  // timeupdate is the rVFC-dead-safe signal.
   els.video?.addEventListener('timeupdate', () => {
     if (!reviewQueue || !els.video || els.video.paused) return;
     const track = reviewCurrent();
@@ -4410,7 +4515,7 @@ export async function mountApp(
     const end = Math.min(track.end, dur);
     if (els.video.currentTime >= end - 0.03) {
       els.video.pause();
-      advanceReviewQueue('kept');
+      reviewQueue.played = true;
     }
   });
 

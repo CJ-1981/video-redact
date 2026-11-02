@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.41.0] — 2026-11-02
+
+### Added
+- **Review queue** (field request: many populated tracks are hard to review one-by-one — the CaseGuard/Street-View review-list pattern): a **"Review N redactions"** button above the track list. The playhead walks each redacting track's span in sequence, plays it, and a floating card shows "5 / 14 — Plate #6 @ 1:20" with **Keep redacting (A) / Keep visible (S) / Skip (D)** and ✕/Esc to close. Reaching a span's end without deciding keeps it redacting (the safe default); finishing shows a summary toast ("Review complete — 9 kept redacting, 5 kept visible"). The A key no longer arms peek-hold while the queue is open.
+- **Class group toggles**: one header line per class above the track list — "Faces (4) [Redact all] [Keep visible]" — flipping a whole class in one click via the new pure `setClassEnabled` (order-preserving; the v1.40.2 row-position contract holds).
+
 ## [1.40.3] — 2026-11-02
 
 ### Fixed

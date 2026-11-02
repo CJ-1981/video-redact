@@ -4024,6 +4024,124 @@ describe('v1.39.2: the analyze counter reads "N / M (−K trimmed)" — no doubl
   });
 });
 
+describe('v1.41.0: triage aids — class groups + review-queue button', () => {
+  const g = wave3Globals();
+
+  async function openFile(fakeDoc) {
+    fakeDoc.getElementById('file-input').dispatch('change');
+    await flushApp();
+  }
+
+  function seedTriage(elsById) {
+    const groups = makeFakeEl('DIV');
+    const appended = [];
+    const realAppendChild = groups.appendChild.bind(groups);
+    groups.appendChild = (child) => {
+      appended.push(child);
+      return realAppendChild(child);
+    };
+    elsById.set('track-groups', groups);
+    const btn = makeFakeEl('BUTTON');
+    elsById.set('review-queue-button', btn);
+    return { groups, appended, btn };
+  }
+
+  it('group rows render per present class; Keep visible disables the class in place', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const { groups, appended, btn } = seedTriage(elsById);
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandle([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1);
+      hooks.onManualBox({ x: 2, y: 2, w: 4, h: 4 }, 2);
+      await flushApp();
+
+      // Two manual tracks → a "Manual (2)" group line + armed review button.
+      // (The fake element's textContent='' doesn't clear children, so the
+      // appends accumulate across refreshes — assert on the LAST line.)
+      expect(appended.length).toBeGreaterThanOrEqual(1);
+      const line = appended[appended.length - 1];
+      const name = line.children[0];
+      expect(name.textContent).toBe('Manual (2)');
+      expect(groups.hidden).toBe(false);
+      expect(btn.hidden).toBe(false);
+      expect(btn.textContent).toBe('Review 2 redactions');
+
+      // "Keep visible" via the delegation: order + purity through the same
+      // contract as the pure pin (ids never reorder).
+      const keepVisible = line.children[2];
+      groups.dispatch('click', { target: keepVisible });
+      await flushApp();
+      const st = hooks.getState();
+      expect(st.tracks.map((t) => t.id)).toEqual([1, 2]);
+      expect(st.tracks.every((t) => !t.enabled)).toBe(true);
+      // button follows the state: 0 enabled → hidden
+      expect(btn.hidden).toBe(true);
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('setClassEnabled group click flips ONLY that class', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const { appended } = seedTriage(elsById);
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandle([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // manual id 1
+      // a FACE track rides the analyze mock's fresh result
+      runAnalyzeMock.mockResolvedValueOnce({
+        tracks: [
+          { id: 2, cls: 'face', label: 'Face #2', color: '#E5484D', start: 0, end: 2, enabled: true, source: 'auto', style: 'pixelate', keyframes: new Map([[0, { x: 5, y: 5, w: 6, h: 6 }]]) },
+        ],
+        frameCount: 3,
+        effectiveEp: 'webgpu',
+        cancelled: false,
+      });
+      fakeDoc.getElementById('analyze-button').dispatch('click');
+      await flushApp();
+
+      // Class order face/plate/manual: the LAST refresh emits Faces + Manual.
+      // (Appends accumulate in the fake element — slice the final pair.)
+      const tail = appended.slice(-2);
+      expect(tail.map((l) => l.children[0].textContent)).toEqual(['Faces (1)', 'Manual (1)']);
+      const manualLine = tail[1];
+      groupsClick(manualLine, 'redact', fakeDoc); // Manual redact all (no-op flip ON)
+      const st = hooks.getState();
+      expect(st.tracks.find((t) => t.cls === 'face').enabled).toBe(true); // face untouched
+      expect(st.tracks.find((t) => t.cls === 'manual').enabled).toBe(true);
+      groupsClick(manualLine, 'visible', fakeDoc);
+      const st2 = hooks.getState();
+      expect(st2.tracks.find((t) => t.cls === 'manual').enabled).toBe(false);
+      expect(st2.tracks.find((t) => t.cls === 'face').enabled).toBe(true);
+    } finally {
+      g.restore();
+    }
+  });
+
+  function groupsClick(line, action, fakeDoc) {
+    const btn = line.children.find(
+      (c) => c.dataset && c.dataset.action === action,
+    );
+    fakeDoc.getElementById('track-groups').dispatch('click', { target: btn });
+    return flushApp();
+  }
+});
+
 describe('v1.39.3: the waveform decodes at FILE LOAD (not first review)', () => {
   const g = wave3Globals();
 

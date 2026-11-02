@@ -1079,6 +1079,58 @@
     .track-row.enabled-off .label { color: var(--safe); text-decoration: line-through; }
     #track-list-empty { margin: 4px 0 0; color: var(--ink); font-size: 12.5px; }
 
+    /* ── v1.41.0: triage aids (review queue + class groups) ── */
+    #review-queue-button {
+      width: 100%;
+      margin-top: 8px;
+      font-size: 12.5px;
+    }
+    #track-groups {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .track-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--ink);
+    }
+    .track-group .group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .track-group button {
+      flex: none;
+      padding: 3px 8px;
+      font-size: 11.5px;
+      min-height: 26px;
+    }
+    #review-queue-card {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      z-index: 7; /* above canvas (6), below toasts */
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-width: 320px;
+      padding: 10px 12px;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--ink-hi);
+      font-size: 12.5px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    }
+    #review-queue-card .rq-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    #review-queue-card .rq-actions button { padding: 4px 8px; font-size: 12px; min-height: 30px; }
+    #review-queue-card[hidden] { display: none; }
+    #review-queue-count { color: var(--accent); font-weight: 600; }
+
     .warn-note {
       margin: 10px 0;
       padding: 8px 12px;
@@ -1330,6 +1382,18 @@
         <div id="preview-stage">
           <video id="preview-video" playsinline></video>
           <canvas id="overlay-canvas"></canvas>
+          <!-- v1.41.0: review-queue card — floats over the stage's bottom-left
+               while the queue walks each redacting track's span. -->
+          <div id="review-queue-card" hidden role="dialog" aria-label="Review redactions queue">
+            <span id="review-queue-count" class="num"></span>
+            <span id="review-queue-label"></span>
+            <div class="rq-actions">
+              <button id="rq-keep" type="button" title="Keep this track redacting (A)">Keep redacting (A)</button>
+              <button id="rq-visible" type="button" title="Keep this track visible — remove its redaction (S)">Keep visible (S)</button>
+              <button id="rq-skip" type="button" title="Decide later — next track (D)">Skip (D)</button>
+              <button id="rq-close" type="button" aria-label="Close review queue" title="Close (Esc)">✕</button>
+            </div>
+          </div>
           <button id="preview-fullscreen" type="button" title="Enlarge preview" aria-label="Enlarge preview">⛶</button>
           <!-- REQ-111 (v1.4.0): transport controls reachable inside
                fullscreen / zoom. Hidden by default; display:flex only under
@@ -1446,6 +1510,13 @@
               <button type="button" class="filter-btn" data-filter="plate" aria-pressed="false">Plate</button>
               <button type="button" class="filter-btn" data-filter="manual" aria-pressed="false">Manual</button>
             </div>
+            <!-- v1.41.0: triage aids for long detection lists (the CaseGuard
+                 review-list pattern). #review-queue-button walks the playhead
+                 through every redacting track's span with a Keep-redacting /
+                 Keep-visible card; #track-groups renders one line per class
+                 with whole-class Redact all / Keep visible. -->
+            <button id="review-queue-button" type="button" hidden>Review redactions</button>
+            <div id="track-groups" hidden></div>
             <div id="bulk-style" role="group" aria-label="Set all tracks style">
               <button id="bulk-solid" type="button">All solid</button>
               <button id="bulk-pixelate" type="button">All pixelate</button>

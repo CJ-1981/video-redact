@@ -822,6 +822,23 @@ export function toggleTrack(tracks, trackId, enabled) {
   );
 }
 
+/**
+ * v1.41.0: set enabled on EVERY track of one class (the Tracks-panel group
+ * rows — "Plates (11): Redact all / Keep visible"). Immutable like
+ * toggleTrack: non-matching tracks keep their OBJECT identity; order never
+ * changes — the list rows keep their positions (the v1.40.2 contract).
+ *
+ * @param {import('./types.js').Track[]} tracks
+ * @param {string} cls Track class to flip ('face'|'plate'|'manual').
+ * @param {boolean} enabled
+ * @returns {import('./types.js').Track[]} New array.
+ */
+export function setClassEnabled(tracks, cls, enabled) {
+  return (Array.isArray(tracks) ? tracks : []).map((track) =>
+    track && track.cls === cls ? { ...track, enabled } : track,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // PURE: trimTrack — immutable span trim (SPEC-VID-002 REQ-103, AC-101)
 // ---------------------------------------------------------------------------

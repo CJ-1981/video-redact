@@ -152,6 +152,7 @@ import {
   formatTrackSummary,
   manualTrackFromBox,
   mountEditor,
+  setClassEnabled,
   setTrackStyle,
   toggleTrack,
   trackSummaryCounts,
@@ -2423,6 +2424,16 @@ export async function mountApp(
     // use — the markup may not carry the element yet (Agent-HTML lands
     // separately) and the wiring must degrade to a no-op.
     bulkSolid: /** @type {HTMLButtonElement | null} */ ($('bulk-solid')),
+    // v1.41.0: triage aids — review-queue card + per-class group rows.
+    reviewQueueButton: /** @type {HTMLButtonElement | null} */ ($('review-queue-button')),
+    trackGroups: /** @type {HTMLElement | null} */ ($('track-groups')),
+    reviewQueueCard: /** @type {HTMLElement | null} */ ($('review-queue-card')),
+    reviewQueueCount: /** @type {HTMLElement | null} */ ($('review-queue-count')),
+    reviewQueueLabel: /** @type {HTMLElement | null} */ ($('review-queue-label')),
+    rqKeep: /** @type {HTMLButtonElement | null} */ ($('rq-keep')),
+    rqVisible: /** @type {HTMLButtonElement | null} */ ($('rq-visible')),
+    rqSkip: /** @type {HTMLButtonElement | null} */ ($('rq-skip')),
+    rqClose: /** @type {HTMLButtonElement | null} */ ($('rq-close')),
     bulkPixelate: /** @type {HTMLButtonElement | null} */ ($('bulk-pixelate')),
     trimHint: $('trim-hint'),
     skipTrimsToggle: /** @type {HTMLInputElement | null} */ ($('skip-trims-toggle')),
@@ -2534,6 +2545,10 @@ export async function mountApp(
   // #project-load-input handler; applied the moment a video is open (or
   // immediately when one already is). Cleared by Clear and after applying.
   let pendingProject = /** @type {{project: Record<string, unknown>} | null} */ (null);
+
+  // v1.41.0: the review-queue triage state — walks every REDACTING track's
+  // span; decisions are keep (default) / keep-visible / skip. Null = closed.
+  let reviewQueue = /** @type {{ids: number[], index: number, kept: number, visible: number} | null} */ (null);
 
   // --- Small DOM utilities --------------------------------------------------
 
@@ -2745,6 +2760,13 @@ export async function mountApp(
   function refreshTrackUi() {
     markDirty(); // v1.22.0 REQ-138: every track/trim mutation rides through here
     updateTrackSummary();
+    // v1.41.0: triage aids follow the list.
+    renderTrackGroups();
+    if (els.reviewQueueButton && !reviewQueue) {
+      const enabledCount = app.tracks.filter((t) => t && t.enabled).length;
+      els.reviewQueueButton.hidden = app.tracks.length === 0 || enabledCount === 0;
+      els.reviewQueueButton.textContent = `Review ${enabledCount} redaction${enabledCount === 1 ? '' : 's'}`;
+    }
     editor?.refresh();
     // v1.38.1: refresh() re-renders chips/rows DOM only — the CANVAS needs an
     // explicit redraw or rVFC-dead machines (paused video, no frame loop,
@@ -2781,6 +2803,7 @@ export async function mountApp(
     }
     app.trimMode = false;
     syncTrimToggleUi();
+    closeReviewQueue(true); // v1.41.0: a new video never inherits a queue
   }
 
   function resetAnalyzeUi() {
@@ -3606,6 +3629,24 @@ export async function mountApp(
   doc.addEventListener('keydown', (e) => {
     const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
     if (!shortcutEnabledFor(target)) return;
+    // v1.41.0: review-queue triage keys (A/S/D + Esc) take precedence —
+    // 'A' must not arm the peek hold while the queue owns it.
+    if (reviewQueue) {
+      if (e.key === 'a' || e.key === 'A') {
+        e.preventDefault();
+        advanceReviewQueue('kept');
+      } else if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        advanceReviewQueue('visible');
+      } else if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        advanceReviewQueue('skip');
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeReviewQueue();
+      }
+      return;
+    }
     if (!els.video) return; // togglePlay/stepFrame guard internally too
     const reviewGated = app.step === 'review' || app.step === 'done';
     const playbackLive = reviewGated || app.step === 'ready';
@@ -4219,6 +4260,159 @@ export async function mountApp(
       refreshTrackUi();
     });
   }
+
+  // --- v1.41.0: triage aids — class group rows + the review queue -----------
+
+  /** One header line per class present: "Plates (11) [Redact all] [Keep
+   *  visible]" — whole-class toggles via setClassEnabled (order preserved). */
+  function renderTrackGroups() {
+    const groups = els.trackGroups;
+    if (!groups) return;
+    const names = { face: 'Faces', plate: 'Plates', manual: 'Manual' };
+    const order = ['face', 'plate', 'manual'];
+    const present = order.filter((cls) => app.tracks.some((t) => t && t.cls === cls));
+    groups.textContent = '';
+    groups.hidden = present.length === 0;
+    for (const cls of present) {
+      const n = app.tracks.filter((t) => t.cls === cls).length;
+      const line = doc.createElement('div');
+      line.className = 'track-group';
+      const name = doc.createElement('span');
+      name.className = 'group-name';
+      name.textContent = `${names[cls]} (${n})`;
+      const redact = doc.createElement('button');
+      redact.type = 'button';
+      redact.classList.add('group-btn'); // .group-btn: fake-env closest() contract
+      redact.dataset.group = cls;
+      redact.dataset.action = 'redact';
+      redact.textContent = 'Redact all';
+      const visible = doc.createElement('button');
+      visible.type = 'button';
+      visible.classList.add('group-btn');
+      visible.dataset.group = cls;
+      visible.dataset.action = 'visible';
+      visible.textContent = 'Keep visible';
+      line.append(name, redact, visible);
+      groups.appendChild(line);
+    }
+  }
+
+  els.trackGroups?.addEventListener('click', (e) => {
+    const target = /** @type {Element | null} */ (/** @type {unknown} */ (e.target));
+    const btn = target?.closest?.('.group-btn');
+    if (!btn) return;
+    // dataset (not getAttribute): the fake-element harness keeps them separate
+    app.tracks = setClassEnabled(
+      app.tracks,
+      /** @type {any} */ (btn).dataset.group,
+      /** @type {any} */ (btn).dataset.action === 'redact',
+    );
+    refreshTrackUi();
+  });
+
+  /** The track the queue is currently presenting (first enabled id at or
+   *  past the cursor — already-decided ids are stepped over silently). */
+  function reviewCurrent() {
+    if (!reviewQueue) return null;
+    while (reviewQueue.index < reviewQueue.ids.length) {
+      const track = app.tracks.find((t) => t.id === reviewQueue.ids[reviewQueue.index]);
+      if (track && track.enabled) return track;
+      reviewQueue.index += 1;
+    }
+    return null;
+  }
+
+  /** Present the current track: counter + label, seek to its span, play. */
+  function showReviewQueueTrack() {
+    const track = reviewCurrent();
+    if (!track) {
+      finishReviewQueue();
+      return;
+    }
+    if (els.reviewQueueCount && reviewQueue) {
+      els.reviewQueueCount.textContent = `${reviewQueue.index + 1} / ${reviewQueue.ids.length}`;
+    }
+    if (els.reviewQueueLabel) {
+      els.reviewQueueLabel.textContent = `${track.label} @ ${formatClock(track.start)}`;
+    }
+    const v = els.video;
+    if (v) {
+      const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : Infinity;
+      v.currentTime = Math.min(Math.max(0, track.start), dur);
+      void v.play().catch(() => {});
+    }
+  }
+
+  /** Apply a decision and advance. 'kept' records the default (the track
+   *  stays redacting); 'visible' flips it off; 'skip' moves on untouched. */
+  function advanceReviewQueue(decision) {
+    if (!reviewQueue) return;
+    const track = reviewCurrent();
+    if (track && decision === 'visible') {
+      app.tracks = toggleTrack(app.tracks, track.id, false);
+      refreshTrackUi();
+      reviewQueue.visible += 1;
+    } else if (track && decision === 'kept') {
+      reviewQueue.kept += 1;
+    }
+    reviewQueue.index += 1;
+    showReviewQueueTrack();
+  }
+
+  function finishReviewQueue() {
+    const summary = reviewQueue
+      ? { kept: reviewQueue.kept, visible: reviewQueue.visible }
+      : { kept: 0, visible: 0 };
+    reviewQueue = null;
+    if (els.reviewQueueCard) els.reviewQueueCard.hidden = true;
+    refreshTrackUi();
+    if (summary.kept + summary.visible > 0) {
+      toast(`Review complete — ${summary.kept} kept redacting, ${summary.visible} kept visible.`, { kind: 'ok' });
+    }
+  }
+
+  function closeReviewQueue(silent = false) {
+    const wasActive = reviewQueue != null;
+    reviewQueue = null;
+    if (els.reviewQueueCard) els.reviewQueueCard.hidden = true;
+    if (wasActive && !silent) refreshTrackUi();
+  }
+
+  function startReviewQueue() {
+    if (app.step !== 'review' && app.step !== 'done') return;
+    if (reviewQueue) return; // already running
+    const ids = app.tracks.filter((t) => t && t.enabled).map((t) => t.id);
+    if (ids.length === 0) return;
+    reviewQueue = { ids, index: 0, kept: 0, visible: 0 };
+    if (els.reviewQueueCard) els.reviewQueueCard.hidden = false;
+    if (els.reviewQueueButton) els.reviewQueueButton.hidden = true;
+    showReviewQueueTrack();
+  }
+
+  els.reviewQueueButton?.addEventListener('click', () => {
+    if (!reviewQueue) startReviewQueue();
+  });
+  els.rqKeep?.addEventListener('click', () => advanceReviewQueue('kept'));
+  els.rqVisible?.addEventListener('click', () => advanceReviewQueue('visible'));
+  els.rqSkip?.addEventListener('click', () => advanceReviewQueue('skip'));
+  els.rqClose?.addEventListener('click', () => closeReviewQueue());
+
+  // Reached the end of the track's span without deciding → keep redacting
+  // (the safe default) and advance. timeupdate is the rVFC-dead-safe signal.
+  els.video?.addEventListener('timeupdate', () => {
+    if (!reviewQueue || !els.video || els.video.paused) return;
+    const track = reviewCurrent();
+    if (!track) {
+      finishReviewQueue();
+      return;
+    }
+    const dur = Number.isFinite(els.video.duration) && els.video.duration > 0 ? els.video.duration : track.end;
+    const end = Math.min(track.end, dur);
+    if (els.video.currentTime >= end - 0.03) {
+      els.video.pause();
+      advanceReviewQueue('kept');
+    }
+  });
 
   // --- v1.13.0: bulk track-style buttons (#bulk-solid / #bulk-pixelate) ------
   //
@@ -4964,6 +5158,7 @@ export async function mountApp(
   doc.addEventListener('keydown', (e) => {
     if (e.key !== 'a' && e.key !== 'A') return;
     if (e.repeat) return; // auto-repeat spam — already peeking, stay idempotent
+    if (reviewQueue) return; // v1.41.0: 'A' means KEEP REDACTING in the queue
     const target = /** @type {HTMLElement | null} */ (/** @type {unknown} */ (e.target));
     if (!shortcutEnabledFor(target)) return; // typing surfaces keep their 'a'
     if (!(app.step === 'ready' || app.step === 'review' || app.step === 'done')) return;

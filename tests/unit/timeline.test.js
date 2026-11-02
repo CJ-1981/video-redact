@@ -46,6 +46,7 @@ import {
   mountEditor,
   scrollWindow,
   scrollLeftFor,
+  setClassEnabled,
 } from '../../src/editor.js';
 import { TRACK_COLORS } from '../../src/tracker.js';
 import { tracksAt, dilate } from '../../src/redact.js';
@@ -323,6 +324,24 @@ describe('toggleTrack (immutable enabled flip)', () => {
     expect(out[0]).not.toBe(a);
     expect(a.enabled).toBe(true); // original untouched
     expect(tracks[0].enabled).toBe(true);
+  });
+
+  it('setClassEnabled flips exactly one class, in place (v1.41.0 group rows)', () => {
+    const tracks = [
+      makeTrack({ id: 3, cls: 'plate', label: 'Plate #3', color: '#A78BFA' }),
+      makeTrack({ id: 1 }),
+      makeTrack({ id: 2, cls: 'manual', label: 'Manual #2', color: '#E5484D' }),
+    ];
+    const out = setClassEnabled(tracks, 'plate', false);
+    expect(out.map((t) => t.id)).toEqual([3, 1, 2]); // order never changes
+    expect(out[0].enabled).toBe(false);
+    expect(out[0]).not.toBe(tracks[0]); // target copied
+    expect(out[1]).toBe(tracks[1]); // others keep identity
+    expect(out[2]).toBe(tracks[2]);
+    // unknown class → unchanged content (still a new array)
+    const none = setClassEnabled(tracks, 'bogus', false);
+    expect(none.map((t) => t.id)).toEqual([3, 1, 2]);
+    expect(none.every((t, i) => t.enabled === tracks[i].enabled)).toBe(true);
   });
 
   it('NEVER reorders the array — the row keeps its list position (v1.40.2 field pin)', () => {

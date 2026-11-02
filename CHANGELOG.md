@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.41.3] — 2026-11-02
+
+### Added
+- **↺ Replay button** in the review-queue card (plus the `R` key): re-seeks to the current track's span start and plays it again, so a span can be watched as many times as needed before deciding. The card hint now reads "↺/Space replays · ← back · B-draw spans this track".
+
 ## [1.41.2] — 2026-11-02
 
 ### Added

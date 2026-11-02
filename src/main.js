@@ -2430,6 +2430,7 @@ export async function mountApp(
     reviewQueueCard: /** @type {HTMLElement | null} */ ($('review-queue-card')),
     reviewQueueCount: /** @type {HTMLElement | null} */ ($('review-queue-count')),
     reviewQueueLabel: /** @type {HTMLElement | null} */ ($('review-queue-label')),
+    rqReplay: /** @type {HTMLButtonElement | null} */ ($('rq-replay')),
     rqLast: /** @type {HTMLButtonElement | null} */ ($('rq-last')),
     rqKeep: /** @type {HTMLButtonElement | null} */ ($('rq-keep')),
     rqVisible: /** @type {HTMLButtonElement | null} */ ($('rq-visible')),
@@ -3638,12 +3639,13 @@ export async function mountApp(
       const k = e.key;
       const isQueueKey =
         k === 'a' || k === 'A' || k === 's' || k === 'S' || k === 'd' || k === 'D' ||
-        k === 'ArrowLeft' || k === 'Escape';
+        k === 'r' || k === 'R' || k === 'ArrowLeft' || k === 'Escape';
       if (isQueueKey) {
         e.preventDefault();
         if (k === 'a' || k === 'A') advanceReviewQueue('kept');
         else if (k === 's' || k === 'S') advanceReviewQueue('visible');
         else if (k === 'd' || k === 'D') advanceReviewQueue('skip');
+        else if (k === 'r' || k === 'R') showReviewQueueTrack(); // ↺ replay the span
         else if (k === 'ArrowLeft') advanceReviewQueue('skip', -1); // ◀ Last
         else closeReviewQueue();
         return;
@@ -4414,6 +4416,11 @@ export async function mountApp(
 
   els.reviewQueueButton?.addEventListener('click', () => {
     if (!reviewQueue) startReviewQueue();
+  });
+  els.rqReplay?.addEventListener('click', () => {
+    // ↺ Replay: re-present the CURRENT track (seek to its span start and
+    // play) — same as pressing Space after a manual seek back.
+    if (reviewQueue) showReviewQueueTrack();
   });
   els.rqLast?.addEventListener('click', () => advanceReviewQueue('skip', -1));
   els.rqKeep?.addEventListener('click', () => advanceReviewQueue('kept'));

@@ -186,15 +186,16 @@ try {
   await page.waitForTimeout(200);
   console.log('RQ after scroll:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
   await page.keyboard.press('b');
-  console.log('RQ after b:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
-  console.log('RQ after d:', JSON.stringify(await page.evaluate(() => globalThis.__rqDebug?.() ?? null)));
   const c2 = await page.evaluate(() => {
     const r = document.querySelector('#overlay-canvas').getBoundingClientRect();
-    return { x: r.left, y: r.top, width: r.width, height: r.height };
+    const free = (x, y) => document.elementFromPoint(x, y)?.id === 'overlay-canvas';
+    const c = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    const spots = [c, { x: c.x + 120, y: c.y + 60 }, { x: c.x - 120, y: c.y + 60 }, { x: c.x - 120, y: c.y - 40 }];
+    return { spot: spots.find((p) => free(p.x, p.y)) || c, base: { x: r.left, y: r.top, width: r.width, height: r.height } };
   });
-  await page.mouse.move(c2.x + c2.width / 2, c2.y + c2.height / 2);
+  await page.mouse.move(c2.spot.x, c2.spot.y);
   await page.mouse.down();
-  await page.mouse.move(c2.x + c2.width / 2 + 80, c2.y + c2.height / 2 + 50, { steps: 4 });
+  await page.mouse.move(c2.spot.x + 80, c2.spot.y + 50, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(400);
   const drawn = await page.evaluate(() => {
@@ -210,6 +211,33 @@ try {
   check('drawn box spans the reviewed frames only (1–2s, not full clip)',
     /Manual/.test(drawn.label ?? '') && drawn.start === '0:01.0' && drawn.end === '0:02.0' && drawn.checked === true,
     JSON.stringify(drawn));
+  // ↺ Replay: re-seek to the span start and play (the queue had paused at
+  // the span's end).
+  const preReplay = await page.evaluate(() => ({
+    t: document.querySelector('video').currentTime,
+    paused: document.querySelector('video').paused,
+  }));
+  await page.click('#rq-replay');
+  await page.waitForTimeout(400);
+  const postReplay = await page.evaluate(() => ({
+    t: document.querySelector('video').currentTime,
+    paused: document.querySelector('video').paused,
+    label: document.querySelector('#review-queue-label')?.textContent,
+  }));
+  check('↺ Replay re-seeks to the span start and plays',
+    postReplay.paused === false && postReplay.t < preReplay.t - 0.5 && /Face/.test(postReplay.label ?? ''),
+    `pre=${JSON.stringify(preReplay)} post=${JSON.stringify(postReplay)}`);
+
+  // R key replays too.
+  await page.waitForTimeout(600);
+  await page.keyboard.press('r');
+  await page.waitForTimeout(400);
+  const postR = await page.evaluate(() => ({
+    t: document.querySelector('video').currentTime,
+    paused: document.querySelector('video').paused,
+  }));
+  check('R key replays as well', postR.paused === false && postR.t < 1.5, JSON.stringify(postR));
+
   await page.keyboard.press('Escape');
   await page.waitForTimeout(250);
 

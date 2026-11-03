@@ -46,6 +46,8 @@ Keyboard gating over states (v1.9.0/1.10.0, map extended v1.12.0): the doc-level
 
 Export settings flow (v1.16.0–v1.17.1, REQ-127): the export panel's resolution select and "Include audio" checkbox are read live at export click (`startExport` reads `els.exportResolution` / `els.exportAudio` / `app.settings.pixelStrength` / `app.trims`). `resetExportChoices()` (resolution → 'full', audio → checked) runs ONLY on file load and Clear — v1.17.1 removed the pre-read reset that made every export run with defaults. Pixel strength lives in `app.settings.pixelStrength` (preview and export share it).
 
+Review-queue state (v1.41.0–1.41.3): the triage queue lives in a mountApp closure var (`reviewQueue = {ids, index, played, decisions}` — NOT part of AppState/persistence); startReviewQueue snapshots the ENABLED track ids, the cursor may step to `ids.length` (the finished position), decisions record per id (◀ Last + re-decide updates them), and resetTrimState (file load/Clear) closes it. No state-machine impact — the queue rides review/done. `advanceReviewQueue(decision, delta)`; `enforceDetectorPair` guards the detector toggles.
+
 Layout state note (v1.18.0–v1.18.1): the review workspace's `#below-timeline` section (Tracks panel, then Compare-thresholds) is a child of `#stage-column` directly after `#timeline` — not a workspace-grid child — so the panels follow the preview-column width and hold a constant 28px gap (16px margin + 12px column gap) under the timeline no matter how tall the right rail is. Pure DOM/CSS contract, pinned by `tests/unit/mobile-ui.test.js`; no state-machine impact.
 
 ## Data shapes (`AppState`, src/types.js)
@@ -67,7 +69,7 @@ Layout state note (v1.18.0–v1.18.1): the review workspace's `#below-timeline` 
               confFace?: number, confPlate?: number,
               detectFace?: boolean, detectPlate?: boolean }   // REQ-113 (v1.5.0): detection confidence
                                  // thresholds from the Analyze-panel sensitivity sliders
-                                 // (defaults 0.6 / 0.25 — detector DEFAULT_CONF_FACE/PLATE when omitted);
+                                 // (defaults 0.6 / 0.6 — detector DEFAULT_CONF_FACE/PLATE when omitted; plate raised from 0.25 in v1.40.1);
                                  // detectFace/detectPlate (v1.39.0): per-class detector toggles —
                                  // false skips that model entirely (≥1 must stay on, enforceDetectorPair);
                                  // reset from DEFAULT_SETTINGS() on mount and on CLEAR (v1.6.0).

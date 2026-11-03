@@ -19,7 +19,7 @@ All boxes/coordinates are display-oriented native pixels after ingest (ADR-9). S
  │   order; reusable canvas; faces every frame, plates every 2nd;    │
  │   settings.confFace / confPlate gate EVERY detect call            │
  │   (REQ-113; defaults detector.DEFAULT_CONF_FACE 0.6 /             │
- │   DEFAULT_CONF_PLATE 0.25); min-size filter (REQ-120) + optional  │
+ │   DEFAULT_CONF_PLATE 0.6); min-size filter (REQ-120) + optional  │
  │   downscale (REQ-117, scaleFactorFor → detections rescaled to     │
  │   native display coords before tracking); frames inside trim      │
  │   regions are SKIPPED (v1.15.2, inTrims — no draw/inference/      │

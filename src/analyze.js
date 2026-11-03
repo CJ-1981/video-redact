@@ -176,7 +176,7 @@ function defaultYieldNow() {
  *          trims?: Array<{start: number, end: number}>}} [opts.settings]
  *     Analysis settings. `plateStride` (default 2) is the full-pass plate
  *     cadence; `padSeconds` overrides the finalize padding (default 5/fps,
- *     REQ-007); `confFace` / `confPlate` (REQ-113, defaults 0.6 / 0.25 —
+ *     REQ-007); `confFace` / `confPlate` (REQ-113, defaults 0.6 / 0.6 —
  *     the detector's DEFAULT_CONF_FACE / DEFAULT_CONF_PLATE) gate the face /
  *     plate decode on EVERY detect call, full-frame AND dashcam tile passes;
  *     `detectFace` / `detectPlate` (v1.39.0, default true) skip that model

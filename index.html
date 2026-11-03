@@ -1517,7 +1517,7 @@
         <!-- v1.22.0 REQ-206: waveform strip — decoded-audio peaks, directly
              under the timeline. Hidden until peaks decode (silent audio /
              undecodable files keep it hidden forever — silent degrade).
-             main.js decodes lazily after the first review entry; the editor
+             main.js decodes at FILE LOAD since v1.39.3; the editor
              renders bars through the view window and tints the played part. -->
         <canvas id="waveform" hidden aria-label="Audio waveform — click or drag to seek"></canvas>
         <section id="below-timeline" aria-label="Threshold comparison and detected tracks">

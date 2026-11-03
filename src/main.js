@@ -942,7 +942,7 @@ export const THRESHOLD_LEVELS = [0.15, 0.3, 0.45, 0.6, 0.75];
 /** Face sensitivity slider bounds (REQ-113): 0.10–0.90 step 0.05, default 0.60. */
 export const THRESHOLD_FACE_RANGE = { min: 0.1, max: 0.9, step: 0.05, default: 0.6 };
 
-/** Plate sensitivity slider bounds (REQ-113): 0.05–0.90 step 0.05, default 0.25. */
+/** Plate sensitivity slider bounds (REQ-113): 0.05–0.90 step 0.05, default 0.6 (v1.40.1). */
 export const THRESHOLD_PLATE_RANGE = { min: 0.05, max: 0.9, step: 0.05, default: 0.6 };
 
 /** Compare-panel canvas width as a fraction of the analyze panel width. */
@@ -1045,8 +1045,8 @@ export function describeCompareContext(settings) {
  * call so the shared default can never be mutated by a caller. The SINGLE
  * source of truth for both the initial mount state and clearAll's reset:
  * the analyze-panel controls are always restored from here, never from
- * hand-copied literals. Values are the pre-1.5.0 baked gates (face 0.60,
- * plate 0.25 — THRESHOLD_*__RANGE defaults), dashcam off, plateStride left
+ * hand-copied literals. Values are the THRESHOLD_*_RANGE defaults (face 0.60,
+ * plate 0.60 since v1.40.1), dashcam off, plateStride left
  * undefined so analyze.js applies its own DEFAULT_PLATE_STRIDE.
  *
  * @returns {{confFace: number, confPlate: number, dashcamMode: boolean,

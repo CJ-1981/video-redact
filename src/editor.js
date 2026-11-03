@@ -2515,8 +2515,8 @@ export function mountEditor(els, hooks) {
   /**
    * Map a client x to a time through the CHIPS-layer rect — the SAME axis the
    * chips, playhead, thumb and every other timeline mapping use (v1.6.1 REG-1
-   * rule). v1.22.0 REQ-204: the result maps through the VIEW window (full
-   * view → the old full-duration math).
+   * rule). v1.40.0: the result maps straight through the LANE (full-clip
+   * seconds — the lane percent IS the clip percent).
    * @param {number} clientX
    * @returns {number | null} Seconds, or null when geometry/duration is unusable.
    */

@@ -1523,6 +1523,12 @@
           <button id="zoom-in" type="button" title="Zoom in on the timeline view (ctrl+wheel zooms at the cursor)" aria-label="Zoom in timeline">🔍+</button>
           <button id="zoom-fit" type="button" title="Fit the whole clip in the timeline view" aria-label="Fit timeline view">⤢ Fit</button>
           <button id="peek-button" type="button" title="Hold to peek at the raw, unredacted frame (hold A)" aria-label="Hold to peek at raw frame">👁 Peek</button>
+          <!-- v1.46.1: undo/redo also in the trim bar (field request —
+               next to the review decisions, not only above the track list).
+               Same handlers as #undo-button/#redo-button; both pairs update
+               from the same stacks. -->
+          <button id="undo-button-timeline" type="button" disabled title="Undo the last change (Ctrl+Z)" aria-label="Undo">↩</button>
+          <button id="redo-button-timeline" type="button" disabled title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↪</button>
           <label class="toggle" for="skip-trims-toggle" style="display: flex; align-items: center; gap: 6px;">
             <input type="checkbox" id="skip-trims-toggle" />
             Skip trimmed parts during playback

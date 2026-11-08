@@ -4235,6 +4235,45 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
     expect(handleAt).toBeLessThan(waveAt);
   });
 
+  it('v1.46.1: the trim-bar undo/redo pair mirrors the stacks', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const undoBtn = makeFakeEl('BUTTON');
+      const redoBtn = makeFakeEl('BUTTON');
+      const undoTl = makeFakeEl('BUTTON');
+      const redoTl = makeFakeEl('BUTTON');
+      elsById.set('undo-button', undoBtn);
+      elsById.set('redo-button', redoBtn);
+      elsById.set('undo-button-timeline', undoTl);
+      elsById.set('redo-button-timeline', redoTl);
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandleTop([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1);
+      await flushApp();
+      expect(undoBtn.disabled).toBe(false);
+      expect(undoTl.disabled).toBe(false); // trim-bar pair mirrors the state
+
+      undoTl.dispatch('click');
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(0); // the click undid
+      expect(redoTl.disabled).toBe(false);
+      expect(undoTl.disabled).toBe(true);
+
+      redoTl.dispatch('click');
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(1); // redo re-applied
+    } finally {
+      g.restore();
+    }
+  });
+
   it('v1.45.0: undo/redo reverses review mutations (toggle + E-trim)', async () => {
     const { fakeDoc, fakeView, elsById } = makeFakeEnv();
     g.arm(fakeView);

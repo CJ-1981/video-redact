@@ -2535,6 +2535,9 @@ export async function mountApp(
     rqClose: /** @type {HTMLButtonElement | null} */ ($('rq-close')),
     undoButton: /** @type {HTMLButtonElement | null} */ ($('undo-button')),
     redoButton: /** @type {HTMLButtonElement | null} */ ($('redo-button')),
+    // v1.46.1: the trim-bar pair (next to 👁 Peek) — same stacks/handlers.
+    undoButtonTimeline: /** @type {HTMLButtonElement | null} */ ($('undo-button-timeline')),
+    redoButtonTimeline: /** @type {HTMLButtonElement | null} */ ($('redo-button-timeline')),
 
     bulkPixelate: /** @type {HTMLButtonElement | null} */ ($('bulk-pixelate')),
     trimHint: $('trim-hint'),
@@ -2720,6 +2723,8 @@ export async function mountApp(
   function updateHistoryButtons() {
     if (els.undoButton) els.undoButton.disabled = undoStack.length === 0;
     if (els.redoButton) els.redoButton.disabled = redoStack.length === 0;
+    if (els.undoButtonTimeline) els.undoButtonTimeline.disabled = undoStack.length === 0;
+    if (els.redoButtonTimeline) els.redoButtonTimeline.disabled = redoStack.length === 0;
   }
 
   /** Apply a user mutation to the TRACKS: snapshot the pre-state into the
@@ -4700,6 +4705,8 @@ export async function mountApp(
 
   els.undoButton?.addEventListener('click', () => undoHistory());
   els.redoButton?.addEventListener('click', () => redoHistory());
+  els.undoButtonTimeline?.addEventListener('click', () => undoHistory());
+  els.redoButtonTimeline?.addEventListener('click', () => redoHistory());
 
   // v1.41.1: the card is DRAGGABLE — it floats over the video and must not
   // be stuck covering content. Grab the card body (never the buttons);

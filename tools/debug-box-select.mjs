@@ -205,12 +205,10 @@ try {
     // scroll the strip into view FIRST — the chip rect is viewport-relative
     // and the row-✕ phase had scrolled #below-timeline up
     document.querySelector('#timeline').scrollIntoView({ block: 'center', behavior: 'instant' });
-    // park the playhead at 0 — the scrub thumb owns presses at its position,
-    // and it happens to sit at 2.0s (the E-trim left it there)
-    const v = document.querySelector('video');
-    v.currentTime = 0;
+    // KEEP the playhead parked at chip 2's end (the E-trim left it at
+    // 2.0s) — the scrub thumb sits exactly there and must YIELD to the
+    // chip-edge drag (v1.47.1).
   });
-  await page.waitForTimeout(500); // seeked + re-render settle
   const chip2 = await page.evaluate(() => {
     const el = [...document.querySelectorAll('#track-chips div[data-track-id]')]
       .find((c) => c.dataset.trackId === '2');
@@ -260,9 +258,15 @@ try {
     return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
   });
   const selAfter = await selRow();
+  // v1.47.1: the playhead sits exactly at this edge (E-trim parked it at
+  // 2.0s) — the THUMB must yield: the end trims AND the video does not scrub.
+  const thumbYield = await page.evaluate(() => document.querySelector('video').currentTime);
   check('edge drag on a NON-selected chip moves THAT chip (selected untouched)',
     /2:0:01/.test(after2) && /3:0:03\.0/.test(after2) && selAfter?.startsWith('2:'),
     `before=${before2} after=${after2} sel=${selAfter}`);
+  check('THUMB yields to the chip edge at the playhead (no scrub hijack)',
+    Math.abs(thumbYield - 2.0) < 0.25,
+    `currentTime stayed at ${thumbYield.toFixed(2)} (end trimmed to 1.5)`);
 
   // Stacked chips: the edge drag targets the SELECTED track. Both chips are
   // full-clip-ish at the timeline; grab the edge zone and confirm the

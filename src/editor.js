@@ -3461,6 +3461,29 @@ export function mountEditor(els, hooks) {
 
   function onThumbPointerDown(e) {
     if (e.button !== 0) return;
+    // v1.47.1: the thumb YIELDS to chip edges — a press that lands within a
+    // chip's edge zone belongs to that chip's trim drag (the cursor already
+    // advertised col-resize there). Earlier the thumb stopped propagation
+    // unconditionally, so a chip edge parked at the playhead position could
+    // never be dragged (field-verified papercut). Everything else (body
+    // presses) stays thumb-owned scrubbing.
+    const p = chipsPos(e);
+    const d = duration();
+    if (p && d > 0 && lastLaneInfo) {
+      const hit = hitTestTimeline(
+        p.x,
+        p.y,
+        p.width,
+        getState().tracks,
+        d,
+        edgePx,
+        null,
+        null,
+        lastLaneInfo.lanes,
+        lastLaneInfo.laneH,
+      );
+      if (hit && hit.zone !== 'body') return; // bubbles → strip latches the edge drag
+    }
     // The strip gesture block must never see this press: no chip-edge trim
     // latch, no tap-to-seek anchor — the thumb owns scrubbing only.
     e.stopPropagation();

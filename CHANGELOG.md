@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.47.1] — 2026-11-08
+
+### Fixed
+- **The scrub thumb now yields to chip edges** (papercut found during the v1.43.2 verification: a chip edge parked at the playhead position could never be dragged — the thumb's pointerdown stopped propagation before the strip's edge handler saw the press, so the drag scrubbed instead of trimming). The thumb's pointerdown hit-tests the strip first: a press inside any chip's edge zone bubbles to the strip and latches the edge drag; everything else stays thumb-owned scrubbing. The footer keyboard hints teach `E` (trim selected end) and `Del` (delete selected track).
+
 ## [1.47.0] — 2026-11-08
 
 ### Fixed

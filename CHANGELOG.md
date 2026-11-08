@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.45.0] — 2026-11-08
+
+### Added
+- **Undo/Redo for the review workspace** (↩/↪ buttons above the track list + `Ctrl/Cmd+Z`, `Ctrl+Shift+Z`, `Ctrl+Y`): every review mutation is reversible — track toggles, deletions, new manual regions, span edits (`E`, chip edges, row inputs), style flips, bulk restyles, class group toggles, keyframe additions, trim add/edge/remove, re-scan merges, and review-queue decisions. Snapshot-based with keyframe-Map isolation (60-step cap), buttons disabled when the stacks are empty, and the history resets wholesale on file open / Clear / analyze / project load (those replacements are not undoable).
+
 ## [1.44.0] — 2026-11-08
 
 ### Added

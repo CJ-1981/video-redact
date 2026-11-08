@@ -200,6 +200,22 @@ try {
     return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
   });
   check('stacked edge drag moves the SELECTED track', /2:0:01\.6/.test(ends) || /2:/.test(ends), ends);
+
+  // v1.45.0: UNDO/REDO — delete the last track, undo restores, redo re-removes.
+  await dismissToasts();
+  const uPre = await page.evaluate(() => document.querySelectorAll('#track-list li.track-row').length);
+  await page.locator('#track-list li.track-row').last().locator('.delete-btn').click();
+  await page.waitForTimeout(300);
+  const uD = await page.evaluate(() => document.querySelectorAll('#track-list li.track-row').length);
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(300);
+  const uU = await page.evaluate(() => document.querySelectorAll('#track-list li.track-row').length);
+  await page.keyboard.press('Control+Shift+z');
+  await page.waitForTimeout(300);
+  const uR = await page.evaluate(() => document.querySelectorAll('#track-list li.track-row').length);
+  check('undo/redo reverses track deletion',
+    uPre === 2 && uD === 1 && uU === 2 && uR === 1,
+    `pre=${uPre} delete→${uD} undo→${uU} redo→${uR}`);
 } finally { await browser.close(); server.kill(); }
 console.log(failures === 0 ? 'SUMMARY: PASS' : `SUMMARY: ${failures} failure(s)`);
 process.exitCode = failures === 0 ? 0 : 1;

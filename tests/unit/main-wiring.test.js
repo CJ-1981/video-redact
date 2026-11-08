@@ -4217,6 +4217,72 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
     }
   });
 
+  it('v1.45.0: undo/redo reverses review mutations (toggle + E-trim)', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      // seed the history buttons
+      const undoBtn = makeFakeEl('BUTTON');
+      const redoBtn = makeFakeEl('BUTTON');
+      elsById.set('undo-button', undoBtn);
+      elsById.set('redo-button', redoBtn);
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandleTop([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // Manual #1
+      await flushApp();
+      const afterDraw = hooks.getState().tracks.length; // 1
+      expect(undoBtn.disabled).toBe(false);
+      expect(redoBtn.disabled).toBe(true);
+
+      hooks.onDeleteTrack(1); // delete it
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(0);
+
+      // Ctrl+Z undoes the delete.
+      fakeDoc.__dispatch('keydown', { key: 'z', ctrlKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(1);
+      expect(hooks.getState().tracks[0].id).toBe(1);
+
+      // Ctrl+Shift+Z redoes the delete.
+      fakeDoc.__dispatch('keydown', { key: 'z', ctrlKey: true, shiftKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(0);
+
+      // Ctrl+Y with an empty redo stack is a no-op; Ctrl+Z returns to the
+      // restored state.
+      fakeDoc.__dispatch('keydown', { key: 'y', ctrlKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(0);
+      fakeDoc.__dispatch('keydown', { key: 'z', ctrlKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(1);
+
+      // keyframe-map isolation: mutating the live track must not corrupt the
+      // snapshot (a later undo restores the ORIGINAL keyframe count).
+      hooks.onKeyframe(1, { x: 2, y: 2, w: 3, h: 3 }, 1.5); // adds a keyframe
+      await flushApp();
+      const kfAfter = hooks.getState().tracks[0].keyframes.size;
+      fakeDoc.__dispatch('keydown', { key: 'z', ctrlKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      const kfBefore = hooks.getState().tracks[0].keyframes.size;
+      expect(kfBefore).toBe(kfAfter - 1); // snapshot isolation held
+
+      // a file open resets both stacks (resetTrimState → resetHistory).
+      await openFile(fakeDoc);
+      expect(undoBtn.disabled).toBe(true);
+      expect(redoBtn.disabled).toBe(true);
+    } finally {
+      g.restore();
+    }
+  });
+
   it('v1.44.0: Delete/Backspace deletes the SELECTED track', async () => {
     const { fakeDoc, fakeView } = makeFakeEnv();
     g.arm(fakeView);

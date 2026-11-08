@@ -2481,6 +2481,9 @@ export async function mountApp(
     rqVisible: /** @type {HTMLButtonElement | null} */ ($('rq-visible')),
     rqSkip: /** @type {HTMLButtonElement | null} */ ($('rq-skip')),
     rqClose: /** @type {HTMLButtonElement | null} */ ($('rq-close')),
+    undoButton: /** @type {HTMLButtonElement | null} */ ($('undo-button')),
+    redoButton: /** @type {HTMLButtonElement | null} */ ($('redo-button')),
+
     bulkPixelate: /** @type {HTMLButtonElement | null} */ ($('bulk-pixelate')),
     trimHint: $('trim-hint'),
     skipTrimsToggle: /** @type {HTMLInputElement | null} */ ($('skip-trims-toggle')),
@@ -2596,6 +2599,88 @@ export async function mountApp(
   // v1.41.0: the review-queue triage state — walks every REDACTING track's
   // span; decisions are keep (default) / keep-visible / skip. Null = closed.
   let reviewQueue = /** @type {{ids: number[], index: number, played: boolean, decisions: Map<number, string>} | null} */ (null);
+
+  // v1.45.0: UNDO/REDO history over the review workspace (tracks + trims).
+  // Snapshot-based: every user mutation pushes the PRE-state; undo pops it
+  // (pushing the current state to redo); redo re-applies. Session-only,
+  // capped, and reset wholesale wherever the state is replaced (file open,
+  // Clear, analyze, project load) — those are not undoable.
+  const UNDO_LIMIT = 60;
+  let undoStack = /** @type {Array<{tracks: import('./types.js').Track[], trims: Array<{id: number, start: number, end: number}>}>} */ ([]);
+  let redoStack = /** @type {Array<{tracks: import('./types.js').Track[], trims: Array<{id: number, start: number, end: number}>}>} */ ([]);
+
+  /** Clone tracks for a history snapshot — shallow per track, but the
+   *  keyframes Map is copied so later mutations never leak into history. */
+  function cloneTracksForHistory(tracks) {
+    return (tracks || []).map((t) => ({ ...t, keyframes: new Map(t.keyframes || []) }));
+  }
+
+  function snapshotWorkspace() {
+    return {
+      tracks: cloneTracksForHistory(app.tracks),
+      trims: (app.trims || []).map((r) => ({ ...r })),
+    };
+  }
+
+  /** Push the CURRENT state before a mutation; clears the redo branch. */
+  function pushUndo() {
+    undoStack.push(snapshotWorkspace());
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack = [];
+    updateHistoryButtons();
+  }
+
+  /** Wholesale state replacement (file open / Clear / analyze / project) —
+   *  not undoable: both stacks reset. */
+  function resetHistory() {
+    undoStack = [];
+    redoStack = [];
+    updateHistoryButtons();
+  }
+
+  function applyWorkspaceSnapshot(snap) {
+    app.tracks = cloneTracksForHistory(snap.tracks);
+    app.trims = (snap.trims || []).map((r) => ({ ...r }));
+    if (app.selectedTrackId != null && !app.tracks.some((t) => t.id === app.selectedTrackId)) {
+      app.selectedTrackId = null; // the restored set may not contain it
+    }
+    const maxTrim = app.trims.reduce((m, t) => Math.max(m, Number(t.id) || 0), 0);
+    app.nextTrimId = Math.max(app.nextTrimId, maxTrim + 1); // ids stay monotonic
+    refreshTrackUi();
+  }
+
+  function undoHistory() {
+    if (undoStack.length === 0) return;
+    redoStack.push(snapshotWorkspace());
+    applyWorkspaceSnapshot(undoStack.pop());
+    updateHistoryButtons();
+  }
+
+  function redoHistory() {
+    if (redoStack.length === 0) return;
+    undoStack.push(snapshotWorkspace());
+    applyWorkspaceSnapshot(redoStack.pop());
+    updateHistoryButtons();
+  }
+
+  function updateHistoryButtons() {
+    if (els.undoButton) els.undoButton.disabled = undoStack.length === 0;
+    if (els.redoButton) els.redoButton.disabled = redoStack.length === 0;
+  }
+
+  /** Apply a user mutation to the TRACKS: snapshot the pre-state into the
+   *  undo stack, then commit. Every review-workspace mutation routes through
+   *  here (toggle/delete/draw/trim/style/group/keyframe/rescan/queue). */
+  function applyTracks(next) {
+    pushUndo();
+    app.tracks = next;
+  }
+
+  /** Apply a user mutation to the TRIMS (same contract as applyTracks). */
+  function applyTrims(next) {
+    pushUndo();
+    app.trims = next;
+  }
 
   // --- Small DOM utilities --------------------------------------------------
 
@@ -2809,6 +2894,7 @@ export async function mountApp(
     updateTrackSummary();
     // v1.41.0: triage aids follow the list.
     renderTrackGroups();
+    updateHistoryButtons(); // v1.45.0: undo/redo disabled states
     if (els.reviewQueueButton && !reviewQueue) {
       const enabledCount = app.tracks.filter((t) => t && t.enabled).length;
       els.reviewQueueButton.hidden = app.tracks.length === 0 || enabledCount === 0;
@@ -2851,6 +2937,7 @@ export async function mountApp(
     app.trimMode = false;
     syncTrimToggleUi();
     closeReviewQueue(true); // v1.41.0: a new video never inherits a queue
+    resetHistory(); // v1.45.0: a new video starts with empty undo/redo stacks
   }
 
   function resetAnalyzeUi() {
@@ -3056,6 +3143,7 @@ export async function mountApp(
     const clamp = (v) =>
       Number.isFinite(duration) && duration > 0 ? Math.min(Math.max(v, 0), duration) : v;
     app.tracks = /** @type {any} */ (applied.tracks);
+    resetHistory(); // v1.45.0: a restored project is a wholesale replacement
     const maxManualId = app.tracks
       .filter((t) => t?.source === 'manual')
       .reduce((m, t) => Math.max(m, Number(t?.id) || 0), 0);
@@ -3697,6 +3785,26 @@ export async function mountApp(
       }
       // non-queue keys continue below (B/Space/F/M + the ready-gating)
     }
+    // v1.45.0: undo/redo (Ctrl/Cmd+Z, Ctrl+Shift+Z / Ctrl+Y) — review
+    // workspace mutations (tracks + trims) are reversible.
+    if (e.ctrlKey || e.metaKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undoHistory();
+        return;
+      }
+      if (k === 'z' && e.shiftKey) {
+        e.preventDefault();
+        redoHistory();
+        return;
+      }
+      if (k === 'y') {
+        e.preventDefault();
+        redoHistory();
+        return;
+      }
+    }
     // v1.43.1: Escape clears the track selection — a selected manual track
     // turns the next B-drag into a keyframe (v1.22.0 flow); without a
     // deselect path, box/chip click-to-select (v1.43.0) could strand the
@@ -3716,7 +3824,7 @@ export async function mountApp(
       e.preventDefault();
       const track = app.tracks.find((t) => t && t.id === app.selectedTrackId);
       if (track) {
-        app.tracks = deleteTrack(app.tracks, track.id);
+        applyTracks(deleteTrack(app.tracks, track.id));
         app.selectedTrackId = null;
         refreshTrackUi();
         toast('Track deleted.', { kind: 'ok', timeoutMs: 2500 });
@@ -3733,7 +3841,7 @@ export async function mountApp(
       if (!Number.isFinite(dur)) return;
       const next = trimTrack(app.tracks, track.id, track.start, els.video.currentTime, dur);
       if (next === app.tracks) return; // rejected (min-span) — nothing to say
-      app.tracks = next;
+      applyTracks(next);
       refreshTrackUi();
       toast(`${track.label} ends at ${formatClock(els.video.currentTime)}.`, { kind: 'ok', timeoutMs: 2500 });
       e.preventDefault();
@@ -3844,7 +3952,7 @@ export async function mountApp(
           refreshTrackUi();
         },
         onToggle: (trackId, enabled) => {
-          app.tracks = toggleTrack(app.tracks, trackId, enabled);
+          applyTracks(toggleTrack(app.tracks, trackId, enabled));
           refreshTrackUi();
         },
         onSeek: (t) => {
@@ -3862,7 +3970,7 @@ export async function mountApp(
           if (reviewing) span = { start: reviewing.start, end: reviewing.end };
           const track = manualTrackFromBox(app.manualNextId, t, box, app.meta?.duration, span);
           app.manualNextId += 1;
-          app.tracks = [...app.tracks, track];
+          applyTracks([...app.tracks, track]);
           if (!span) {
             // v1.43.0: teach the E trim (the whole-clip default is only a
             // STARTING point now, per field feedback).
@@ -3879,13 +3987,13 @@ export async function mountApp(
         onTrimTrack: (trackId, start, end) => {
           // REQ-103: chip-edge drag → model trim, clamped to the video
           // duration with the 0.1 s minimum span enforced by the model.
-          app.tracks = trimTrack(app.tracks, trackId, start, end, app.meta?.duration);
+          applyTracks(trimTrack(app.tracks, trackId, start, end, app.meta?.duration));
           refreshTrackUi();
         },
         onSetStyle: (trackId, style) => {
           // REQ-101: per-track redaction style; the shared burn-in seam
           // (redact.pixelateFrame) dispatches on it for preview AND export.
-          app.tracks = setTrackStyle(app.tracks, trackId, style);
+          applyTracks(setTrackStyle(app.tracks, trackId, style));
           refreshTrackUi();
         },
         // v1.22.0 REQ-201: a track-row click SELECTS the track — the target
@@ -3904,7 +4012,7 @@ export async function mountApp(
         // tracks return on the next analyze. Clearing the selection when the
         // deleted track was selected avoids ghost keyframe targeting.
         onDeleteTrack: (trackId) => {
-          app.tracks = deleteTrack(app.tracks, trackId);
+          applyTracks(deleteTrack(app.tracks, trackId));
           if (app.selectedTrackId === trackId) app.selectedTrackId = null;
           refreshTrackUi();
           toast('Track deleted.', { kind: 'ok', timeoutMs: 2500 });
@@ -3917,7 +4025,7 @@ export async function mountApp(
         onKeyframe: (trackId, box, t) => {
           const track = app.tracks.find((tr) => tr.id === trackId);
           if (!track || track.source !== 'manual') return;
-          app.tracks = upsertKeyframe(app.tracks, trackId, t, box, app.meta?.duration);
+          applyTracks(upsertKeyframe(app.tracks, trackId, t, box, app.meta?.duration));
           refreshTrackUi();
           const dur = Number(app.meta?.duration);
           const at = Math.min(
@@ -3940,16 +4048,16 @@ export async function mountApp(
         onTrimAdd: (start, end) => {
           const next = addTrim(app.trims, app.nextTrimId, start, end, app.meta?.duration);
           if (next === app.trims) return; // rejected (overlap/full coverage/too small)
-          app.trims = next;
+          applyTrims(next);
           app.nextTrimId += 1;
           refreshTrackUi();
         },
         onTrimEdge: (id, which, t) => {
-          app.trims = moveTrimEdge(app.trims, id, which, t, app.meta?.duration);
+          applyTrims(moveTrimEdge(app.trims, id, which, t, app.meta?.duration));
           refreshTrackUi();
         },
         onTrimRemove: (id) => {
-          app.trims = removeTrim(app.trims, id);
+          applyTrims(removeTrim(app.trims, id));
           refreshTrackUi();
         },
         // v1.7.0: the timeline scrub thumb's ←/→ keys step ±1 frame through the
@@ -3991,6 +4099,7 @@ export async function mountApp(
 
     // REQ-113: the sensitivity sliders drive the analyze pass (and every
     // re-analyze); absent/invalid sliders → omitted → detector defaults.
+    resetHistory(); // v1.45.0: the analyze merge replaces the track set wholesale
     const settings = { dashcamMode: els.dashcamToggle?.checked === true };
     // v1.39.0: per-class detector toggles — read LIVE like the conf sliders;
     // only an explicit UNCHECK travels into the pass (omitted → runs,
@@ -4129,6 +4238,7 @@ export async function mountApp(
     // re-assigned past every existing id, and manualNextId follows the merge.
     const merged = mergeManualTracks(app.tracks, result?.tracks);
     app.tracks = merged.tracks;
+    resetHistory(); // v1.45.0: the analyze merge is a wholesale replacement
     app.manualNextId = merged.manualNextId;
     // v1.22.0 REQ-201: a selection whose track did not survive the merge
     // (re-analyze replaced the auto set) dangles — drop it rather than let
@@ -4223,7 +4333,7 @@ export async function mountApp(
       const kept = detections.filter((d) => d && d.cls === track.cls);
       const keyframes = mergeDetections(track.keyframes, kept, { iou: 0.5, tEps: 0.15 });
       const added = keyframes.size - (track.keyframes?.size ?? 0);
-      app.tracks = app.tracks.map((tr) => (tr.id === trackId ? { ...tr, keyframes } : tr));
+      applyTracks(app.tracks.map((tr) => (tr.id === trackId ? { ...tr, keyframes } : tr)));
       refreshTrackUi();
       toast(
         added > 0
@@ -4418,11 +4528,11 @@ export async function mountApp(
     const btn = target?.closest?.('.group-btn');
     if (!btn) return;
     // dataset (not getAttribute): the fake-element harness keeps them separate
-    app.tracks = setClassEnabled(
+    applyTracks(setClassEnabled(
       app.tracks,
       /** @type {any} */ (btn).dataset.group,
       /** @type {any} */ (btn).dataset.action === 'redact',
-    );
+    ));
     refreshTrackUi();
   });
 
@@ -4467,7 +4577,7 @@ export async function mountApp(
     if (!reviewQueue) return;
     const track = reviewCurrent();
     if (track && (decision === 'kept' || decision === 'visible')) {
-      app.tracks = toggleTrack(app.tracks, track.id, decision === 'kept');
+      applyTracks(toggleTrack(app.tracks, track.id, decision === 'kept'));
       reviewQueue.decisions.set(track.id, decision);
       refreshTrackUi();
     }
@@ -4530,6 +4640,9 @@ export async function mountApp(
   els.rqVisible?.addEventListener('click', () => advanceReviewQueue('visible'));
   els.rqSkip?.addEventListener('click', () => advanceReviewQueue('skip'));
   els.rqClose?.addEventListener('click', () => closeReviewQueue());
+
+  els.undoButton?.addEventListener('click', () => undoHistory());
+  els.redoButton?.addEventListener('click', () => redoHistory());
 
   // v1.41.1: the card is DRAGGABLE — it floats over the video and must not
   // be stuck covering content. Grab the card body (never the buttons);
@@ -4651,7 +4764,7 @@ export async function mountApp(
       toast('No tracks to restyle.');
       return;
     }
-    app.tracks = setAllTrackStyles(app.tracks, style);
+    applyTracks(setAllTrackStyles(app.tracks, style));
     refreshTrackUi();
   }
 
@@ -5117,6 +5230,7 @@ export async function mountApp(
     const adopted = adoptTracks(p.tracks);
     const clamped = clampTracksToDuration(adopted.tracks, app.meta?.duration);
     app.tracks = clamped.tracks;
+    resetHistory(); // v1.45.0: a loaded project is a wholesale replacement
     app.manualNextId = adopted.manualNextId;
 
     // 3. Video-identity check: a mismatch WARNS but never blocks (REQ-130 —

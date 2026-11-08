@@ -1040,6 +1040,19 @@
       white-space: nowrap;
     }
 
+    /* v1.45.0: undo/redo pair. */
+    #history-buttons {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    #history-buttons button {
+      flex: 1 1 0;
+      min-width: 0;
+      padding: 5px 8px;
+      font-size: 12px;
+    }
+
     /* v1.44.0: per-track delete — destructive, danger-tinted. */
     .delete-btn {
       padding: 4px 8px;
@@ -1554,6 +1567,13 @@
                  with whole-class Redact all / Keep visible. -->
             <button id="review-queue-button" type="button" hidden>Review redactions</button>
             <div id="track-groups" hidden></div>
+            <!-- v1.45.0: undo/redo for review-workspace mutations (tracks +
+                 trims). Disabled when the stacks are empty; keyboard
+                 Ctrl/Cmd+Z / Ctrl+Shift+Z / Ctrl+Y. -->
+            <div id="history-buttons" role="group" aria-label="Undo and redo">
+              <button id="undo-button" type="button" disabled title="Undo the last change (Ctrl+Z)">↩ Undo</button>
+              <button id="redo-button" type="button" disabled title="Redo (Ctrl+Shift+Z or Ctrl+Y)">↪ Redo</button>
+            </div>
             <div id="bulk-style" role="group" aria-label="Set all tracks style">
               <button id="bulk-solid" type="button">All solid</button>
               <button id="bulk-pixelate" type="button">All pixelate</button>

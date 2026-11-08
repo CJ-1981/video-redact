@@ -166,6 +166,21 @@ try {
     laneCheck.count === 3 && laneCheck.distinctTops && laneCheck.stripH >= 66,
     JSON.stringify(laneCheck));
 
+  // v1.44.0: the row ✕ deletes the track — rows drop to 2, selection gone.
+  await page.evaluate(() => {
+    document.querySelector('#below-timeline').scrollIntoView({ block: 'center', behavior: 'instant' });
+  });
+  await page.waitForTimeout(200);
+  await page.locator('#track-list li.track-row').first().locator('.delete-btn').click();
+  await page.waitForTimeout(400);
+  const afterDel = await page.evaluate(() => ({
+    rows: document.querySelectorAll('#track-list li.track-row').length,
+    sel: document.querySelector('#track-list li.track-row.selected')?.dataset.trackId ?? null,
+    toast: [...document.querySelectorAll('#toast-region .toast')].some((t) => t.textContent.includes('Track deleted')),
+  }));
+  check('row ✕ deletes the track (row gone, toast, selection cleared)',
+    afterDel.rows === 2 && afterDel.sel === null && afterDel.toast, JSON.stringify(afterDel));
+
   // Stacked chips: the edge drag targets the SELECTED track. Both chips are
   // full-clip-ish at the timeline; grab the edge zone and confirm the
   // SELECTED track (id 2) moves, not id 1.

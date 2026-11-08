@@ -152,6 +152,7 @@ import {
   formatTrackSummary,
   manualTrackFromBox,
   mountEditor,
+  deleteTrack,
   setClassEnabled,
   setTrackStyle,
   toggleTrack,
@@ -3710,6 +3711,18 @@ export async function mountApp(
     const reviewGated = app.step === 'review' || app.step === 'done';
     const playbackLive = reviewGated || app.step === 'ready';
     if (!playbackLive) return;
+    // v1.44.0: Delete/Backspace removes the SELECTED track entirely.
+    if ((e.key === 'Delete' || e.key === 'Backspace') && app.selectedTrackId != null) {
+      e.preventDefault();
+      const track = app.tracks.find((t) => t && t.id === app.selectedTrackId);
+      if (track) {
+        app.tracks = deleteTrack(app.tracks, track.id);
+        app.selectedTrackId = null;
+        refreshTrackUi();
+        toast('Track deleted.', { kind: 'ok', timeoutMs: 2500 });
+      }
+      return;
+    }
     // v1.43.0: E trims the SELECTED track's END to the playhead — after a
     // B-draw (whole-clip default), scrub to the desired end and press E:
     // no tracks-panel time-range editing needed.
@@ -3885,6 +3898,16 @@ export async function mountApp(
           // regions were unfindable in a long list (field report).
           const selRow = els.trackList?.querySelector('li.track-row.selected');
           selRow?.scrollIntoView?.({ block: 'nearest' });
+        },
+        // v1.44.0: per-track DELETE (row ✕ / Del key) — removes the track
+        // from preview, timeline, list and export for this session; auto
+        // tracks return on the next analyze. Clearing the selection when the
+        // deleted track was selected avoids ghost keyframe targeting.
+        onDeleteTrack: (trackId) => {
+          app.tracks = deleteTrack(app.tracks, trackId);
+          if (app.selectedTrackId === trackId) app.selectedTrackId = null;
+          refreshTrackUi();
+          toast('Track deleted.', { kind: 'ok', timeoutMs: 2500 });
         },
         // v1.22.0 REQ-201: the editor's K commit — a drawn box becomes the
         // SELECTED manual track's keyframe AT THE PLAYHEAD (nearest-keyframe
@@ -4457,7 +4480,6 @@ export async function mountApp(
   }
 
   function finishReviewQueue() {
-    console.warn('[rq-debug] finish', new Error().stack?.split('\n').slice(2, 4).join(' <- '));
     let kept = 0;
     let visible = 0;
     if (reviewQueue) {
@@ -4475,7 +4497,6 @@ export async function mountApp(
   }
 
   function closeReviewQueue(silent = false) {
-    console.warn('[rq-debug] close silent=' + silent, new Error().stack?.split('\n').slice(2, 4).join(' <- '));
     const wasActive = reviewQueue != null;
     reviewQueue = null;
     if (els.reviewQueueCard) els.reviewQueueCard.hidden = true;

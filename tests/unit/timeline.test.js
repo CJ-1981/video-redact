@@ -49,6 +49,7 @@ import {
   setClassEnabled,
   pickTrackAtNativePoint,
   assignChipLanes,
+  deleteTrack,
 } from '../../src/editor.js';
 import { TRACK_COLORS } from '../../src/tracker.js';
 import { tracksAt, dilate } from '../../src/redact.js';
@@ -445,6 +446,21 @@ describe('toggleTrack (immutable enabled flip)', () => {
     expect(out[0]).not.toBe(a);
     expect(a.enabled).toBe(true); // original untouched
     expect(tracks[0].enabled).toBe(true);
+  });
+
+  it('deleteTrack removes exactly one track, order + purity intact (v1.44.0)', () => {
+    const tracks = [
+      makeTrack({ id: 3, cls: 'plate', label: 'Plate #3', color: '#A78BFA' }),
+      makeTrack({ id: 1 }),
+      makeTrack({ id: 2, cls: 'manual', label: 'Manual #2', color: '#E5484D' }),
+    ];
+    const out = deleteTrack(tracks, 1);
+    expect(out.map((t) => t.id)).toEqual([3, 2]); // order preserved, one gone
+    expect(out[0]).toBe(tracks[0]); // untouched tracks keep identity
+    expect(tracks.length).toBe(3); // input untouched
+    const unknown = deleteTrack(tracks, 99);
+    expect(unknown.map((t) => t.id)).toEqual([3, 1, 2]); // unchanged content
+    expect(unknown).not.toBe(tracks); // still a new array
   });
 
   it('setClassEnabled flips exactly one class, in place (v1.41.0 group rows)', () => {

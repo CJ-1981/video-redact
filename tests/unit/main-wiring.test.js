@@ -849,6 +849,24 @@ function makeFakeStyle() {
 }
 
 /** Minimal DOM-element fake good enough for mountApp's guarded wiring. */
+/** TOP-LEVEL inert editor handle (some describes define their own
+ *  refreshCountingHandle — describes without it resolve to this one).
+ *  Returns a handle whose refresh/redraw merely count. */
+function refreshCountingHandleTop(refreshes, redraws = null) {
+  return {
+    destroy() {},
+    refresh: () => {
+      refreshes.push('refresh');
+    },
+    redraw: () => {
+      if (redraws) redraws.push('redraw');
+    },
+    getGestureState: () => ({ dragging: false, pinRemainingMs: 0 }),
+    setRescanBusy() {},
+    setPeek() {},
+  };
+}
+
 function makeFakeEl(tag = 'DIV') {
   const listeners = new Map();
   const classes = new Set();
@@ -4084,7 +4102,7 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
       await main.mountApp(fakeDoc, {
         mountEditor: (_els, h) => {
           hooks = h;
-          return refreshCountingHandle([]);
+          return refreshCountingHandleTop([]);
         },
       });
       await openFile(fakeDoc);
@@ -4127,7 +4145,7 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
       await main.mountApp(fakeDoc, {
         mountEditor: (_els, h) => {
           hooks = h;
-          return refreshCountingHandle([]);
+          return refreshCountingHandleTop([]);
         },
       });
       await openFile(fakeDoc);
@@ -4162,6 +4180,66 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
     }
   });
 
+  it('v1.44.0: the row ✕ deletes the track (row gone, selection cleared)', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandleTop([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // Manual #1 (id 1)
+      hooks.onManualBox({ x: 2, y: 2, w: 4, h: 4 }, 2); // Manual #2 (id 2)
+      await flushApp();
+      hooks.onSelectTrack(1); // select the soon-deleted track
+      expect(hooks.getState().selectedTrackId).toBe(1);
+      expect(hooks.getState().tracks).toHaveLength(2);
+
+      // The onDeleteTrack hook (row ✕ / Del key) removes id 1 and clears
+      // the selection. (The delegated .delete-btn DOM click is covered by
+      // the REAL-browser probe — the fake env mounts no editor.)
+      hooks.onDeleteTrack(1);
+      await flushApp();
+      const st = hooks.getState();
+      expect(st.tracks).toHaveLength(1);
+      expect(st.tracks[0].id).toBe(2);
+      expect(st.selectedTrackId).toBeNull(); // deleted selection cleared
+      // deleting an unknown id is a safe no-op (unchanged content)
+      hooks.onDeleteTrack(1);
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(1);
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('v1.44.0: Delete/Backspace deletes the SELECTED track', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandleTop([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1);
+      hooks.onSelectTrack(1);
+      fakeDoc.__dispatch('keydown', { key: 'Delete', target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(0);
+      expect(hooks.getState().selectedTrackId).toBeNull();
+    } finally {
+      g.restore();
+    }
+  });
+
   it('v1.43.0: E trims the SELECTED track end to the playhead', async () => {
     const { fakeDoc, fakeView } = makeFakeEnv();
     g.arm(fakeView);
@@ -4170,7 +4248,7 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
       await main.mountApp(fakeDoc, {
         mountEditor: (_els, h) => {
           hooks = h;
-          return refreshCountingHandle([]);
+          return refreshCountingHandleTop([]);
         },
       });
       await openFile(fakeDoc);
@@ -4215,7 +4293,7 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
       await main.mountApp(fakeDoc, {
         mountEditor: (_els, h) => {
           hooks = h;
-          return refreshCountingHandle([]);
+          return refreshCountingHandleTop([]);
         },
       });
       await openFile(fakeDoc);

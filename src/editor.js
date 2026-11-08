@@ -907,6 +907,22 @@ export function setClassEnabled(tracks, cls, enabled) {
   );
 }
 
+/**
+ * v1.44.0: REMOVE a track entirely — from the preview, the timeline, the
+ * list and the export (the enable/visible checkbox only opts a track out of
+ * redaction; deletion is permanent for the session — auto tracks return on
+ * re-analyze). PURE: returns a NEW array in the SAME ORDER (the v1.40.2
+ * row-position contract); unknown id → unchanged content (still a new
+ * array).
+ *
+ * @param {import('./types.js').Track[]} tracks
+ * @param {number} trackId
+ * @returns {import('./types.js').Track[]} New array without the track.
+ */
+export function deleteTrack(tracks, trackId) {
+  return (Array.isArray(tracks) ? tracks : []).filter((track) => track.id !== trackId);
+}
+
 // ---------------------------------------------------------------------------
 // PURE: trimTrack — immutable span trim (SPEC-VID-002 REQ-103, AC-101)
 // ---------------------------------------------------------------------------
@@ -1742,6 +1758,10 @@ export function mountEditor(els, hooks) {
   const callSelect = (id) => {
     if (hasHook('onSelectTrack')) hooks.onSelectTrack(id);
   };
+  // v1.44.0: per-track delete (row ✕ button).
+  const callDeleteTrack = (id) => {
+    if (hasHook('onDeleteTrack')) hooks.onDeleteTrack(id);
+  };
   // v1.22.0 REQ-202: the row's "Re-scan" button (auto tracks only).
   const callRescan = (id) => {
     if (hasHook('onRescanTrack')) hooks.onRescanTrack(id);
@@ -2479,12 +2499,23 @@ export function mountEditor(els, hooks) {
     rescanBtn.title = 'Re-scan this span: re-run detection here at a lower threshold and merge new boxes';
     rescanBtn.textContent = 'Re-scan';
 
+    // v1.44.0: per-track DELETE — removes the track entirely (vs the
+    // checkbox, which only opts it out of redaction). The click is consumed
+    // by the list's delegated handler (same as Re-scan).
+    const deleteBtn = doc.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'delete-btn';
+    deleteBtn.dataset.trackId = String(trackId);
+    deleteBtn.title = 'Delete this track — removes it from the preview, timeline and export';
+    deleteBtn.textContent = '✕';
+    deleteBtn.setAttribute('aria-label', `Delete ${track.label}`);
+
     const checkbox = doc.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.dataset.trackId = String(trackId);
     checkbox.title = 'Redact this track';
 
-    row.append(swatch, label, span, times, styleSelect, rescanBtn, checkbox);
+    row.append(swatch, label, span, times, styleSelect, rescanBtn, checkbox, deleteBtn);
     return row;
   }
 
@@ -3543,6 +3574,16 @@ export function mountEditor(els, hooks) {
     // v1.22.0 REQ-202: the row's Re-scan button owns its click (never a
     // row-click seek; the row itself carries data-track-id too, so the
     // button must be resolved first).
+    // v1.44.0: the track DELETE button owns its click (before rescan/row
+    // seek/toggle) — deletion is destructive and must never double as a
+    // row-click select/seek.
+    const deleteBtn =
+      target && typeof target.closest === 'function' ? target.closest('.delete-btn') : null;
+    if (deleteBtn) {
+      const id = Number(deleteBtn.dataset && deleteBtn.dataset.trackId);
+      if (Number.isFinite(id)) callDeleteTrack(id);
+      return;
+    }
     const rescanBtn =
       target && typeof target.closest === 'function' ? target.closest('.rescan-btn') : null;
     if (rescanBtn) {

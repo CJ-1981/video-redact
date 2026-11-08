@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.44.0] — 2026-11-08
+
+### Added
+- **Per-track delete** (field request: "add a delete feature of each track, currently only visibility control is there"): every track row now carries a **✕ delete button** (danger-tinted) that removes the track entirely — from the preview, the timeline, the track list and the export. The enable/visible checkbox keeps its opt-out role; deletion is permanent for the session (auto tracks return on re-analyze). Deleting a selected track clears the selection; `Delete`/`Backspace` on the keyboard deletes the selected track. Pure `deleteTrack` (order-preserving, unit-pinned); a ✕ on an unknown id is a safe no-op.
+
 ## [1.43.2] — 2026-11-08
 
 ### Added

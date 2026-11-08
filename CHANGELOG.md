@@ -6,6 +6,14 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.43.2] — 2026-11-08
+
+### Added
+- **Multi-lane timeline for stacked tracks** (field request: "break down the preview timeline into multi lines to show different tracks better — currently last track obscures older tracks"): overlapping chips now pack into separate lanes (pure `assignChipLanes` greedy interval packing — overlapping chips get distinct rows, touching chips may share, three-way overlaps get three lanes) and the strip grows 22 px per extra lane. Keyframe markers render in the selected track's lane.
+
+### Fixed
+- **A serious early-draw geometry bug** (found while verifying the lanes): a box drawn before the editor's first frame tick committed against the canvas's markup-default 300×150 bitmap instead of the real layout — landing at roughly HALF position/size on screen AND in the export, and making overlay click-selection miss. Two fixes: the draw adapter syncs the canvas bitmap to the current layout at pointerdown, and the commit/pick conversions use a FRESH native-per-canvas scale instead of the memoized `previewScale` (stale `1` on paused/rVFC-dead machines — exactly the field machine). Regions drawn at any time now land exactly where drawn, everywhere.
+
 ## [1.43.1] — 2026-11-08
 
 ### Fixed

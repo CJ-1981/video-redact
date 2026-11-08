@@ -702,6 +702,38 @@ export function pickTrackAtNativePoint(tracks, x, y, t) {
   return best;
 }
 
+/**
+ * PURE (v1.43.2): greedy interval-graph LANE PACKING for the timeline —
+ * overlapping chips land on different lanes so nothing obscures anything
+ * (field report: the last track covered older ones). Items are sorted by
+ * (start, id) and each takes the FIRST lane whose previous chip ends at or
+ * before its start; touching chips may share a lane. The input is never
+ * mutated; unknown/degenerate items degrade to lane 0.
+ *
+ * @param {Array<{id: number, start: number, end: number}>} items
+ *     Chip spans in ANY monotonic space (view-pct or seconds).
+ * @returns {{lanes: Map<number, number>, laneCount: number}}
+ *     laneIndex per item id (0-based) + the total lane count (≥ 1).
+ */
+export function assignChipLanes(items) {
+  const list = (Array.isArray(items) ? items : [])
+    .filter((it) => it && Number.isFinite(it.start) && Number.isFinite(it.end) && it.end > it.start)
+    .sort((a, b) => a.start - b.start || a.id - b.id);
+  const lanes = new Map();
+  const laneEnds = [];
+  for (const item of list) {
+    let lane = laneEnds.findIndex((lastEnd) => lastEnd <= item.start);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      laneEnds.push(item.end);
+    } else {
+      laneEnds[lane] = item.end;
+    }
+    lanes.set(item.id, lane);
+  }
+  return { lanes, laneCount: Math.max(1, laneEnds.length) };
+}
+
 // ---------------------------------------------------------------------------
 // PURE: trimRegionViews — greyed trim-region view model (v1.15.0 REQ-125)
 // ---------------------------------------------------------------------------
@@ -1483,6 +1515,18 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
 
   function onPointerDown(e) {
     if (e.button !== 0) return;
+    // v1.43.2: sync the bitmap to the CURRENT layout BEFORE mapping the
+    // pointer — drawPreview only sizes the canvas on its first frame tick,
+    // so a draw before that tick committed boxes against the markup-default
+    // bitmap (300×150) and landed at half position/size on screen AND in
+    // the export (the video stays paused on rVFC-dead machines, so the
+    // first tick may never come). Same sizing formula as drawPreview.
+    const rect0 = overlayCanvas.getBoundingClientRect();
+    const dpr0 = typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1;
+    const bw0 = Math.max(1, Math.round(rect0.width * dpr0));
+    const bh0 = Math.max(1, Math.round(rect0.height * dpr0));
+    if (overlayCanvas.width !== bw0) overlayCanvas.width = bw0;
+    if (overlayCanvas.height !== bh0) overlayCanvas.height = bh0;
     const p = toCanvasPx(e);
     drag = { x0: p.x, y0: p.y, box: null };
     try {
@@ -2152,19 +2196,35 @@ export function mountEditor(els, hooks) {
     }
     if (chipsContainer) {
       chipsContainer.textContent = '';
-      for (const chip of vm.chips) {
+      // v1.43.2: LANE PACKING — overlapping chips stack into separate rows
+      // instead of obscuring each other (the last track used to cover older
+      // ones). Pure assignChipLanes owns the assignment; the strip grows by
+      // 22 px per extra lane (44 px ≙ one/two lanes = the old height).
+      const LANE_H_PX = 22;
+      const visibleChips = vm.chips.filter((c) => c.endPct - c.startPct > 0);
+      const { lanes, laneCount } = assignChipLanes(
+        visibleChips.map((c) => ({ id: c.track.id, start: c.startPct, end: c.endPct })),
+      );
+      const stripH = Math.max(44, laneCount * LANE_H_PX);
+      const laneH = stripH / laneCount;
+      if (stripTrack && stripTrack.style.height !== `${stripH}px`) {
+        stripTrack.style.height = `${stripH}px`;
+      }
+      for (const chip of visibleChips) {
         const widthPct = chip.endPct - chip.startPct;
-        if (widthPct <= 0) continue; // nothing visible inside the duration
+        const lane = lanes.get(chip.track.id) ?? 0;
         const el = doc.createElement('div');
         el.dataset.trackId = String(chip.track.id);
         el.title = chip.enabled
           ? chip.track.label
           : `${chip.track.label} (visible)`;
         el.style.cssText =
-          'position:absolute;top:6px;bottom:6px;border-radius:4px;' +
+          'position:absolute;border-radius:4px;' +
           'min-width:2px;cursor:pointer;';
         el.style.left = `${chip.startPct}%`;
         el.style.width = `${widthPct}%`;
+        el.style.top = `${lane * laneH + 2}px`;
+        el.style.height = `${Math.max(6, laneH - 4)}px`;
         el.style.background = chip.enabled ? chip.color : SAFE_GREEN;
         el.style.opacity = chip.enabled ? '1' : '0.55';
         // Solid-style chips get a dark inset outline so the burn style is
@@ -2197,6 +2257,9 @@ export function mountEditor(els, hooks) {
       );
       if (sel && sel.keyframes instanceof Map && sel.keyframes.size > 0) {
         const entries = [...sel.keyframes.entries()].sort((a, b) => a[0] - b[0]);
+        // v1.43.2: markers sit in the SELECTED track's lane (lane center).
+        const selLane = lanes.get(sel.id) ?? 0;
+        const laneMidPct = ((selLane + 0.5) / laneCount) * 100;
         for (const [kt] of entries) {
           if (!Number.isFinite(kt)) continue;
           const marker = doc.createElement('div');
@@ -2205,8 +2268,9 @@ export function mountEditor(els, hooks) {
           marker.dataset.kfTime = String(kt);
           marker.title = `${sel.label} keyframe @ ${fmtClock(kt)}`;
           marker.style.cssText =
-            'position:absolute;top:50%;left:0;width:8px;height:8px;margin:0;padding:0;' +
+            'position:absolute;left:0;width:8px;height:8px;margin:0;padding:0;' +
             'border:0;pointer-events:none;transform:translate(-50%, -50%) rotate(45deg);';
+          marker.style.top = `${laneMidPct}%`;
           marker.style.left = `${thumbLeftPct(kt, d)}%`;
           marker.style.background = sel.color || '#E5484D';
           chipsContainer.appendChild(marker);
@@ -3610,15 +3674,17 @@ export function mountEditor(els, hooks) {
           // (and main.js scrolls the row into view) — stacked regions became
           // unfindable without this (field report).
           onClick: (cx, cy, t) => {
-            console.warn('[box-click] cx/cy', Math.round(cx), Math.round(cy), 't', t, 'scale', previewScale);
             const st = getState();
-            const hit = pickTrackAtNativePoint(
-              st.tracks,
-              cx / (previewScale > 0 ? previewScale : 1),
-              cy / (previewScale > 0 ? previewScale : 1),
-              t,
-            );
-            console.warn('[box-click] hit', hit ? hit.id + ' ' + hit.label : 'null', 'tracks', st.tracks.length, 'sel', st.selectedTrackId);
+            // v1.43.2: fresh scale (see commitManualBox) — a stale memo
+            // would convert the click into a different space than the
+            // stored boxes and miss them.
+            const canvasW = canvas && canvas.width > 0 ? canvas.width : 0;
+            const vw = video?.videoWidth || 0;
+            const scaleNative = canvasW > 0 && vw > 0 ? vw / canvasW : 0;
+            const hit =
+              scaleNative > 0
+                ? pickTrackAtNativePoint(st.tracks, cx * scaleNative, cy * scaleNative, t)
+                : null;
             if (hit) callSelect(hit.id);
           },
         })

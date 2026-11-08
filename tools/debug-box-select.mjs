@@ -32,6 +32,7 @@ const canvasPt = async (fx, fy) => page.evaluate(([fx2, fy2]) => {
   return { x: r.left + r.width * fx2, y: r.top + r.height * fy2 };
 }, [fx, fy]);
 try {
+  page.on('console', (m) => { if (m.text().includes('[box-click]') || m.text().includes('[pick-debug]') || m.text().includes('[commit]')) console.log('BROWSER:', m.text()); });
   await page.goto(`http://127.0.0.1:${PORT}/dist/index.html`, { waitUntil: 'load' });
   await page.waitForSelector('#serve-gate', { state: 'hidden' });
   await page.setInputFiles('#file-input', join(ROOT, 'tests', 'fixtures', 'detectable.mp4'));
@@ -85,7 +86,8 @@ try {
     return { selected: sel?.dataset.trackId ?? null };
   });
   console.log('SYNTH pick:', JSON.stringify(synth));
-  const clickA = await canvasPt(0.35, 0.42);
+  // strictly inside box A (not on its edge — a DPR hair at the exact boundary flips containment)
+  const clickA = await canvasPt(0.37, 0.45);
   await page.mouse.click(clickA.x, clickA.y);
   await page.waitForTimeout(300);
   const selA = await selRow();
@@ -149,6 +151,20 @@ try {
     unStuck.rows === 3 && /Manual #3/.test(unStuck.labels.join(',')),
     `rows=${unStuck.rows} labels=${unStuck.labels.join(',')}`);
   console.log('pre-esc rows:', pendingState.rows);
+
+  // v1.43.2: LANE PACKING — the overlapping chips render on separate rows.
+  const laneCheck = await page.evaluate(() => {
+    const chips = [...document.querySelectorAll('#track-chips div[data-track-id]')];
+    const tops = chips.map((c) => Math.round(c.getBoundingClientRect().top));
+    return {
+      count: chips.length,
+      distinctTops: new Set(tops).size === tops.length,
+      stripH: Math.round(document.querySelector('#timeline-track').getBoundingClientRect().height),
+    };
+  });
+  check('overlapping chips land on distinct lanes (strip grows)',
+    laneCheck.count === 3 && laneCheck.distinctTops && laneCheck.stripH >= 66,
+    JSON.stringify(laneCheck));
 
   // Stacked chips: the edge drag targets the SELECTED track. Both chips are
   // full-clip-ish at the timeline; grab the edge zone and confirm the

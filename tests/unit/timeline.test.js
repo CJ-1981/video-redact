@@ -48,6 +48,7 @@ import {
   scrollLeftFor,
   setClassEnabled,
   pickTrackAtNativePoint,
+  assignChipLanes,
 } from '../../src/editor.js';
 import { TRACK_COLORS } from '../../src/tracker.js';
 import { tracksAt, dilate } from '../../src/redact.js';
@@ -307,6 +308,48 @@ describe('effectiveEdgePx (REQ-112 coarse-pointer edge zones)', () => {
 // ---------------------------------------------------------------------------
 // toggleTrack (REQ-014, AC-06)
 // ---------------------------------------------------------------------------
+
+describe('assignChipLanes (v1.43.2) — overlapping chips get separate lanes', () => {
+  it('overlapping pair → two lanes; sequential chips share one', () => {
+    const overlap = assignChipLanes([
+      { id: 1, start: 0, end: 60 },
+      { id: 2, start: 30, end: 90 },
+    ]);
+    expect(overlap.laneCount).toBe(2);
+    expect(overlap.lanes.get(1)).toBe(0);
+    expect(overlap.lanes.get(2)).toBe(1);
+    const seq = assignChipLanes([
+      { id: 1, start: 0, end: 30 },
+      { id: 2, start: 30, end: 60 },
+    ]);
+    expect(seq.laneCount).toBe(1); // touching chips share a lane
+    expect(seq.lanes.get(1)).toBe(0);
+    expect(seq.lanes.get(2)).toBe(0);
+  });
+
+  it('three-way overlap → three lanes; later insertion packs greedily', () => {
+    const out = assignChipLanes([
+      { id: 5, start: 40, end: 60 },
+      { id: 1, start: 0, end: 100 },
+      { id: 3, start: 20, end: 80 },
+    ]);
+    expect(out.laneCount).toBe(3);
+    expect(out.lanes.get(1)).toBe(0); // sorted first (start 0)
+    expect(out.lanes.get(3)).toBe(1); // next free lane
+    expect(out.lanes.get(5)).toBe(2);
+  });
+
+  it('is PURE (input never mutated) and degrades empties to one lane', () => {
+    const items = [{ id: 1, start: 0, end: 50 }, { id: 2, start: 10, end: 60 }];
+    const snapshot = JSON.stringify(items);
+    assignChipLanes(items);
+    expect(JSON.stringify(items)).toBe(snapshot);
+    const empty = assignChipLanes([]);
+    expect(empty.laneCount).toBe(1);
+    const junk = assignChipLanes([{ id: 1, start: 50, end: 10 }]); // inverted → dropped
+    expect(junk.laneCount).toBe(1);
+  });
+});
 
 describe('manualTrackFromBox span (v1.41.2) — review-queue draw spans the reviewed frames', () => {
   it('a valid span overrides the full-clip default (start/end + keyframe clamp)', () => {

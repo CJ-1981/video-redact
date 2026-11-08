@@ -216,6 +216,31 @@ try {
   check('undo/redo reverses track deletion',
     uPre === 2 && uD === 1 && uU === 2 && uR === 1,
     `pre=${uPre} delete→${uD} undo→${uU} redo→${uR}`);
+
+  // v1.46.0: the timeline resize handle grows the strip.
+  const tlHandleBox = await page.evaluate(() => {
+    const h = document.querySelector('#timeline-resize-handle');
+    h.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const r = h.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  await page.waitForTimeout(150);
+  const tl0 = await page.evaluate(() => Math.round(document.querySelector('#timeline-track').getBoundingClientRect().height));
+  await page.mouse.move(tlHandleBox.x, tlHandleBox.y);
+  await page.mouse.down();
+  await page.mouse.move(tlHandleBox.x, tlHandleBox.y + 100, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const tl1 = await page.evaluate(() => ({
+    h: Math.round(document.querySelector('#timeline-track').getBoundingClientRect().height),
+    aria: document.querySelector('#timeline-resize-handle').getAttribute('aria-valuenow'),
+  }));
+  check('timeline handle drag-down grows the strip',
+    tl1.h > tl0 + 10, `height ${tl0} → ${tl1.h} (aria ${tl1.aria}%)`);
+  await page.locator('#timeline-resize-handle').dblclick();
+  await page.waitForTimeout(250);
+  const tl2 = await page.evaluate(() => Math.round(document.querySelector('#timeline-track').getBoundingClientRect().height));
+  check('double-click resets the timeline height', tl2 <= tl0 + 2, `height=${tl2}`);
 } finally { await browser.close(); server.kill(); }
 console.log(failures === 0 ? 'SUMMARY: PASS' : `SUMMARY: ${failures} failure(s)`);
 process.exitCode = failures === 0 ? 0 : 1;

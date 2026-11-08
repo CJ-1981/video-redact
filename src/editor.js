@@ -2225,7 +2225,13 @@ export function mountEditor(els, hooks) {
       const { lanes, laneCount } = assignChipLanes(
         visibleChips.map((c) => ({ id: c.track.id, start: c.startPct, end: c.endPct })),
       );
-      const stripH = Math.max(44, laneCount * LANE_H_PX);
+      // v1.46.0: the user's height scale from #timeline-resize-handle —
+      // lane heights scale up proportionally; the 44 px floor is the auto
+      // single/dual-lane height.
+      const tlScale = Number.isFinite(state.timelineScale) && state.timelineScale > 0
+        ? state.timelineScale
+        : 1;
+      const stripH = Math.max(44, laneCount * LANE_H_PX * tlScale);
       const laneH = stripH / laneCount;
       if (stripTrack && stripTrack.style.height !== `${stripH}px`) {
         stripTrack.style.height = `${stripH}px`;

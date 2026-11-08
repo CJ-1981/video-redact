@@ -1053,6 +1053,23 @@
       font-size: 12px;
     }
 
+    /* v1.46.0: timeline bottom handle — same grip as the others. */
+    #timeline-resize-handle {
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 12px;
+      margin: -2px 0 2px;
+      border-radius: 7px;
+      cursor: ns-resize;
+      touch-action: none;
+      user-select: none;
+      color: var(--ink);
+    }
+    #timeline-resize-handle .grip { font-size: 11px; letter-spacing: 2px; }
+    #timeline-resize-handle:hover { color: var(--accent); }
+
     /* v1.44.0: per-track delete — destructive, danger-tinted. */
     .delete-btn {
       padding: 4px 8px;
@@ -1536,6 +1553,12 @@
           </div>
           <span id="timeline-duration" class="num timecode">0:00.0</span>
         </section>
+        <!-- v1.46.0: drag the timeline's bottom edge to resize it (lane
+             heights scale up; double-click resets to auto). Session-only,
+             same contract as the stage/tracks/rail handles. -->
+        <div id="timeline-resize-handle" role="separator" aria-orientation="horizontal" tabindex="0" aria-valuemin="100" aria-valuemax="300" aria-valuenow="100" aria-label="Resize timeline height" title="Drag to resize the timeline — double-click resets">
+          <span class="grip" aria-hidden="true">⋮⋮</span>
+        </div>
         <!-- v1.22.0 REQ-206: waveform strip — decoded-audio peaks, directly
              under the timeline. Hidden until peaks decode (silent audio /
              undecodable files keep it hidden forever — silent degrade).

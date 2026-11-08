@@ -4217,6 +4217,24 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
     }
   });
 
+  it('v1.46.0: timeline scale helpers clamp/step; handle markup exists', () => {
+    expect(main.TIMELINE_SCALE_MIN).toBe(1);
+    expect(main.TIMELINE_SCALE_MAX).toBe(3);
+    expect(main.clampTimelineScale(2)).toBe(2);
+    expect(main.clampTimelineScale(0.5)).toBe(1);
+    expect(main.clampTimelineScale(99)).toBe(3);
+    expect(main.clampTimelineScale(Number.NaN)).toBe(1);
+    expect(main.nextTimelineScale(1, 1)).toBe(1.25);
+    expect(main.nextTimelineScale(3, 1)).toBe(3);
+    expect(main.nextTimelineScale(3, -1)).toBe(2.75);
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+    const tlEnd = html.indexOf('</section>', html.indexOf('id="timeline"'));
+    const handleAt = html.indexOf('id="timeline-resize-handle"');
+    const waveAt = html.indexOf('id="waveform"');
+    expect(handleAt).toBeGreaterThan(tlEnd);
+    expect(handleAt).toBeLessThan(waveAt);
+  });
+
   it('v1.45.0: undo/redo reverses review mutations (toggle + E-trim)', async () => {
     const { fakeDoc, fakeView, elsById } = makeFakeEnv();
     g.arm(fakeView);

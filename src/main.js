@@ -557,6 +557,57 @@ export function nextTrackListHeight(px, dir) {
 }
 
 // ---------------------------------------------------------------------------
+// Timeline height scale model (pure; v1.46.0 — #timeline-resize-handle)
+// ---------------------------------------------------------------------------
+
+/** Lower clamp bound for the timeline height scale (1 = auto lane heights). */
+export const TIMELINE_SCALE_MIN = 1;
+/** Upper clamp bound for the timeline height scale. */
+export const TIMELINE_SCALE_MAX = 3;
+/** Keyboard step (ArrowUp / ArrowDown on the focused handle). */
+export const TIMELINE_SCALE_STEP = 0.25;
+
+/**
+ * Clamp a desired timeline height scale to the v1.46.0 bounds. PURE.
+ * Non-finite or ≤ 0 degrades to the auto scale (1).
+ *
+ * @param {number} scale Desired scale (1 = auto lane heights).
+ * @returns {number} Clamped scale.
+ */
+export function clampTimelineScale(scale) {
+  if (!Number.isFinite(scale) || scale <= 0) return TIMELINE_SCALE_MIN;
+  return Math.min(Math.max(scale, TIMELINE_SCALE_MIN), TIMELINE_SCALE_MAX);
+}
+
+/**
+ * Drag the timeline height scale: the handle sits BELOW the strip, so
+ * dragging DOWN (clientY > startY) ENLARGES it. PURE — the caller clamps.
+ *
+ * @param {number} startY Pointer Y at drag start (CSS px).
+ * @param {number} clientY Current pointer Y (CSS px).
+ * @param {number} startScale Scale at drag start.
+ * @returns {number} Unclamped new scale (60 px of drag = +1.0×).
+ */
+export function dragTimelineScale(startY, clientY, startScale) {
+  const dy = Number.isFinite(clientY) && Number.isFinite(startY) ? clientY - startY : 0;
+  const from = Number.isFinite(startScale) && startScale > 0 ? startScale : 1;
+  return from + dy / 60;
+}
+
+/**
+ * Step the timeline scale by `dir` steps (PURE). dir > 0 enlarges.
+ *
+ * @param {number} scale Current scale.
+ * @param {number} dir Step count (ArrowUp = +1 enlarge).
+ * @returns {number} Stepped + clamped scale.
+ */
+export function nextTimelineScale(scale, dir) {
+  const from = Number.isFinite(scale) && scale > 0 ? scale : TIMELINE_SCALE_MIN;
+  const d = Number.isFinite(dir) ? dir : 0;
+  return clampTimelineScale(from + d * TIMELINE_SCALE_STEP);
+}
+
+// ---------------------------------------------------------------------------
 // Rail-split width model (pure; v1.12.0 REQ-118)
 // ---------------------------------------------------------------------------
 
@@ -2383,6 +2434,7 @@ export async function mountApp(
     fullscreenButton: /** @type {HTMLButtonElement | null} */ ($('preview-fullscreen')),
     stageResizeHandle: /** @type {HTMLElement | null} */ ($('stage-resize-handle')),
     tracksResizeHandle: /** @type {HTMLElement | null} */ ($('tracks-resize-handle')),
+    timelineResizeHandle: /** @type {HTMLElement | null} */ ($('timeline-resize-handle')),
     transportStart: /** @type {HTMLButtonElement | null} */ ($('transport-start')),
     transportBack: /** @type {HTMLButtonElement | null} */ ($('transport-back')),
     transportPlay: /** @type {HTMLButtonElement | null} */ ($('transport-play')),
@@ -2532,6 +2584,7 @@ export async function mountApp(
    *          nextTrimId: number, trimMode: boolean,
    *          trackFilter: 'all' | 'face' | 'plate' | 'manual',
    *          viewStart: number, viewEnd: number, waveform: Float32Array | null,
+ *          timelineScale: number,
    *          settings: {minSizePx: number, downscale: 'full' | '1080p' | '720p',
    *                     pixelStrength: 'fine' | 'normal' | 'coarse' | 'max'}}} */
   const app = {
@@ -2566,6 +2619,7 @@ export async function mountApp(
     // null until the lazy post-review decode lands (null also = no audio /
     // undecodable — the strip stays hidden).
     waveform: null,
+    timelineScale: 1, // v1.46.0: timeline height scale (1 = auto lanes)
     // v1.12.0: the analyze-pass settings driven by the #size-filter button
     // group (REQ-120) and #downscale-select (REQ-117); reset per file load
     // and Clear (resetSizeFilter / resetDownscale). v1.17.0 REQ-129: the
@@ -3941,6 +3995,9 @@ export async function mountApp(
           viewEnd: app.viewEnd,
           // v1.22.0 REQ-206: decoded waveform peaks (null → strip hidden).
           waveform: app.waveform,
+          // v1.46.0: the timeline height scale from #timeline-resize-handle
+          // (1 = auto lane heights; render() sizes the strip from it).
+          timelineScale: app.timelineScale,
         }),
         // v1.22.0 REQ-204: the editor's zoom/pan/fit gestures emit the NEXT
         // view window here; persisting + refreshing re-renders every strip
@@ -5983,6 +6040,72 @@ export async function mountApp(
       e.preventDefault(); // the handle scrolls nothing itself
       e.stopPropagation();
       applyTrackListHeight(nextTrackListHeight(trackListHeight, step));
+    });
+  }
+
+  // --- Timeline height resize (v1.46.0 #timeline-resize-handle) ----------------
+  //
+  // Same pattern as the tracks/stage/rail handles: pointer capture drag,
+  // double-click reset, ArrowUp/ArrowDown steps. Session-only; the scale
+  // rides the editor's getState (render() sizes the strip from it), so the
+  // lane-based auto height keeps working as the floor.
+
+  let timelineScale = TIMELINE_SCALE_MIN;
+
+  /** Single timeline-scale mutation path: clamp → app state → refresh. */
+  function applyTimelineScale(scale) {
+    timelineScale = clampTimelineScale(scale);
+    if (app.timelineScale !== timelineScale) {
+      app.timelineScale = timelineScale;
+      refreshTrackUi(); // render() sizes the strip from getState().timelineScale
+    }
+    if (els.timelineResizeHandle) {
+      const pct = Math.round((timelineScale / TIMELINE_SCALE_MAX) * 100);
+      els.timelineResizeHandle.setAttribute('aria-valuenow', String(pct));
+    }
+  }
+
+  const tlHandle = els.timelineResizeHandle;
+  if (tlHandle) {
+    /** Live pointer drag: pointerdown anchor + scale at anchor. */
+    let tlDrag = /** @type {{startY: number, startScale: number} | null} */ (null);
+
+    tlHandle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      tlDrag = { startY: e.clientY, startScale: timelineScale };
+      try {
+        tlHandle.setPointerCapture(e.pointerId);
+      } catch {
+        /* detached handle — capture is best-effort */
+      }
+      e.preventDefault();
+    });
+    tlHandle.addEventListener('pointermove', (e) => {
+      if (!tlDrag) return;
+      applyTimelineScale(dragTimelineScale(tlDrag.startY, e.clientY, tlDrag.startScale));
+    });
+    const endTlScaleDrag = (e) => {
+      if (!tlDrag) return;
+      tlDrag = null;
+      try {
+        tlHandle.releasePointerCapture(e.pointerId);
+      } catch {
+        /* never captured or already released */
+      }
+      applyTimelineScale(timelineScale);
+      if (tlHandle.blur) tlHandle.blur(); // REG-2: keep shortcuts live
+    };
+    tlHandle.addEventListener('pointerup', endTlScaleDrag);
+    tlHandle.addEventListener('pointercancel', endTlScaleDrag);
+    tlHandle.addEventListener('dblclick', () => {
+      applyTimelineScale(TIMELINE_SCALE_MIN); // double-click reset to auto
+    });
+    tlHandle.addEventListener('keydown', (e) => {
+      const step = e.key === 'ArrowUp' ? 1 : e.key === 'ArrowDown' ? -1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      e.stopPropagation();
+      applyTimelineScale(nextTimelineScale(timelineScale, step));
     });
   }
 

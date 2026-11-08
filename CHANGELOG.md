@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.46.0] — 2026-11-08
+
+### Added
+- **Timeline height handle** (⋮⋮ below the strip): drag to scale the timeline's height — lane rows grow proportionally, so multi-lane stacks and chip labels become easier to read and hit. Double-click resets to the auto lane height (44 px floor); ArrowUp/Down ±0.25× on the focused handle; clamped at 3×; session-only like the other handles. The lane-packing floor and the wave/scroll behaviors are unchanged — this is a pure presentation scale carried through `getState().timelineScale`.
+
 ## [1.45.0] — 2026-11-08
 
 ### Added

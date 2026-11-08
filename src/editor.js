@@ -3500,6 +3500,14 @@ export function mountEditor(els, hooks) {
     if (track) {
       // v1.22.0 REQ-201: a row click SELECTS the track (K-keyframe target +
       // keyframe markers) in addition to the existing jump to its start.
+      // v1.43.1: clicking the ALREADY-selected row TOGGLES the selection
+      // off — with box/chip click-to-select (v1.43.0) selection happens
+      // constantly, and a selected manual track turns the next B-drag into
+      // a keyframe; there must always be a way back to drawing new regions.
+      if (getState().selectedTrackId === id) {
+        callSelect(null);
+        return;
+      }
       callSelect(id);
       callSeek(clampTime(track.start));
     }
@@ -3602,6 +3610,7 @@ export function mountEditor(els, hooks) {
           // (and main.js scrolls the row into view) — stacked regions became
           // unfindable without this (field report).
           onClick: (cx, cy, t) => {
+            console.warn('[box-click] cx/cy', Math.round(cx), Math.round(cy), 't', t, 'scale', previewScale);
             const st = getState();
             const hit = pickTrackAtNativePoint(
               st.tracks,
@@ -3609,6 +3618,7 @@ export function mountEditor(els, hooks) {
               cy / (previewScale > 0 ? previewScale : 1),
               t,
             );
+            console.warn('[box-click] hit', hit ? hit.id + ' ' + hit.label : 'null', 'tracks', st.tracks.length, 'sel', st.selectedTrackId);
             if (hit) callSelect(hit.id);
           },
         })

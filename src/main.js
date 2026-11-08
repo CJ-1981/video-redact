@@ -3696,6 +3696,16 @@ export async function mountApp(
       }
       // non-queue keys continue below (B/Space/F/M + the ready-gating)
     }
+    // v1.43.1: Escape clears the track selection — a selected manual track
+    // turns the next B-drag into a keyframe (v1.22.0 flow); without a
+    // deselect path, box/chip click-to-select (v1.43.0) could strand the
+    // user in keyframe mode forever.
+    if (e.key === 'Escape' && app.selectedTrackId != null) {
+      app.selectedTrackId = null;
+      refreshTrackUi();
+      e.preventDefault();
+      return;
+    }
     if (!els.video) return; // togglePlay/stepFrame guard internally too
     const reviewGated = app.step === 'review' || app.step === 'done';
     const playbackLive = reviewGated || app.step === 'ready';
@@ -3740,7 +3750,7 @@ export async function mountApp(
       );
       toast(
         selected
-          ? `Drawing for ${selected.label}: drag a box, then press K to set it as a keyframe at the playhead — Escape discards.`
+          ? `Drawing for ${selected.label}: drag a box, then press K to set it as a keyframe at the playhead — Esc discards the box; press Esc again (or re-click the row) to deselect and draw new regions.`
           : 'Drag on the video to draw a manual redaction box — Escape cancels the drag. (Click a manual track row to keyframe it instead.)',
         { timeoutMs: 4000 },
       );

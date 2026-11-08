@@ -16,6 +16,12 @@ const browser = await chromium.launch();
 const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
 let failures = 0;
 const check = (name, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`); if (!ok) failures += 1; };
+const dismissToasts = async () => {
+  await page.evaluate(() => {
+    document.querySelectorAll('#toast-region .toast').forEach((t) => t.remove());
+  });
+  await page.waitForTimeout(120);
+};
 const selRow = () => page.evaluate(() => {
   const sel = document.querySelector('#track-list li.track-row.selected');
   return sel ? `${sel.dataset.trackId}:${sel.querySelector('.label')?.textContent.trim()}` : null;
@@ -40,6 +46,7 @@ try {
   console.log('after box A:', await selRow());
 
   // Second overlapping-ish box elsewhere.
+  await dismissToasts();
   await page.keyboard.press('b');
   const c2 = await canvasPt(0.6, 0.55);
   await page.mouse.move(c2.x, c2.y);
@@ -50,6 +57,34 @@ try {
   console.log('after box B:', await selRow());
 
   // Click (no drag) inside box A's area → selects Manual #1.
+  await page.evaluate(() => {
+    window.__ptr = [];
+    document.addEventListener('pointerdown', (e) => {
+      const chain = [];
+      let n = e.target;
+      while (n && chain.length < 4) { chain.push(n.id || String(n.className).slice(0, 20) || n.tagName); n = n.parentElement; }
+      window.__ptr.push(e.type + '@' + Math.round(e.clientX) + ',' + Math.round(e.clientY) + '@' + chain.join('>'));
+    }, true);
+    window.__toasts = [...document.querySelectorAll('#toast-region .toast')].map((t) => t.textContent.slice(0, 30));
+    const clickA = document.querySelector('#overlay-canvas').getBoundingClientRect();
+    window.__pt = { x: clickA.left + clickA.width * 0.35, y: clickA.top + clickA.height * 0.42 };
+    window.__hit = (() => { const el = document.elementFromPoint(window.__pt.x, window.__pt.y); let c = []; let n = el; while (n && c.length < 3) { c.push(n.id || String(n.className).slice(0, 16) || n.tagName); n = n.parentElement; } return c.join('>'); })();
+  });
+  console.log('DIAG:', JSON.stringify(await page.evaluate(() => ({ ptr: window.__ptr, toasts: window.__toasts, pt: window.__pt, hit: window.__hit }))));
+  // Synthetic dispatch first (isolate app logic from harness quirks).
+  const synth = await page.evaluate(async () => {
+    const canvas = document.querySelector('#overlay-canvas');
+    const r = canvas.getBoundingClientRect();
+    const px = r.left + r.width * 0.35;
+    const py = r.top + r.height * 0.42;
+    const opts = { bubbles: true, button: 0, clientX: px, clientY: py, pointerId: 9, isPrimary: true };
+    canvas.dispatchEvent(new PointerEvent('pointerdown', opts));
+    canvas.dispatchEvent(new PointerEvent('pointerup', opts));
+    await new Promise((res) => setTimeout(res, 300));
+    const sel = document.querySelector('#track-list li.track-row.selected');
+    return { selected: sel?.dataset.trackId ?? null };
+  });
+  console.log('SYNTH pick:', JSON.stringify(synth));
   const clickA = await canvasPt(0.35, 0.42);
   await page.mouse.click(clickA.x, clickA.y);
   await page.waitForTimeout(300);
@@ -80,6 +115,40 @@ try {
     };
   });
   check('E trims the selected track end to the playhead', endCheck.row === '2' && endCheck.end === '0:02.0', JSON.stringify(endCheck));
+
+  // v1.43.1: Esc un-sticks keyframe mode. With a manual track selected,
+  // a B-drag ARMS a keyframe (dashed box waiting for K); Esc discards the
+  // box AND deselects — the next B-drag must create a NEW region again.
+  await dismissToasts();
+  await page.keyboard.press('b');
+  const d1 = await canvasPt(0.5, 0.4);
+  await page.mouse.move(d1.x, d1.y);
+  await page.mouse.down();
+  await page.mouse.move(d1.x + 60, d1.y + 40, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const pendingState = await page.evaluate(() => ({
+    rows: document.querySelectorAll('#track-list li.track-row').length,
+    dashedVisible: !!document.querySelector('#overlay-canvas'),
+  }));
+  await page.keyboard.press('Escape'); // discard the armed keyframe box
+  await page.keyboard.press('Escape'); // deselect the track
+  await page.waitForTimeout(250);
+  await page.keyboard.press('b');
+  const d2 = await canvasPt(0.45, 0.35);
+  await page.mouse.move(d2.x, d2.y);
+  await page.mouse.down();
+  await page.mouse.move(d2.x + 60, d2.y + 40, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const unStuck = await page.evaluate(() => ({
+    rows: document.querySelectorAll('#track-list li.track-row').length,
+    labels: [...document.querySelectorAll('#track-list li.track-row .label')].map((l) => l.textContent.trim()),
+  }));
+  check('Esc un-sticks keyframe mode — next drag draws a NEW region',
+    unStuck.rows === 3 && /Manual #3/.test(unStuck.labels.join(',')),
+    `rows=${unStuck.rows} labels=${unStuck.labels.join(',')}`);
+  console.log('pre-esc rows:', pendingState.rows);
 
   // Stacked chips: the edge drag targets the SELECTED track. Both chips are
   // full-clip-ish at the timeline; grab the edge zone and confirm the

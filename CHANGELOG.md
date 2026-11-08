@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.43.1] — 2026-11-08
+
+### Fixed
+- **Selection no longer traps you in keyframe mode** (field report: "once track selected, adding new box is not possible and get stuck in keyframe mode"). With box/chip click-to-select (v1.43.0), a selected manual track is now the common state — and v1.22.0's rule turns the next B-drag into a keyframe with **no way back**. Two escape hatches: **Esc clears the selection**, and **clicking the already-selected row toggles the selection off** — the next B-drag creates a new region again. The B-hint toast now teaches both. Probe-verified: select → B-drag arms (rows stay 2) → Esc ×2 → B-drag creates Manual #3.
+
 ## [1.43.0] — 2026-11-08
 
 ### Added

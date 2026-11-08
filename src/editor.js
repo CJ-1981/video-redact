@@ -3643,12 +3643,19 @@ export function mountEditor(els, hooks) {
     if (!video) return;
     const nw = video.videoWidth || 0;
     const nh = video.videoHeight || 0;
-    if (!nw || !nh || !(previewScale > 0)) return; // no frame to map against
+    if (!nw || !nh) return; // no frame to map against
+    // v1.43.2 (restored — the original fix was lost to a crashed script):
+    // FRESH native-per-canvas scale. The memoized previewScale stays 1
+    // until drawPreview's first tick, which on paused/rVFC-dead machines
+    // may never come — committing against it stored boxes at half
+    // position/size. The eager pointerdown sync guarantees canvas.width is
+    // current, so nw/canvas.width is the true ratio.
+    const scaleNative = canvas && canvas.width > 0 ? nw / canvas.width : previewScale;
     const native = {
-      x: boxCanvas.x / previewScale,
-      y: boxCanvas.y / previewScale,
-      w: boxCanvas.w / previewScale,
-      h: boxCanvas.h / previewScale,
+      x: boxCanvas.x * scaleNative,
+      y: boxCanvas.y * scaleNative,
+      w: boxCanvas.w * scaleNative,
+      h: boxCanvas.h * scaleNative,
     };
     const st = getState();
     const selected = (Array.isArray(st.tracks) ? st.tracks : []).find(

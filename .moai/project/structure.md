@@ -5,7 +5,7 @@ Module responsibilities follow `src/` contracts (design.md §3). Codemaps: `code
 ```
 video-redact/
 ├── index.html                  # Dev shell: CSP, pinned importmap (mediabunny 1.63.0, onnxruntime-web 1.31.1), dark editor UI, serve gate
-├── package.json                # Pinned scripts + deps; version 1.42.0 is the build-stamp source of truth
+├── package.json                # Pinned scripts + deps; version 1.46.0 is the build-stamp source of truth
 ├── eslint.config.js            # Flat ESLint config (src + tools)
 ├── tsconfig.json               # tsc --noEmit checkJs over JSDoc types (src, tools; tests/dist excluded)
 ├── vitest.config.js            # Unit suite: node env, tests/unit/**; v8 coverage (>= 85% gate on logic modules)
@@ -23,7 +23,7 @@ video-redact/
 │   ├── editor.js               # REQ-012..015 + 101/103/108..110/125 + 204/206: pure timeline model (render/hitTest/toggle/trim/style/clock inputs, trimRegionViews overlays, renderTimeline, toggleTrack/setClassEnabled, scrollWindow/scrollLeftFor glue, manualTrackFromBox span) + scrub thumb (thumbLeftPct/thumbAriaValue/thumbPinSettled, THUMB_PIN_*) + thin DOM adapters (mountEditor)
 │   ├── exporter.js             # REQ-017..019/021/126: runExport burn-in via mediabunny Conversion, codec ladder, exportGeometry resolution scaling + scaleTracks, per-segment trim conversion + concat, OPFS staging, temp cleanup
 │   ├── project.js              # REQ-130: .vrproj project save/load — PROJECT_FORMAT_VERSION, serializeProject, parseProject, validateVideoMatch (video re-association warnings)
-│   ├── main.js                 # M5 + SPEC-VID-002 wiring: deriveStep state machine (incl. CLEAR), transport/overlay/fullscreen/keyboard (±5 s jump, F/M), stage/rail/intake resize, theme, file info, size filter, downscale, pixel strength, trim regions (normalizeTrims/addTrim/moveTrimEdge/removeTrim/trimsAt/keptSegments), threshold compare (settings-honoring), project save/load wiring, export choices (resetExportChoices on load/Clear only), mute toggle, keyboard gating (shortcutEnabledFor), per-class detector toggles (syncDetectToggles/enforceDetectorPair — v1.39.0/1.39.1), counter-separator paint (v1.39.2), waveform load-time decode trigger (v1.39.3), triage aids (review queue + class groups via setClassEnabled, v1.41.x), tracks-list resize (v1.42.0), ?debug=1 diag (parseDebugFlag/formatDiagLine), mountEditorSafe + mountEditorLive + mergeManualTracks, adoptTracks/clampTracksToDuration, formatters, error mapping, version badge, mountApp
+│   ├── main.js                 # M5 + SPEC-VID-002 wiring: deriveStep state machine (incl. CLEAR), transport/overlay/fullscreen/keyboard (±5 s jump, F/M), stage/rail/intake resize, theme, file info, size filter, downscale, pixel strength, trim regions (normalizeTrims/addTrim/moveTrimEdge/removeTrim/trimsAt/keptSegments), threshold compare (settings-honoring), project save/load wiring, export choices (resetExportChoices on load/Clear only), mute toggle, keyboard gating (shortcutEnabledFor), per-class detector toggles (syncDetectToggles/enforceDetectorPair — v1.39.0/1.39.1), counter-separator paint (v1.39.2), waveform load-time decode trigger (v1.39.3), triage aids (review queue + class groups via setClassEnabled, v1.41.x), tracks-list resize (v1.42.0), undo/redo history (applyTracks/applyTrims wrappers + undoHistory/redoHistory, v1.45.0), timeline height scale (v1.46.0), ?debug=1 diag (parseDebugFlag/formatDiagLine), mountEditorSafe + mountEditorLive + mergeManualTracks, adoptTracks/clampTracksToDuration, formatters, error mapping, version badge, mountApp
 │   ├── ort-runtime.d.ts        # Ambient module declaration for the lazily imported 'onnxruntime-web'
 │   └── build-env.d.ts          # Ambient declarations for __APP_VERSION__ / __BUILD_DATE__ build stamps
 ├── tools/
@@ -56,9 +56,10 @@ video-redact/
 │   ├── debug-zoom-scroll.mjs   # v1.40.0 probe: zoomed-strip geometry (chip spans vs lane, scroll bounds, wheel, scrolled tap-seek)
 │   ├── debug-review-queue.mjs  # v1.41.x probe: triage aids end-to-end (groups, queue pacing, decisions, replay, drag)
 │   ├── debug-track-order.mjs   # v1.40.2 probe: toggle never reorders rows + scrolled-list uncheck + resize handle
+│   ├── debug-box-select.mjs    # v1.43.x probe: overlay box click-select, E-trim, lane packing, delete, undo/redo
 │   └── debug-export-settings.mjs # v1.17.1 probe: real-browser proof that resolution/audio choices reach the exporter (720p + audio-off export)
 ├── tests/
-│   ├── unit/                   # 16 vitest files, 932 tests (pure logic + seams; node env)
+│   ├── unit/                   # 16 vitest files, 946 tests (pure logic + seams; node env)
 │   ├── e2e/                    # 5 Playwright specs + fixtures.js + geometry.js helpers (6 tests)
 │   └── fixtures/               # detectable.mp4 (real detected face; provenance in fixture.json), synthetic.mp4
 ├── dist/
@@ -69,7 +70,7 @@ video-redact/
 └── .moai/
     ├── project/                # This docs set: product.md, structure.md, tech.md, codemaps/
     ├── specs/SPEC-VID-001/     # Base app: spec.md, spec-compact.md, acceptance.md, plan.md, design.md, research.md, design-direction.md, progress.md, tasks.md
-    └── specs/SPEC-VID-002/     # Review UX amendments (v1.1.0–1.42.0 REQ-101..130): spec.md, progress.md
+    └── specs/SPEC-VID-002/     # Review UX amendments (v1.1.0–1.46.0 REQ-101..130): spec.md, progress.md
 ```
 
 Build outputs (`dist/`, `coverage/`, `test-results/`) are generated and gitignored.

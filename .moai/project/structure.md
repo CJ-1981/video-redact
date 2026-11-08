@@ -5,7 +5,7 @@ Module responsibilities follow `src/` contracts (design.md §3). Codemaps: `code
 ```
 video-redact/
 ├── index.html                  # Dev shell: CSP, pinned importmap (mediabunny 1.63.0, onnxruntime-web 1.31.1), dark editor UI, serve gate
-├── package.json                # Pinned scripts + deps; version 1.46.0 is the build-stamp source of truth
+├── package.json                # Pinned scripts + deps; version 1.47.0 is the build-stamp source of truth
 ├── eslint.config.js            # Flat ESLint config (src + tools)
 ├── tsconfig.json               # tsc --noEmit checkJs over JSDoc types (src, tools; tests/dist excluded)
 ├── vitest.config.js            # Unit suite: node env, tests/unit/**; v8 coverage (>= 85% gate on logic modules)
@@ -59,7 +59,7 @@ video-redact/
 │   ├── debug-box-select.mjs    # v1.43.x probe: overlay box click-select, E-trim, lane packing, delete, undo/redo
 │   └── debug-export-settings.mjs # v1.17.1 probe: real-browser proof that resolution/audio choices reach the exporter (720p + audio-off export)
 ├── tests/
-│   ├── unit/                   # 16 vitest files, 946 tests (pure logic + seams; node env)
+│   ├── unit/                   # 16 vitest files, 948 tests (pure logic + seams; node env)
 │   ├── e2e/                    # 5 Playwright specs + fixtures.js + geometry.js helpers (6 tests)
 │   └── fixtures/               # detectable.mp4 (real detected face; provenance in fixture.json), synthetic.mp4
 ├── dist/
@@ -70,7 +70,7 @@ video-redact/
 └── .moai/
     ├── project/                # This docs set: product.md, structure.md, tech.md, codemaps/
     ├── specs/SPEC-VID-001/     # Base app: spec.md, spec-compact.md, acceptance.md, plan.md, design.md, research.md, design-direction.md, progress.md, tasks.md
-    └── specs/SPEC-VID-002/     # Review UX amendments (v1.1.0–1.46.0 REQ-101..130): spec.md, progress.md
+    └── specs/SPEC-VID-002/     # Review UX amendments (v1.1.0–1.47.0 REQ-101..130): spec.md, progress.md
 ```
 
 Build outputs (`dist/`, `coverage/`, `test-results/`) are generated and gitignored.

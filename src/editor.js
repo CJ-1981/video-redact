@@ -821,19 +821,18 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
   const all = Array.isArray(tracks) ? tracks : [];
   let best = null;
   let bestSpan = Infinity;
-  let preferred = null; // v1.43.0: the SELECTED track, if it contains the point
+  let preferred = null; // the SELECTED track, if it contains the point
   for (const track of all) {
     const start = Math.max(v.start, track.start); // clamp to the rendered window
     const end = Math.min(v.end, track.end);
     if (t < start || t > end) continue;
     const span2 = end - start;
-    if (track.id === preferredId) preferred = track; // wins ABSOLUTELY
+    if (track.id === preferredId) preferred = track;
     if (span2 < bestSpan) {
       bestSpan = span2;
       best = track;
     }
   }
-  if (preferred) best = preferred;
   if (best) {
     const start = Math.max(v.start, best.start);
     const end = Math.min(v.end, best.end);
@@ -845,6 +844,13 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
     if (inStart && inEnd) zone = t < (start + end) / 2 ? 'start' : 'end';
     else if (inStart) zone = 'start';
     else if (inEnd) zone = 'end';
+    // v1.43.1: the selected-track preference applies to BODY hits only —
+    // an EDGE is a precision target and must match the advertised cursor
+    // exactly (field report v1.43.2: the cursor showed resize arrows on a
+    // different chip's edge while the drag grabbed the selected track).
+    if (zone === 'body' && preferred) {
+      return { track: preferred, zone: 'body' };
+    }
     return { track: best, zone };
   }
   // Outward pass (REQ-110): within `edgePx` OUTSIDE a (clamped) span edge —

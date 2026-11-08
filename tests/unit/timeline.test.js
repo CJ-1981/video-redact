@@ -400,6 +400,19 @@ describe('hitTestTimeline preferredId (v1.43.0) — stacked chips favor the sele
     expect(hit.track.id).toBe(1); // selected wide beat the narrow default
   });
 
+  it('EDGE zones ignore the preference — the cursor-advertised chip wins (v1.43.2 fix)', () => {
+    // x = 4.99s is inside BOTH spans, but within narrow's END edge zone.
+    // Selected = wide. The edge must resolve to narrow (what the col-resize
+    // cursor advertised), not the selected track.
+    const hit = hitTestTimeline(499, 0, 1000, [wide, narrow], 10, 6, null, 1);
+    expect(hit.track.id).toBe(2);
+    expect(hit.zone).toBe('end');
+    // and the wide track's body point still prefers wide (body ≠ edge)
+    const body = hitTestTimeline(400, 0, 1000, [wide, narrow], 10, 6, null, 1);
+    expect(body.track.id).toBe(1);
+    expect(body.zone).toBe('body');
+  });
+
   it('a selection that does NOT contain the point never hijacks the hit', () => {
     // x = 8s: inside wide [0,10] only — selection is narrow [3,5], which
     // does not contain the point → the narrowest-containing rule answers.

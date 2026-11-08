@@ -181,6 +181,75 @@ try {
   check('row ✕ deletes the track (row gone, toast, selection cleared)',
     afterDel.rows === 2 && afterDel.sel === null && afterDel.toast, JSON.stringify(afterDel));
 
+  // v1.43.2 fix: the EDGE of a non-selected chip is draggable — hover chip
+  // 2's end edge (while chip 1 is SELECTED) and drag: chip 2 must move,
+  // chip 1 (selected) must not.
+  await dismissToasts();
+  await page.mouse.click(clickA.x, clickA.y); // select chip 1 (Manual #1)
+  await page.waitForTimeout(300);
+  await page.evaluate(() => {
+    // scroll the strip into view FIRST — the chip rect is viewport-relative
+    // and the row-✕ phase had scrolled #below-timeline up
+    document.querySelector('#timeline').scrollIntoView({ block: 'center', behavior: 'instant' });
+    // park the playhead at 0 — the scrub thumb owns presses at its position,
+    // and it happens to sit at 2.0s (the E-trim left it there)
+    const v = document.querySelector('video');
+    v.currentTime = 0;
+  });
+  await page.waitForTimeout(500); // seeked + re-render settle
+  const chip2 = await page.evaluate(() => {
+    const el = [...document.querySelectorAll('#track-chips div[data-track-id]')]
+      .find((c) => c.dataset.trackId === '2');
+    const r = el.getBoundingClientRect();
+    return {
+      // chip 2's END edge = the chip's RIGHT edge (minus 3 px to sit inside
+      // the grab zone rather than past it)
+      x: r.right - 3,
+      y: r.top + r.height / 2,
+    };
+  });
+  await page.waitForTimeout(150);
+  const before2 = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#track-list li.track-row')];
+    return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
+  });
+  await page.evaluate(() => {
+    window.__ptr = [];
+    document.addEventListener('pointerdown', (e) => {
+      const chain = [];
+      let n = e.target;
+      while (n && chain.length < 4) { chain.push(n.id || String(n.className).slice(0, 18) || n.tagName); n = n.parentElement; }
+      window.__ptr.push('down@' + Math.round(e.clientX) + ',' + Math.round(e.clientY) + '@' + chain.join('>'));
+    }, true);
+    document.addEventListener('pointermove', (e) => {
+      if (window.__ptr.length && !window.__ptr.some((p2) => p2.startsWith('move'))) {
+        window.__ptr.push('move@' + Math.round(e.clientX) + ',' + Math.round(e.clientY));
+      }
+    }, true);
+  });
+  console.log('CHIP2 DIAG:', JSON.stringify(await page.evaluate(() => {
+    const el = [...document.querySelectorAll('#track-chips div[data-track-id]')].find((c) => c.dataset.trackId === '2');
+    const r = el.getBoundingClientRect();
+    const lane = document.querySelector('#track-chips').getBoundingClientRect();
+    const hit = document.elementFromPoint(r.right - 3, r.top + r.height / 2);
+    return { rect: { left: r.left, right: r.right, top: r.top, w: r.width, h: r.height }, laneLeft: lane.left, laneW: lane.width, hitAtDrag: hit?.id || hit?.className };
+  })));
+  await page.mouse.move(chip2.x, chip2.y);
+  await page.mouse.down();
+  await page.mouse.move(chip2.x - 60, chip2.y, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  console.log('PTR LOG:', JSON.stringify(await page.evaluate(() => window.__ptr.slice(0, 6))));
+  await page.waitForTimeout(400);
+  const after2 = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#track-list li.track-row')];
+    return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
+  });
+  const selAfter = await selRow();
+  check('edge drag on a NON-selected chip moves THAT chip (selected untouched)',
+    /2:0:01/.test(after2) && /3:0:03\.0/.test(after2) && selAfter?.startsWith('2:'),
+    `before=${before2} after=${after2} sel=${selAfter}`);
+
   // Stacked chips: the edge drag targets the SELECTED track. Both chips are
   // full-clip-ish at the timeline; grab the edge zone and confirm the
   // SELECTED track (id 2) moves, not id 1.

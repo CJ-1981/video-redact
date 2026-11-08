@@ -4050,6 +4050,10 @@ export async function mountApp(
           // REQ-103: chip-edge drag → model trim, clamped to the video
           // duration with the 0.1 s minimum span enforced by the model.
           applyTracks(trimTrack(app.tracks, trackId, start, end, app.meta?.duration));
+          // v1.43.2: adjusting an edge SELECTS that track — the row
+          // highlights and subsequent E/Del/keys target what you just
+          // dragged (stacked lanes made the adjusted track unfindable).
+          app.selectedTrackId = trackId;
           refreshTrackUi();
         },
         onSetStyle: (trackId, style) => {

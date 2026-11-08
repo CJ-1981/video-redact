@@ -669,6 +669,39 @@ export function renderTimeline(tracks, durationSec, currentTimeSec, view) {
   return { chips, playheadPct: pct(currentTimeSec) };
 }
 
+/**
+ * PURE (v1.43.0): which ENABLED track's redaction box contains a preview-
+ * canvas point at time `t` — the click-to-select path for overlay boxes
+ * (field report: clicking a redaction box on the video didn't select the
+ * track, so stacked regions were impossible to find). Preference: the
+ * SMALLEST containing box (most specific — stacked full-clip and small
+ * boxes both containing a point resolve to the small one); ties resolve to
+ * the later track (painted on top). Coordinates are NATIVE display px.
+ *
+ * @param {import('./types.js').Track[]} tracks
+ * @param {number} x Pointer x in native display px.
+ * @param {number} y Pointer y in native display px.
+ * @param {number} t Time (display seconds).
+ * @returns {import('./types.js').Track | null} The hit track, or null.
+ */
+export function pickTrackAtNativePoint(tracks, x, y, t) {
+  const all = Array.isArray(tracks) ? tracks : [];
+  let best = null;
+  let bestArea = Infinity;
+  for (const hit of tracksAt(all, t)) {
+    const b = hit.box;
+    if (!b || !Number.isFinite(b.x + b.y + b.w + b.h)) continue;
+    if (x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) continue;
+    const area = b.w * b.h;
+    if (area <= bestArea) {
+      // `<=`: equal boxes resolve to the LATER track (topmost paint order)
+      bestArea = area;
+      best = hit.track;
+    }
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------------------
 // PURE: trimRegionViews — greyed trim-region view model (v1.15.0 REQ-125)
 // ---------------------------------------------------------------------------
@@ -746,7 +779,7 @@ export function trimRegionViews(trims, durationSec, view) {
  * @returns {{track: import('./types.js').Track,
  *            zone: 'start'|'end'|'body'} | null}
  */
-export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_EDGE_PX, view) {
+export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_EDGE_PX, view, preferredId = null) {
   void y;
   if (!(width > 0) || !(durationSec > 0)) return null;
   const v = normalizeView(view, durationSec);
@@ -756,16 +789,19 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
   const all = Array.isArray(tracks) ? tracks : [];
   let best = null;
   let bestSpan = Infinity;
+  let preferred = null; // v1.43.0: the SELECTED track, if it contains the point
   for (const track of all) {
     const start = Math.max(v.start, track.start); // clamp to the rendered window
     const end = Math.min(v.end, track.end);
     if (t < start || t > end) continue;
     const span2 = end - start;
+    if (track.id === preferredId) preferred = track; // wins ABSOLUTELY
     if (span2 < bestSpan) {
       bestSpan = span2;
       best = track;
     }
   }
+  if (preferred) best = preferred;
   if (best) {
     const start = Math.max(v.start, best.start);
     const end = Math.min(v.end, best.end);
@@ -1393,6 +1429,7 @@ export function scaleTracksToCanvas(tracks, scale) {
  *     Called with the normalized canvas-space box and `getTime()`.
  * @param {{getTime?: () => number,
  *          onPendingChange?: (box: import('./types.js').Box | null) => void,
+ *          onClick?: (canvasX: number, canvasY: number, t: number) => void,
  *     }} [opts]
  *     `getTime` supplies the commit time (default () => 0; mountEditor passes
  *     video.currentTime). `onPendingChange` streams the live rubber band
@@ -1407,6 +1444,10 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
   const getTime = typeof opts.getTime === 'function' ? opts.getTime : () => 0;
   const onPending =
     typeof opts.onPendingChange === 'function' ? opts.onPendingChange : null;
+  // v1.43.0: a canvas CLICK (box under MIN_DRAG_PX) is a selection tap, not
+  // a draw — opts.onClick maps it to the track under the point.
+  const onClick =
+    typeof opts.onClick === 'function' ? opts.onClick : null;
 
   /** @type {{x0: number, y0: number, box: import('./types.js').Box} | null} */
   let drag = null;
@@ -1462,6 +1503,8 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
   function finish(e, commit) {
     if (!drag) return;
     const box = drag.box;
+    const x0 = drag.x0; // a CLICK (no move) never builds a box — keep the anchor
+    const y0 = drag.y0;
     drag = null;
     try {
       overlayCanvas.releasePointerCapture(e.pointerId);
@@ -1471,6 +1514,12 @@ export function beginManualBox(overlayCanvas, onCommit, opts = {}) {
     if (onPending) onPending(null);
     if (commit && box && box.w >= MIN_DRAG_PX && box.h >= MIN_DRAG_PX) {
       onCommit(box, getTime());
+    } else if (commit && onClick) {
+      // v1.43.0: a degenerate box (or no box at all — pointerup without a
+      // move) is a CLICK — select the track whose box contains the point
+      // (canvas px; the picker works in native px, but the ratio cancels
+      // for containment so canvas px is fine).
+      onClick(box ? box.x : x0, box ? box.y : y0, getTime());
     }
   }
 
@@ -2481,7 +2530,7 @@ export function mountEditor(els, hooks) {
    * was primary-button (only primary presses ever seeked via click either).
    */
   let downPos =
-    /** @type {{x: number, y: number, edgeLeft: boolean, edgeRight: boolean, primary: boolean} | null} */ (
+    /** @type {{x: number, y: number, edgeLeft: boolean, edgeRight: boolean, trackId: number | null, primary: boolean} | null} */ (
       null
     );
   /** Chip element whose inline cursor we overrode for the edge affordance. */
@@ -2592,7 +2641,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId);
     if (hit) callToggle(hit.track.id, !hit.track.enabled);
   }
 
@@ -2630,6 +2679,7 @@ export function mountEditor(els, hooks) {
       y: e.clientY,
       edgeLeft: false,
       edgeRight: false,
+      trackId: null,
       primary: e.button === 0,
     };
     if (!downPos.primary) return;
@@ -2655,13 +2705,16 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId);
     if (hit) {
       // Latch the press-time zone: an edge press hands the gesture to the
       // trim path (timelinePointerAction will never turn it into a seek),
-      // a body press keeps the tap-to-seek path alive.
+      // a body press keeps the tap-to-seek path alive. v1.43.0: a BODY tap
+      // also remembers the chip — the seek then SELECTS that track (stacked
+      // rows were impossible to find, field report).
       downPos.edgeLeft = hit.zone === 'start';
       downPos.edgeRight = hit.zone === 'end';
+      downPos.trackId = hit.zone === 'body' ? hit.track.id : null;
     }
     if (!hit || hit.zone === 'body') {
       // v1.15.0 REQ-125: in trim mode, a press on the bare strip or a chip
@@ -2800,6 +2853,10 @@ export function mountEditor(els, hooks) {
     const d = duration();
     if (!(d > 0)) return;
     callSeek(timelineTimeAt(p.x, p.width, d));
+    // v1.43.0: a chip tap ALSO selects that track — the row scrolls into
+    // view and the stacked-chip preference (hitTest preferredId) targets
+    // subsequent edge drags at the track you just tapped.
+    if (downPos?.trackId != null) callSelect(downPos.trackId);
   }
 
   function onChipsPointerCancel() {
@@ -2840,7 +2897,7 @@ export function mountEditor(els, hooks) {
     const d = duration();
     let cursor = '';
     if (p && d > 0) {
-      const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx);
+      const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId);
       cursor = !hit ? '' : hit.zone === 'body' ? 'pointer' : 'col-resize';
     }
     const target =
@@ -3540,6 +3597,19 @@ export function mountEditor(els, hooks) {
           onPendingChange: (box) => {
             pendingBox = box;
             drawPending();
+          },
+          // v1.43.0: clicking a redaction box on the video SELECTS its track
+          // (and main.js scrolls the row into view) — stacked regions became
+          // unfindable without this (field report).
+          onClick: (cx, cy, t) => {
+            const st = getState();
+            const hit = pickTrackAtNativePoint(
+              st.tracks,
+              cx / (previewScale > 0 ? previewScale : 1),
+              cy / (previewScale > 0 ? previewScale : 1),
+              t,
+            );
+            if (hit) callSelect(hit.id);
           },
         })
       : null;

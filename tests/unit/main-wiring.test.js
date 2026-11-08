@@ -4162,6 +4162,50 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
     }
   });
 
+  it('v1.43.0: E trims the SELECTED track end to the playhead', async () => {
+    const { fakeDoc, fakeView } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandle([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // manual id 1, full clip
+      hooks.onSelectTrack(1); // select it
+      const st0 = hooks.getState();
+      expect(st0.selectedTrackId).toBe(1);
+      expect(st0.tracks[0].end).toBeGreaterThan(2); // whole clip
+
+      // Scrub the playhead to 2 s, press E.
+      const video = fakeDoc.getElementById('preview-video');
+      video.currentTime = 2;
+      video.duration = 3;
+      fakeDoc.__dispatch('keydown', {
+        key: 'e',
+        target: null,
+        preventDefault: () => {},
+      });
+      await flushApp();
+      const st = hooks.getState();
+      expect(st.tracks[0].end).toBe(2); // trimmed to the playhead
+      expect(st.tracks[0].start).toBe(0); // start untouched
+
+      // E on nothing selected is a no-op.
+      hooks.onSelectTrack(null);
+      const before = hooks.getState().tracks.map((t) => t.end);
+      video.currentTime = 2.9;
+      fakeDoc.__dispatch('keydown', { key: 'e', target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks.map((t) => t.end)).toEqual(before);
+    } finally {
+      g.restore();
+    }
+  });
+
   it('v1.41.2: a box drawn DURING the review queue spans the reviewed track only', async () => {
     const { fakeDoc, fakeView, elsById } = makeFakeEnv();
     g.arm(fakeView);

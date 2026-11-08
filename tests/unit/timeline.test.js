@@ -47,6 +47,7 @@ import {
   scrollWindow,
   scrollLeftFor,
   setClassEnabled,
+  pickTrackAtNativePoint,
 } from '../../src/editor.js';
 import { TRACK_COLORS } from '../../src/tracker.js';
 import { tracksAt, dilate } from '../../src/redact.js';
@@ -338,6 +339,49 @@ describe('manualTrackFromBox span (v1.41.2) — review-queue draw spans the revi
     const noSpan = manualTrackFromBox(7, 1, { x: 5, y: 5, w: 6, h: 6 }, 10);
     expect(noSpan.start).toBe(0);
     expect(noSpan.end).toBe(10);
+  });
+});
+
+describe('hitTestTimeline preferredId (v1.43.0) — stacked chips favor the selection', () => {
+  const wide = makeTrack({ id: 1, start: 0, end: 10 });
+  const narrow = makeTrack({ id: 2, cls: 'plate', label: 'Plate #2', color: '#A78BFA', start: 3, end: 5 });
+
+  it('narrowest wins by default (pre-v1.43 behavior)', () => {
+    const hit = hitTestTimeline(400, 0, 1000, [wide, narrow], 10);
+    expect(hit.track.id).toBe(2); // x=4s inside both → narrow
+  });
+
+  it('the SELECTED track wins among stacked candidates', () => {
+    const hit = hitTestTimeline(400, 0, 1000, [wide, narrow], 10, 6, null, 1);
+    expect(hit.track.id).toBe(1); // selected wide beat the narrow default
+  });
+
+  it('a selection that does NOT contain the point never hijacks the hit', () => {
+    // x = 8s: inside wide [0,10] only — selection is narrow [3,5], which
+    // does not contain the point → the narrowest-containing rule answers.
+    const hit = hitTestTimeline(800, 0, 1000, [wide, narrow], 10, 6, null, 2);
+    expect(hit.track.id).toBe(1);
+  });
+});
+
+describe('pickTrackAtNativePoint (v1.43.0) — overlay box click-to-select', () => {
+  const t = (id, start, end) => makeTrack({ id, start, end });
+
+  it('picks the smallest containing box at the time', () => {
+    const wide = t(1, 0, 10);
+    const small = t(2, 0, 10);
+    small.keyframes = new Map([[0, { x: 100, y: 100, w: 60, h: 60 }]]);
+    wide.keyframes = new Map([[0, { x: 0, y: 0, w: 600, h: 400 }]]);
+    const hits = pickTrackAtNativePoint([wide, small], 130, 130, 0);
+    expect(hits.id).toBe(2); // smallest area wins
+    expect(pickTrackAtNativePoint([wide, small], 10, 10, 0).id).toBe(1); // only wide contains
+  });
+
+  it('disabled tracks and outside-time points never hit', () => {
+    const off = t(1, 0, 10);
+    off.enabled = false;
+    expect(pickTrackAtNativePoint([off], 50, 50, 0)).toBeNull();
+    expect(pickTrackAtNativePoint([t(1, 5, 10)], 50, 50, 1)).toBeNull(); // t before span
   });
 });
 

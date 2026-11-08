@@ -6,6 +6,15 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.43.0] — 2026-11-08
+
+### Added
+- **Click a redaction box on the video to select its track** (field report: clicking preview boxes didn't select, so stacked regions were unfindable). A plain click on the preview canvas picks the SMALLEST containing box (stacked full-clip + small boxes resolve to the small one) and selects that track — the row highlights and scrolls into view. A timeline chip tap also selects its track, and stacked chips now prefer the already-selected track for edge drags (the narrowest still wins otherwise).
+- **E trims the selected track's END to the playhead** (field request: a drawn box should easily get an end point instead of assuming the whole clip). Draw → scrub to the desired end → `E` — no tracks-panel editing. A toast teaches it after every whole-clip draw.
+
+### Fixed
+- A plain canvas click no longer gets discarded by the draw adapter before the selection hit-test could run (the click never built a box, so the selection branch was unreachable).
+
 ## [1.42.0] — 2026-11-02
 
 ### Added

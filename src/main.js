@@ -3700,6 +3700,22 @@ export async function mountApp(
     const reviewGated = app.step === 'review' || app.step === 'done';
     const playbackLive = reviewGated || app.step === 'ready';
     if (!playbackLive) return;
+    // v1.43.0: E trims the SELECTED track's END to the playhead — after a
+    // B-draw (whole-clip default), scrub to the desired end and press E:
+    // no tracks-panel time-range editing needed.
+    if (e.key === 'e' || e.key === 'E') {
+      const track = app.tracks.find((t) => t && t.id === app.selectedTrackId);
+      if (!track) return;
+      const dur = Number.isFinite(els.video?.duration) && els.video.duration > 0 ? els.video.duration : NaN;
+      if (!Number.isFinite(dur)) return;
+      const next = trimTrack(app.tracks, track.id, track.start, els.video.currentTime, dur);
+      if (next === app.tracks) return; // rejected (min-span) — nothing to say
+      app.tracks = next;
+      refreshTrackUi();
+      toast(`${track.label} ends at ${formatClock(els.video.currentTime)}.`, { kind: 'ok', timeoutMs: 2500 });
+      e.preventDefault();
+      return;
+    }
     if (e.key === ' ') {
       e.preventDefault();
       togglePlay();
@@ -3824,6 +3840,14 @@ export async function mountApp(
           const track = manualTrackFromBox(app.manualNextId, t, box, app.meta?.duration, span);
           app.manualNextId += 1;
           app.tracks = [...app.tracks, track];
+          if (!span) {
+            // v1.43.0: teach the E trim (the whole-clip default is only a
+            // STARTING point now, per field feedback).
+            toast(
+              `${track.label} spans the whole clip — scrub to the end and press E to trim it (or drag its chip edge).`,
+              { timeoutMs: 5000 },
+            );
+          }
           // v1.13.0: the first track enables the bulk restyle buttons
           // (their disabled state is re-derived from the tracks length).
           updateButtons();
@@ -3847,6 +3871,10 @@ export async function mountApp(
         onSelectTrack: (trackId) => {
           app.selectedTrackId = Number.isFinite(trackId) ? trackId : null;
           refreshTrackUi();
+          // v1.43.0: clicking a box/chip brings its row into view — stacked
+          // regions were unfindable in a long list (field report).
+          const selRow = els.trackList?.querySelector('li.track-row.selected');
+          selRow?.scrollIntoView?.({ block: 'nearest' });
         },
         // v1.22.0 REQ-201: the editor's K commit — a drawn box becomes the
         // SELECTED manual track's keyframe AT THE PLAYHEAD (nearest-keyframe

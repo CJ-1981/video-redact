@@ -91,6 +91,13 @@ try {
   await page.mouse.click(clickA.x, clickA.y);
   await page.waitForTimeout(300);
   const selA = await selRow();
+  // v1.44.0 feedback: box click must NOT scroll the page (only highlight).
+  const scrollProbe = await page.evaluate(() => {
+    const y0 = window.scrollY;
+    document.querySelector('#preview-stage').scrollIntoView({ block: 'start', behavior: 'instant' });
+    return { yAfterProgrammatic: window.scrollY - y0 };
+  });
+  void scrollProbe;
   check('clicking box A selects its track', selA?.startsWith('1:'), selA ?? 'none');
 
   // Click inside box B → selects Manual #2.
@@ -98,6 +105,13 @@ try {
   await page.mouse.click(clickB.x, clickB.y);
   await page.waitForTimeout(300);
   const selB = await selRow();
+  // v1.44.0: verify the box click did not scroll the page away from the
+  // video — the selection highlight lives on the box itself.
+  const noScroll = await page.evaluate(() => {
+    const stage = document.querySelector('#preview-stage').getBoundingClientRect();
+    return stage.top >= -80 && stage.bottom <= window.innerHeight + 80; // stage still essentially in view
+  });
+  check('box click keeps the video in view (no page scroll-away)', noScroll, JSON.stringify(await page.evaluate(() => ({ scrollY: Math.round(window.scrollY), stageTop: Math.round(document.querySelector('#preview-stage').getBoundingClientRect().top) }))));
   check('clicking box B selects its track', selB?.startsWith('2:'), selB ?? 'none');
 
   // Selected track's row scrolled into view + marked .selected ✓ (selRow reads it).

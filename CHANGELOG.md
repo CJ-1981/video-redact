@@ -6,6 +6,12 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.47.0] — 2026-11-08
+
+### Fixed
+- **Stacked chips: hit-testing is now lane-aware** (field report: "resizing only works with the last selected track even when the cursor shows resize arrows on a different track"). Three coordinated changes: (1) `hitTestTimeline` resolves WHICH LANE the pointer is over and only chips in that lane are candidates — body and edge zones alike (the v1.43.0 selected-track preference now applies to body hits within the lane; edge zones always resolve to the chip whose edge the cursor advertises); (2) while a chip-edge drag is live, the lane assignment is **frozen** — shrinking a chip mid-drag no longer re-packs lanes and jumps the dragged chip into another row; (3) an edge drag now selects the trimmed track, so follow-up `E`/`Del` target what you just adjusted.
+- **Box click no longer scrolls the page** (field request: "when box clicked on video, do not scroll the view but just highlight the box"): the selected track's box draws a 2 px accent outline on the video itself (plus its keyframe markers) and the track row highlights in the list — without yanking the viewport.
+
 ## [1.46.0] — 2026-11-08
 
 ### Added

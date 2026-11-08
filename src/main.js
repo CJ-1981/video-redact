@@ -4068,10 +4068,10 @@ export async function mountApp(
         onSelectTrack: (trackId) => {
           app.selectedTrackId = Number.isFinite(trackId) ? trackId : null;
           refreshTrackUi();
-          // v1.43.0: clicking a box/chip brings its row into view — stacked
-          // regions were unfindable in a long list (field report).
-          const selRow = els.trackList?.querySelector('li.track-row.selected');
-          selRow?.scrollIntoView?.({ block: 'nearest' });
+          // v1.44.0 feedback: do NOT scroll the page when a box is clicked —
+          // the selection is visible ON THE VIDEO (the selected track's box
+          // draws an accent outline in the editor) and the row highlights in
+          // the list without yanking the viewport.
         },
         // v1.44.0: per-track DELETE (row ✕ / Del key) — removes the track
         // from preview, timeline, list and export for this session; auto

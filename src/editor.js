@@ -811,8 +811,14 @@ export function trimRegionViews(trims, durationSec, view) {
  * @returns {{track: import('./types.js').Track,
  *            zone: 'start'|'end'|'body'} | null}
  */
-export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_EDGE_PX, view, preferredId = null) {
-  void y;
+export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_EDGE_PX, view, preferredId = null, lanes = null, laneH = 0) {
+  // v1.43.2: with multi-lane chips, `lanes` + `laneH` + `y` resolve WHICH
+  // lane the pointer is over — only chips in that lane are candidates
+  // (without this, the lane layout was cosmetic and the hit could grab a
+  // chip from a different row than the one under the pointer).
+  const yLane = lanes && laneH > 0 && Number.isFinite(y)
+    ? Math.min(Math.max(Math.floor(y / laneH), 0), lanes.size)
+    : null;
   if (!(width > 0) || !(durationSec > 0)) return null;
   const v = normalizeView(view, durationSec);
   const span = v.end - v.start;
@@ -826,6 +832,10 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
     const start = Math.max(v.start, track.start); // clamp to the rendered window
     const end = Math.min(v.end, track.end);
     if (t < start || t > end) continue;
+    if (yLane != null) {
+      const lane = lanes.get(track.id);
+      if (lane != null && lane !== yLane) continue; // another row — not a candidate
+    }
     const span2 = end - start;
     if (track.id === preferredId) preferred = track;
     if (span2 < bestSpan) {
@@ -861,6 +871,10 @@ export function hitTestTimeline(x, y, width, tracks, durationSec, edgePx = CHIP_
   let outward = null;
   let bestDist = Infinity;
   for (const track of all) {
+    if (yLane != null) {
+      const lane = lanes.get(track.id);
+      if (lane != null && lane !== yLane) continue; // another row
+    }
     const start = Math.max(v.start, track.start);
     const end = Math.min(v.end, track.end);
     if (t < start && start - t <= edgeSecOut && start - t < bestDist) {
@@ -1878,6 +1892,11 @@ export function mountEditor(els, hooks) {
   let rescanBusyId = null;
   /** Canvas px per native px — set by drawPreview once metadata exists. */
   let previewScale = 1;
+  // v1.43.2: the lane geometry from the LAST render (hit-testing + cursor
+  // read it outside the render pass) and the assignment FROZEN for the
+  // duration of a chip-edge drag (chips must not re-pack mid-drag).
+  let lastLaneInfo = /** @type {{lanes: Map<number, number>, laneCount: number, laneH: number} | null} */ (null);
+  let dragLaneInfo = /** @type {{lanes: Map<number, number>, laneCount: number, laneH: number} | null} */ (null);
   /**
    * Memo for tracksInCanvasPx: rebuild the scaled copy only when the state
    * array identity or the scale changes (toggle/resize), never per frame.
@@ -2027,6 +2046,24 @@ export function mountEditor(els, hooks) {
       //    boxes so strokes align with the burned regions; viewScale keeps
       //    stroke/label metrics CSS-px consistent.
       drawOverlay(ctx, tracksCanvasPx, t, previewScale);
+      // v1.44.0 feedback: highlight the SELECTED track's box on the video —
+      // the click-to-select affordance without scrolling the page. A 2 px
+      // accent stroke over the box (plus the existing keyframe markers).
+      const selId = state.selectedTrackId;
+      if (selId != null) {
+        const selEntry = tracksCanvasPx.find((tr) => tr && tr.id === selId && tr.enabled);
+        if (selEntry) {
+          const selHits = tracksAt([selEntry], t);
+          if (selHits.length > 0) {
+            const b = selHits[0].box;
+            ctx.save();
+            ctx.strokeStyle = '#F5A623';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(b.x, b.y, b.w, b.h);
+            ctx.restore();
+          }
+        }
+      }
       if (inTrim) {
         ctx.save();
         ctx.fillStyle = TRIM_VEIL;
@@ -2227,21 +2264,34 @@ export function mountEditor(els, hooks) {
       // ones). Pure assignChipLanes owns the assignment; the strip grows by
       // 22 px per extra lane (44 px ≙ one/two lanes = the old height).
       const LANE_H_PX = 22;
+      // v1.43.2 field fix: while a chip-EDGE drag is live the assignment is
+      // FROZEN (dragLaneInfo) — shrinking a chip mid-drag re-packs lanes and
+      // the dragged chip jumped rows under the pointer (read as "it swaps
+      // position with the track above"). Lanes re-pack after the gesture.
+      if (!trimDrag) dragLaneInfo = null;
       const visibleChips = vm.chips.filter((c) => c.endPct - c.startPct > 0);
-      const { lanes, laneCount } = assignChipLanes(
+      const freshLanes = assignChipLanes(
         visibleChips.map((c) => ({ id: c.track.id, start: c.startPct, end: c.endPct })),
       );
+      const freshInfo = { lanes: freshLanes.lanes, laneCount: freshLanes.laneCount, laneH: 0 };
       // v1.46.0: the user's height scale from #timeline-resize-handle —
       // lane heights scale up proportionally; the 44 px floor is the auto
       // single/dual-lane height.
       const tlScale = Number.isFinite(state.timelineScale) && state.timelineScale > 0
         ? state.timelineScale
         : 1;
-      const stripH = Math.max(44, laneCount * LANE_H_PX * tlScale);
-      const laneH = stripH / laneCount;
+      // v1.43.2 freeze: while the drag is live, the FROZEN lane count (and
+      // the strip height derived from it) holds — no re-pack, no jump.
+      const laneInfo = trimDrag && dragLaneInfo ? dragLaneInfo : freshInfo;
+      const stripH = Math.max(44, laneInfo.laneCount * LANE_H_PX * tlScale);
+      const laneH = stripH / laneInfo.laneCount;
+      laneInfo.laneH = laneH;
+      if (trimDrag && !dragLaneInfo) dragLaneInfo = laneInfo;
+      const { lanes, laneCount } = laneInfo;
       if (stripTrack && stripTrack.style.height !== `${stripH}px`) {
         stripTrack.style.height = `${stripH}px`;
       }
+      lastLaneInfo = { lanes, laneCount, laneH };
       for (const chip of visibleChips) {
         const widthPct = chip.endPct - chip.startPct;
         const lane = lanes.get(chip.track.id) ?? 0;
@@ -2290,8 +2340,8 @@ export function mountEditor(els, hooks) {
       if (sel && sel.keyframes instanceof Map && sel.keyframes.size > 0) {
         const entries = [...sel.keyframes.entries()].sort((a, b) => a[0] - b[0]);
         // v1.43.2: markers sit in the SELECTED track's lane (lane center).
-        const selLane = lanes.get(sel.id) ?? 0;
-        const laneMidPct = ((selLane + 0.5) / laneCount) * 100;
+        const selLane = laneInfo.lanes.get(sel.id) ?? 0;
+        const laneMidPct = ((selLane + 0.5) / laneInfo.laneCount) * 100;
         for (const [kt] of entries) {
           if (!Number.isFinite(kt)) continue;
           const marker = doc.createElement('div');
@@ -2748,7 +2798,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId, lastLaneInfo?.lanes ?? null, lastLaneInfo?.laneH ?? 0);
     if (hit) callToggle(hit.track.id, !hit.track.enabled);
   }
 
@@ -2812,7 +2862,7 @@ export function mountEditor(els, hooks) {
     if (!p) return;
     const d = duration();
     if (!(d > 0)) return;
-    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId);
+    const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId, lastLaneInfo?.lanes ?? null, lastLaneInfo?.laneH ?? 0);
     if (hit) {
       // Latch the press-time zone: an edge press hands the gesture to the
       // trim path (timelinePointerAction will never turn it into a seek),
@@ -3004,7 +3054,7 @@ export function mountEditor(els, hooks) {
     const d = duration();
     let cursor = '';
     if (p && d > 0) {
-      const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId);
+      const hit = hitTestTimeline(p.x, p.y, p.width, getState().tracks, d, edgePx, null, getState().selectedTrackId, lastLaneInfo?.lanes ?? null, lastLaneInfo?.laneH ?? 0);
       cursor = !hit ? '' : hit.zone === 'body' ? 'pointer' : 'col-resize';
     }
     const target =

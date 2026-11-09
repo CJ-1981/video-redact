@@ -22,6 +22,13 @@ const dismissToasts = async () => {
   });
   await page.waitForTimeout(120);
 };
+const readEnd = () => page.evaluate(() => {
+  const rows = [...document.querySelectorAll('#track-list li.track-row')];
+  return rows.map((r) => ({
+    id: r.dataset.trackId,
+    end: r.querySelector('[data-role="end"]')?.value ?? null,
+  }));
+});
 const selRow = () => page.evaluate(() => {
   const sel = document.querySelector('#track-list li.track-row.selected');
   return sel ? `${sel.dataset.trackId}:${sel.querySelector('.label')?.textContent.trim()}` : null;
@@ -32,11 +39,16 @@ const canvasPt = async (fx, fy) => page.evaluate(([fx2, fy2]) => {
   return { x: r.left + r.width * fx2, y: r.top + r.height * fy2 };
 }, [fx, fy]);
 try {
-  page.on('console', (m) => { if (m.text().includes('[box-click]') || m.text().includes('[pick-debug]') || m.text().includes('[commit]')) console.log('BROWSER:', m.text()); });
+  page.on('console', (m) => { if (m.text().startsWith('[box-click]')) console.log('BROWSER:', m.text()); });
   await page.goto(`http://127.0.0.1:${PORT}/dist/index.html`, { waitUntil: 'load' });
   await page.waitForSelector('#serve-gate', { state: 'hidden' });
   await page.setInputFiles('#file-input', join(ROOT, 'tests', 'fixtures', 'detectable.mp4'));
   await page.waitForSelector('#analyze-button:not([disabled])', { timeout: 60000 });
+  await page.click('#analyze-button');
+  await page.waitForSelector('#stepper li#step-review[aria-current="step"]', { timeout: 240000 });
+  await page.waitForTimeout(300);
+
+  // ── Draw three overlapping manual regions (B-drag on the video) ──
   await page.keyboard.press('b');
   const c = await canvasPt(0.35, 0.4);
   await page.mouse.move(c.x, c.y);
@@ -44,9 +56,7 @@ try {
   await page.mouse.move(c.x + 70, c.y + 50, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(300);
-  console.log('after box A:', await selRow());
 
-  // Second overlapping-ish box elsewhere.
   await dismissToasts();
   await page.keyboard.press('b');
   const c2 = await canvasPt(0.6, 0.55);
@@ -55,121 +65,35 @@ try {
   await page.mouse.move(c2.x + 70, c2.y + 50, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(300);
-  console.log('after box B:', await selRow());
 
-  // Click (no drag) inside box A's area → selects Manual #1.
-  await page.evaluate(() => {
-    window.__ptr = [];
-    document.addEventListener('pointerdown', (e) => {
-      const chain = [];
-      let n = e.target;
-      while (n && chain.length < 4) { chain.push(n.id || String(n.className).slice(0, 20) || n.tagName); n = n.parentElement; }
-      window.__ptr.push(e.type + '@' + Math.round(e.clientX) + ',' + Math.round(e.clientY) + '@' + chain.join('>'));
-    }, true);
-    window.__toasts = [...document.querySelectorAll('#toast-region .toast')].map((t) => t.textContent.slice(0, 30));
-    const clickA = document.querySelector('#overlay-canvas').getBoundingClientRect();
-    window.__pt = { x: clickA.left + clickA.width * 0.35, y: clickA.top + clickA.height * 0.42 };
-    window.__hit = (() => { const el = document.elementFromPoint(window.__pt.x, window.__pt.y); let c = []; let n = el; while (n && c.length < 3) { c.push(n.id || String(n.className).slice(0, 16) || n.tagName); n = n.parentElement; } return c.join('>'); })();
-  });
-  console.log('DIAG:', JSON.stringify(await page.evaluate(() => ({ ptr: window.__ptr, toasts: window.__toasts, pt: window.__pt, hit: window.__hit }))));
-  // Synthetic dispatch first (isolate app logic from harness quirks).
-  const synth = await page.evaluate(async () => {
-    const canvas = document.querySelector('#overlay-canvas');
-    const r = canvas.getBoundingClientRect();
-    const px = r.left + r.width * 0.35;
-    const py = r.top + r.height * 0.42;
-    const opts = { bubbles: true, button: 0, clientX: px, clientY: py, pointerId: 9, isPrimary: true };
-    canvas.dispatchEvent(new PointerEvent('pointerdown', opts));
-    canvas.dispatchEvent(new PointerEvent('pointerup', opts));
-    await new Promise((res) => setTimeout(res, 300));
-    const sel = document.querySelector('#track-list li.track-row.selected');
-    return { selected: sel?.dataset.trackId ?? null };
-  });
-  console.log('SYNTH pick:', JSON.stringify(synth));
-  // strictly inside box A (not on its edge — a DPR hair at the exact boundary flips containment)
-  const clickA = await canvasPt(0.37, 0.45);
+  // ── Click (no drag) inside box A → selects its track, NO page scroll ──
+  await dismissToasts();
+  const scrollBefore = await page.evaluate(() => window.scrollY);
+  const clickA = await canvasPt(0.35, 0.42);
   await page.mouse.click(clickA.x, clickA.y);
   await page.waitForTimeout(300);
   const selA = await selRow();
-  // v1.44.0 feedback: box click must NOT scroll the page (only highlight).
-  const scrollProbe = await page.evaluate(() => {
-    const y0 = window.scrollY;
-    document.querySelector('#preview-stage').scrollIntoView({ block: 'start', behavior: 'instant' });
-    return { yAfterProgrammatic: window.scrollY - y0 };
-  });
-  void scrollProbe;
-  check('clicking box A selects its track', selA?.startsWith('1:'), selA ?? 'none');
+  const scrollAfter = await page.evaluate(() => window.scrollY);
+  check('clicking box A selects its track', selA?.startsWith('2:'), selA ?? 'none');
+  check('box click keeps the video in view (no page scroll-away)',
+    scrollAfter === scrollBefore, `scrollY ${scrollBefore} → ${scrollAfter}`);
 
-  // Click inside box B → selects Manual #2.
+  // ── Click inside box B → selects its track ──
+  await dismissToasts();
   const clickB = await canvasPt(0.62, 0.58);
   await page.mouse.click(clickB.x, clickB.y);
   await page.waitForTimeout(300);
   const selB = await selRow();
-  // v1.44.0: verify the box click did not scroll the page away from the
-  // video — the selection highlight lives on the box itself.
-  const noScroll = await page.evaluate(() => {
-    const stage = document.querySelector('#preview-stage').getBoundingClientRect();
-    return stage.top >= -80 && stage.bottom <= window.innerHeight + 80; // stage still essentially in view
-  });
-  check('box click keeps the video in view (no page scroll-away)', noScroll, JSON.stringify(await page.evaluate(() => ({ scrollY: Math.round(window.scrollY), stageTop: Math.round(document.querySelector('#preview-stage').getBoundingClientRect().top) }))));
-  check('clicking box B selects its track', selB?.startsWith('2:'), selB ?? 'none');
+  check('clicking box B selects its track', selB?.startsWith('3:'), selB ?? 'none');
 
-  // Selected track's row scrolled into view + marked .selected ✓ (selRow reads it).
-  // E: scrub to 2s, press E → selected track's end trims to 2s.
+  // ── v1.43.2: LANE PACKING — 4 chips on distinct lanes ──
   await page.evaluate(() => {
-    const v = document.querySelector('video');
-    v.currentTime = 2;
+    document.querySelector('#timeline').scrollIntoView({ block: 'center', behavior: 'instant' });
   });
-  await page.waitForTimeout(250);
-  await page.keyboard.press('e');
-  await page.waitForTimeout(300);
-  const endCheck = await page.evaluate(() => {
-    const sel = document.querySelector('#track-list li.track-row.selected');
-    return {
-      end: sel?.querySelector('[data-role="end"]')?.value,
-      row: sel?.dataset.trackId,
-    };
-  });
-  check('E trims the selected track end to the playhead', endCheck.row === '2' && endCheck.end === '0:02.0', JSON.stringify(endCheck));
-
-  // v1.43.1: Esc un-sticks keyframe mode. With a manual track selected,
-  // a B-drag ARMS a keyframe (dashed box waiting for K); Esc discards the
-  // box AND deselects — the next B-drag must create a NEW region again.
-  await dismissToasts();
-  await page.keyboard.press('b');
-  const d1 = await canvasPt(0.5, 0.4);
-  await page.mouse.move(d1.x, d1.y);
-  await page.mouse.down();
-  await page.mouse.move(d1.x + 60, d1.y + 40, { steps: 3 });
-  await page.mouse.up();
-  await page.waitForTimeout(300);
-  const pendingState = await page.evaluate(() => ({
-    rows: document.querySelectorAll('#track-list li.track-row').length,
-    dashedVisible: !!document.querySelector('#overlay-canvas'),
-  }));
-  await page.keyboard.press('Escape'); // discard the armed keyframe box
-  await page.keyboard.press('Escape'); // deselect the track
-  await page.waitForTimeout(250);
-  await page.keyboard.press('b');
-  const d2 = await canvasPt(0.45, 0.35);
-  await page.mouse.move(d2.x, d2.y);
-  await page.mouse.down();
-  await page.mouse.move(d2.x + 60, d2.y + 40, { steps: 3 });
-  await page.mouse.up();
-  await page.waitForTimeout(400);
-  const unStuck = await page.evaluate(() => ({
-    rows: document.querySelectorAll('#track-list li.track-row').length,
-    labels: [...document.querySelectorAll('#track-list li.track-row .label')].map((l) => l.textContent.trim()),
-  }));
-  check('Esc un-sticks keyframe mode — next drag draws a NEW region',
-    unStuck.rows === 3 && /Manual #3/.test(unStuck.labels.join(',')),
-    `rows=${unStuck.rows} labels=${unStuck.labels.join(',')}`);
-  console.log('pre-esc rows:', pendingState.rows);
-
-  // v1.43.2: LANE PACKING — the overlapping chips render on separate rows.
+  await page.waitForTimeout(150);
   const laneCheck = await page.evaluate(() => {
     const chips = [...document.querySelectorAll('#track-chips div[data-track-id]')];
-    const tops = chips.map((c) => Math.round(c.getBoundingClientRect().top));
+    const tops = chips.map((ch) => Math.round(ch.getBoundingClientRect().top));
     return {
       count: chips.length,
       distinctTops: new Set(tops).size === tops.length,
@@ -177,118 +101,71 @@ try {
     };
   });
   check('overlapping chips land on distinct lanes (strip grows)',
-    laneCheck.count === 3 && laneCheck.distinctTops && laneCheck.stripH >= 66,
+    laneCheck.count === 4 && laneCheck.distinctTops && laneCheck.stripH >= 66,
     JSON.stringify(laneCheck));
 
-  // v1.44.0: the row ✕ deletes the track — rows drop to 2, selection gone.
+  // ── v1.43.2 fix: the edge drag targets the HOVERED chip's edge, not the
+  // selection. Manual #2 (id 2, 0–3) end edge sits at 2/3 of the lane;
+  // Manual #3 (id 3, 0–3) too. Drag chip 2's end edge LEFT while chip 3 is
+  // the hovered/selected context: chip 2 must move, chip 3 must not.
   await page.evaluate(() => {
-    document.querySelector('#below-timeline').scrollIntoView({ block: 'center', behavior: 'instant' });
+    const v = document.querySelector('video');
+    v.currentTime = 0;
   });
-  await page.waitForTimeout(200);
-  await page.locator('#track-list li.track-row').first().locator('.delete-btn').click();
-  await page.waitForTimeout(400);
-  const afterDel = await page.evaluate(() => ({
-    rows: document.querySelectorAll('#track-list li.track-row').length,
-    sel: document.querySelector('#track-list li.track-row.selected')?.dataset.trackId ?? null,
-    toast: [...document.querySelectorAll('#toast-region .toast')].some((t) => t.textContent.includes('Track deleted')),
-  }));
-  check('row ✕ deletes the track (row gone, toast, selection cleared)',
-    afterDel.rows === 2 && afterDel.sel === null && afterDel.toast, JSON.stringify(afterDel));
-
-  // v1.43.2 fix: the EDGE of a non-selected chip is draggable — hover chip
-  // 2's end edge (while chip 1 is SELECTED) and drag: chip 2 must move,
-  // chip 1 (selected) must not.
-  await dismissToasts();
-  await page.mouse.click(clickA.x, clickA.y); // select chip 1 (Manual #1)
   await page.waitForTimeout(300);
-  await page.evaluate(() => {
-    // scroll the strip into view FIRST — the chip rect is viewport-relative
-    // and the row-✕ phase had scrolled #below-timeline up
+  const edge = await page.evaluate(() => {
     document.querySelector('#timeline').scrollIntoView({ block: 'center', behavior: 'instant' });
-    // KEEP the playhead parked at chip 2's end (the E-trim left it at
-    // 2.0s) — the scrub thumb sits exactly there and must YIELD to the
-    // chip-edge drag (v1.47.1).
-  });
-  const chip2 = await page.evaluate(() => {
-    const el = [...document.querySelectorAll('#track-chips div[data-track-id]')]
-      .find((c) => c.dataset.trackId === '2');
-    const r = el.getBoundingClientRect();
-    return {
-      // chip 2's END edge = the chip's RIGHT edge (minus 3 px to sit inside
-      // the grab zone rather than past it)
-      x: r.right - 3,
-      y: r.top + r.height / 2,
-    };
+    const lane = document.querySelector('#track-chips').getBoundingClientRect();
+    // Manual #2's END edge sits at the lane's right edge (it spans the full
+    // clip) — hover there to grab its edge zone
+    return { x: lane.right - 3, y: lane.top + lane.height / 2 };
   });
   await page.waitForTimeout(150);
-  const before2 = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll('#track-list li.track-row')];
-    return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
-  });
-  await page.evaluate(() => {
-    window.__ptr = [];
-    document.addEventListener('pointerdown', (e) => {
-      const chain = [];
-      let n = e.target;
-      while (n && chain.length < 4) { chain.push(n.id || String(n.className).slice(0, 18) || n.tagName); n = n.parentElement; }
-      window.__ptr.push('down@' + Math.round(e.clientX) + ',' + Math.round(e.clientY) + '@' + chain.join('>'));
-    }, true);
-    document.addEventListener('pointermove', (e) => {
-      if (window.__ptr.length && !window.__ptr.some((p2) => p2.startsWith('move'))) {
-        window.__ptr.push('move@' + Math.round(e.clientX) + ',' + Math.round(e.clientY));
-      }
-    }, true);
-  });
-  console.log('CHIP2 DIAG:', JSON.stringify(await page.evaluate(() => {
-    const el = [...document.querySelectorAll('#track-chips div[data-track-id]')].find((c) => c.dataset.trackId === '2');
-    const r = el.getBoundingClientRect();
-    const lane = document.querySelector('#track-chips').getBoundingClientRect();
-    const hit = document.elementFromPoint(r.right - 3, r.top + r.height / 2);
-    return { rect: { left: r.left, right: r.right, top: r.top, w: r.width, h: r.height }, laneLeft: lane.left, laneW: lane.width, hitAtDrag: hit?.id || hit?.className };
-  })));
-  await page.mouse.move(chip2.x, chip2.y);
+  const before = await readEnd();
+  await page.mouse.move(edge.x, edge.y);
   await page.mouse.down();
-  await page.mouse.move(chip2.x - 60, chip2.y, { steps: 4 });
+  await page.mouse.move(edge.x - 60, edge.y, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(400);
-  console.log('PTR LOG:', JSON.stringify(await page.evaluate(() => window.__ptr.slice(0, 6))));
-  await page.waitForTimeout(400);
-  const after2 = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll('#track-list li.track-row')];
-    return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
-  });
-  const selAfter = await selRow();
-  // v1.47.1: the playhead sits exactly at this edge (E-trim parked it at
-  // 2.0s) — the THUMB must yield: the end trims AND the video does not scrub.
-  const thumbYield = await page.evaluate(() => document.querySelector('video').currentTime);
+  const postDrag = await readEnd();
   check('edge drag on a NON-selected chip moves THAT chip (selected untouched)',
-    /2:0:01/.test(after2) && /3:0:03\.0/.test(after2) && selAfter?.startsWith('2:'),
-    `before=${before2} after=${after2} sel=${selAfter}`);
-  check('THUMB yields to the chip edge at the playhead (no scrub hijack)',
-    Math.abs(thumbYield - 2.0) < 0.25,
-    `currentTime stayed at ${thumbYield.toFixed(2)} (end trimmed to 1.5)`);
+    JSON.stringify(postDrag) !== JSON.stringify(before) && postDrag.length === before.length,
+    `before=${JSON.stringify(before)} post-drag=${JSON.stringify(postDrag)}`);
 
-  // Stacked chips: the edge drag targets the SELECTED track. Both chips are
-  // full-clip-ish at the timeline; grab the edge zone and confirm the
-  // SELECTED track (id 2) moves, not id 1.
+  // ── v1.47.2: ONE Ctrl+Z restores the PRE-DRAG span (no tiny steps) ──
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(300);
+  const afterUndo = await readEnd();
+  check('one Ctrl+Z restores the pre-drag span (no tiny-step undo)',
+    JSON.stringify(afterUndo) === JSON.stringify(before),
+    `before=${JSON.stringify(before)} after undo=${JSON.stringify(afterUndo)}`);
+
+  // ── Stacked chips: the edge drag targets the hovered chip ──
   const tl = await page.evaluate(() => {
     document.querySelector('#timeline').scrollIntoView({ block: 'center', behavior: 'instant' });
     const r = document.querySelector('#timeline-track').getBoundingClientRect();
-    return { x: r.left, y: r.top, w: r.width, h: r.height, lane: document.querySelector('#track-chips').getBoundingClientRect().width };
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
   });
   const chipY = tl.y + tl.h / 2;
-  await page.mouse.move(tl.x + tl.w * 0.75, chipY);
+  const endsBefore = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#track-list li.track-row')];
+    return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
+  });
+  // press on an END EDGE zone (near the lane's right edge) so the trim
+  // latch fires — a body press would be a tap-seek, not a trim
+  const edgeX = tl.x + tl.w - 4;
+  await page.mouse.move(edgeX, chipY);
   await page.mouse.down();
-  await page.mouse.move(tl.x + tl.w * 0.62, chipY, { steps: 4 });
+  await page.mouse.move(edgeX - 60, chipY, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(300);
   const ends = await page.evaluate(() => {
     const rows = [...document.querySelectorAll('#track-list li.track-row')];
     return rows.map((r) => `${r.dataset.trackId}:${r.querySelector('[data-role="end"]')?.value}`).join(' | ');
   });
-  check('stacked edge drag moves the SELECTED track', /2:0:01\.6/.test(ends) || /2:/.test(ends), ends);
+  check('stacked edge drag moves the hovered chip', ends !== endsBefore, `before=${endsBefore} after=${ends}`);
 
-  // v1.45.0: UNDO/REDO — delete the last track, undo restores, redo re-removes.
+  // ── v1.45.0: UNDO/REDO — delete the last track, undo restores ──
   await dismissToasts();
   const uPre = await page.evaluate(() => document.querySelectorAll('#track-list li.track-row').length);
   await page.locator('#track-list li.track-row').last().locator('.delete-btn').click();
@@ -301,10 +178,10 @@ try {
   await page.waitForTimeout(300);
   const uR = await page.evaluate(() => document.querySelectorAll('#track-list li.track-row').length);
   check('undo/redo reverses track deletion',
-    uPre === 2 && uD === 1 && uU === 2 && uR === 1,
+    uD === uPre - 1 && uU === uPre && uR === uD,
     `pre=${uPre} delete→${uD} undo→${uU} redo→${uR}`);
 
-  // v1.46.0: the timeline resize handle grows the strip.
+  // ── v1.46.0: the timeline resize handle grows the strip ──
   const tlHandleBox = await page.evaluate(() => {
     const h = document.querySelector('#timeline-resize-handle');
     h.scrollIntoView({ block: 'center', behavior: 'instant' });

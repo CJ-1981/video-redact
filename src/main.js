@@ -2665,6 +2665,10 @@ export async function mountApp(
   const UNDO_LIMIT = 60;
   let undoStack = /** @type {Array<{tracks: import('./types.js').Track[], trims: Array<{id: number, start: number, end: number}>}>} */ ([]);
   let redoStack = /** @type {Array<{tracks: import('./types.js').Track[], trims: Array<{id: number, start: number, end: number}>}>} */ ([]);
+  // v1.47.2: chip/region EDGE DRAG gestures coalesce — one undo entry per
+  // gesture (the pre-drag state), moves apply without pushing.
+  let trimDragHistoryLatch = false;
+  let trimDragMutated = false;
 
   /** Clone tracks for a history snapshot — shallow per track, but the
    *  keyframes Map is copied so later mutations never leak into history. */
@@ -2730,14 +2734,14 @@ export async function mountApp(
   /** Apply a user mutation to the TRACKS: snapshot the pre-state into the
    *  undo stack, then commit. Every review-workspace mutation routes through
    *  here (toggle/delete/draw/trim/style/group/keyframe/rescan/queue). */
-  function applyTracks(next) {
-    pushUndo();
+  function applyTracks(next, coalescing = false) {
+    if (!coalescing) pushUndo();
     app.tracks = next;
   }
 
   /** Apply a user mutation to the TRIMS (same contract as applyTracks). */
-  function applyTrims(next) {
-    pushUndo();
+  function applyTrims(next, coalescing = false) {
+    if (!coalescing) pushUndo();
     app.trims = next;
   }
 
@@ -4049,7 +4053,10 @@ export async function mountApp(
         onTrimTrack: (trackId, start, end) => {
           // REQ-103: chip-edge drag → model trim, clamped to the video
           // duration with the 0.1 s minimum span enforced by the model.
-          applyTracks(trimTrack(app.tracks, trackId, start, end, app.meta?.duration));
+          // v1.47.2: while an edge DRAG is live the moves coalesce (the
+          // gesture-start entry covers the whole drag).
+          applyTracks(trimTrack(app.tracks, trackId, start, end, app.meta?.duration), trimDragHistoryLatch);
+          if (trimDragHistoryLatch) trimDragMutated = true;
           // v1.43.2: adjusting an edge SELECTS that track — the row
           // highlights and subsequent E/Del/keys target what you just
           // dragged (stacked lanes made the adjusted track unfindable).
@@ -4072,6 +4079,22 @@ export async function mountApp(
           // the selection is visible ON THE VIDEO (the selected track's box
           // draws an accent outline in the editor) and the row highlights in
           // the list without yanking the viewport.
+        },
+        // v1.47.2: edge-drag gestures coalesce — ONE undo entry per drag
+        // (the pre-drag state), so Ctrl+Z restores the pre-drag span instead
+        // of walking through per-frame intermediate trims.
+        onTrimDragStart: () => {
+          pushUndo();
+          trimDragHistoryLatch = true;
+          trimDragMutated = false;
+        },
+        onTrimDragEnd: () => {
+          trimDragHistoryLatch = false;
+          if (!trimDragMutated) {
+            undoStack.pop(); // a tap/zero-move gesture changed nothing — drop the no-op entry
+          }
+          trimDragMutated = false;
+          updateHistoryButtons();
         },
         // v1.44.0: per-track DELETE (row ✕ / Del key) — removes the track
         // from preview, timeline, list and export for this session; auto
@@ -4119,7 +4142,8 @@ export async function mountApp(
           refreshTrackUi();
         },
         onTrimEdge: (id, which, t) => {
-          applyTrims(moveTrimEdge(app.trims, id, which, t, app.meta?.duration));
+          applyTrims(moveTrimEdge(app.trims, id, which, t, app.meta?.duration), trimDragHistoryLatch);
+          if (trimDragHistoryLatch) trimDragMutated = true;
           refreshTrackUi();
         },
         onTrimRemove: (id) => {

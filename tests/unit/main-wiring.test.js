@@ -4235,6 +4235,73 @@ describe('v1.41.0: triage aids — class groups + review-queue button', () => {
     expect(handleAt).toBeLessThan(waveAt);
   });
 
+  it('v1.47.2: a chip-edge DRAG is ONE undo entry (moves coalesce)', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const undoBtn = makeFakeEl('BUTTON');
+      elsById.set('undo-button', undoBtn);
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandleTop([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // Manual #1, full clip (3 s)
+
+      // Simulate the drag gesture: latch → two moves → end.
+      const preDrag = hooks.getState().tracks[0].end; // 3.0
+      hooks.onTrimDragStart();
+      hooks.onTrimTrack(1, 0, 2.0); // move 1
+      hooks.onTrimTrack(1, 0, 1.5); // move 2
+      hooks.onTrimDragEnd();
+
+      // ONE Ctrl+Z restores the PRE-DRAG span (not an intermediate step).
+      fakeDoc.__dispatch('keydown', { key: 'z', ctrlKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks[0].end).toBe(preDrag);
+
+      // redo re-applies the dragged span.
+      fakeDoc.__dispatch('keydown', { key: 'z', ctrlKey: true, shiftKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks[0].end).toBe(1.5);
+      expect(undoBtn.disabled).toBe(false);
+    } finally {
+      g.restore();
+    }
+  });
+
+  it('v1.47.2: an edge TAP (no move) leaves the undo stack clean', async () => {
+    const { fakeDoc, fakeView, elsById } = makeFakeEnv();
+    g.arm(fakeView);
+    try {
+      const undoBtn = makeFakeEl('BUTTON');
+      elsById.set('undo-button', undoBtn);
+      let hooks = null;
+      await main.mountApp(fakeDoc, {
+        mountEditor: (_els, h) => {
+          hooks = h;
+          return refreshCountingHandleTop([]);
+        },
+      });
+      await openFile(fakeDoc);
+      hooks.onManualBox({ x: 1, y: 1, w: 4, h: 4 }, 1); // mutation 1
+
+      // A tap on an edge: latch + end, zero moves → the pushed pre-entry is
+      // rolled back (otherwise Ctrl+Z would waste a press on a no-op).
+      hooks.onTrimDragStart();
+      hooks.onTrimDragEnd();
+      fakeDoc.__dispatch('keydown', { key: 'z', ctrlKey: true, target: null, preventDefault: () => {} });
+      await flushApp();
+      expect(hooks.getState().tracks).toHaveLength(0); // the DRAW is undone
+      expect(undoBtn.disabled).toBe(true); // nothing left to undo
+    } finally {
+      g.restore();
+    }
+  });
+
   it('v1.46.1: the trim-bar undo/redo pair mirrors the stacks', async () => {
     const { fakeDoc, fakeView, elsById } = makeFakeEnv();
     g.arm(fakeView);

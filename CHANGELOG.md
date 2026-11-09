@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.47.2] — 2026-11-08
+
+### Fixed
+- **Edge drags now push ONE undo entry per gesture** (field report: "undo doesn't recover it, it seems to try undoing in very small steps of dragging"). The chip-edge and trim-region drag fired `onTrimTrack`/`onTrimEdge` per pointermove, and each fired `applyTracks`/`applyTrims` which pushed an undo entry per frame — Ctrl+Z walked back through dozens of tiny intermediate trims instead of restoring the pre-drag span. The editor now signals gesture boundaries (`onTrimDragStart` / `onTrimDragEnd` hooks); the first latches the pre-drag state, the moves coalesce, and the last releases. A tap/zero-move gesture rolls back its no-op entry. Unit-pinned: a simulated drag (start → 2 moves → end) undoes in exactly one Ctrl+Z; a tap rolls back cleanly.
+
 ## [1.47.1] — 2026-11-08
 
 ### Fixed

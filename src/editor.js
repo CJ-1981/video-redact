@@ -2895,6 +2895,8 @@ export function mountEditor(els, hooks) {
       return; // plain chip / bare rail tap → pointerup-seek path
     }
     trimDrag = { id: hit.track.id, zone: hit.zone, moved: false };
+    // v1.47.2: ONE undo entry per drag gesture — the moves coalesce.
+    if (hasHook('onTrimDragStart')) hooks.onTrimDragStart();
     try {
       timeline.setPointerCapture(e.pointerId);
     } catch {
@@ -2940,6 +2942,7 @@ export function mountEditor(els, hooks) {
     if (!trimDrag) return;
     if (trimDrag.moved) applyTrimDrag(e.clientX);
     trimDrag = null;
+    if (hasHook('onTrimDragEnd')) hooks.onTrimDragEnd();
     downPos = null;
     try {
       timeline.releasePointerCapture(e.pointerId);
@@ -3022,6 +3025,7 @@ export function mountEditor(els, hooks) {
     // never turn a later tap into a trim or a seek (v1.6.1 REG-1). v1.15.0:
     // the create-drag ghost dies with it too. v1.22.0 REQ-204: the pan drag.
     trimDrag = null;
+    if (hasHook('onTrimDragEnd')) hooks.onTrimDragEnd(); // v1.47.2: close the coalesce window
     dropGhost();
     downPos = null;
     panDrag = null;
@@ -3089,6 +3093,8 @@ export function mountEditor(els, hooks) {
     const which = edge.dataset.which === 'end' ? 'end' : 'start';
     if (!Number.isFinite(id)) return;
     regionDrag = { id, which, pointerId: e.pointerId };
+    // v1.47.2: ONE undo entry per region-edge drag gesture.
+    if (hasHook('onTrimDragStart')) hooks.onTrimDragStart();
     try {
       trimRegions.setPointerCapture(e.pointerId);
     } catch {
@@ -3110,6 +3116,7 @@ export function mountEditor(els, hooks) {
   function endRegionDrag(e) {
     if (!regionDrag) return;
     regionDrag = null;
+    if (hasHook('onTrimDragEnd')) hooks.onTrimDragEnd(); // v1.47.2: close the coalesce window
     try {
       trimRegions.releasePointerCapture(e.pointerId);
     } catch {

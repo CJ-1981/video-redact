@@ -92,7 +92,7 @@ try {
   });
   await page.waitForTimeout(150);
   const laneCheck = await page.evaluate(() => {
-    const chips = [...document.querySelectorAll('#track-chips div[data-track-id]')];
+    const chips = [...document.querySelectorAll('#track-chips > div[data-track-id]')];
     const tops = chips.map((ch) => Math.round(ch.getBoundingClientRect().top));
     return {
       count: chips.length,

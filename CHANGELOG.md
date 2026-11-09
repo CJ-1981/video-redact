@@ -6,6 +6,11 @@ The format is based on the Keep a Changelog convention, and this project adheres
 
 ## [Unreleased]
 
+## [1.48.0] — 2026-11-08
+
+### Fixed
+- **Stable timeline lanes** (field report: "when multi tracks are in timeline, resizing only works with last selected tracks even mouse cursor hovers on the side of different track with resize arrows shown"). The timeline now assigns each track a FIXED row by array index — lanes never re-pack when spans change or overlap, so a chip always renders in the same row and edge drags always target the chip you see. The selected chip draws a 2 px accent border with visible start/end edge bars, making its grab zones obvious at all times. The strip grows 22 px per track; the height handle scales all lanes proportionally. The greedy `assignChipLanes` packer remains exported but is no longer used in the render path (index-based assignment replaces it).
+
 ## [1.47.2] — 2026-11-08
 
 ### Fixed

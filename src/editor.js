@@ -1896,7 +1896,6 @@ export function mountEditor(els, hooks) {
   // read it outside the render pass) and the assignment FROZEN for the
   // duration of a chip-edge drag (chips must not re-pack mid-drag).
   let lastLaneInfo = /** @type {{lanes: Map<number, number>, laneCount: number, laneH: number} | null} */ (null);
-  let dragLaneInfo = /** @type {{lanes: Map<number, number>, laneCount: number, laneH: number} | null} */ (null);
   /**
    * Memo for tracksInCanvasPx: rebuild the scaled copy only when the state
    * array identity or the scale changes (toggle/resize), never per frame.
@@ -2259,42 +2258,30 @@ export function mountEditor(els, hooks) {
     }
     if (chipsContainer) {
       chipsContainer.textContent = '';
-      // v1.43.2: LANE PACKING — overlapping chips stack into separate rows
-      // instead of obscuring each other (the last track used to cover older
-      // ones). Pure assignChipLanes owns the assignment; the strip grows by
-      // 22 px per extra lane (44 px ≙ one/two lanes = the old height).
+            // v1.48.0: STABLE LANES — each track renders in its own row by ARRAY
+      // INDEX (not re-packed by overlap). Lanes never change: a track always
+      // occupies the same row, the strip grows with the track count, and
+      // edge drags never jump a chip between rows. The selected chip draws
+      // an accent border + visible edge bars so it stands out on the strip.
       const LANE_H_PX = 22;
-      // v1.43.2 field fix: while a chip-EDGE drag is live the assignment is
-      // FROZEN (dragLaneInfo) — shrinking a chip mid-drag re-packs lanes and
-      // the dragged chip jumped rows under the pointer (read as "it swaps
-      // position with the track above"). Lanes re-pack after the gesture.
-      if (!trimDrag) dragLaneInfo = null;
       const visibleChips = vm.chips.filter((c) => c.endPct - c.startPct > 0);
-      const freshLanes = assignChipLanes(
-        visibleChips.map((c) => ({ id: c.track.id, start: c.startPct, end: c.endPct })),
-      );
-      const freshInfo = { lanes: freshLanes.lanes, laneCount: freshLanes.laneCount, laneH: 0 };
+      const laneCount = Math.max(1, visibleChips.length);
       // v1.46.0: the user's height scale from #timeline-resize-handle —
       // lane heights scale up proportionally; the 44 px floor is the auto
       // single/dual-lane height.
       const tlScale = Number.isFinite(state.timelineScale) && state.timelineScale > 0
         ? state.timelineScale
         : 1;
-      // v1.43.2 freeze: while the drag is live, the FROZEN lane count (and
-      // the strip height derived from it) holds — no re-pack, no jump.
-      const laneInfo = trimDrag && dragLaneInfo ? dragLaneInfo : freshInfo;
-      const stripH = Math.max(44, laneInfo.laneCount * LANE_H_PX * tlScale);
-      const laneH = stripH / laneInfo.laneCount;
-      laneInfo.laneH = laneH;
-      if (trimDrag && !dragLaneInfo) dragLaneInfo = laneInfo;
-      const { lanes, laneCount } = laneInfo;
+      const stripH = Math.max(44, laneCount * LANE_H_PX * tlScale);
+      const laneH = stripH / laneCount;
       if (stripTrack && stripTrack.style.height !== `${stripH}px`) {
         stripTrack.style.height = `${stripH}px`;
       }
-      lastLaneInfo = { lanes, laneCount, laneH };
-      for (const chip of visibleChips) {
+      lastLaneInfo = { lanes: new Map(visibleChips.map((c, i) => [c.track.id, i])), laneCount, laneH };
+      for (let ci = 0; ci < visibleChips.length; ci++) {
+        const chip = visibleChips[ci];
         const widthPct = chip.endPct - chip.startPct;
-        const lane = lanes.get(chip.track.id) ?? 0;
+        const isSelected = chip.track.id === state.selectedTrackId;
         const el = doc.createElement('div');
         el.dataset.trackId = String(chip.track.id);
         el.title = chip.enabled
@@ -2305,8 +2292,8 @@ export function mountEditor(els, hooks) {
           'min-width:2px;cursor:pointer;';
         el.style.left = `${chip.startPct}%`;
         el.style.width = `${widthPct}%`;
-        el.style.top = `${lane * laneH + 2}px`;
-        el.style.height = `${Math.max(6, laneH - 4)}px`;
+        el.style.top = `${ci * laneH + 2}px`;
+        el.style.height = `${Math.max(8, laneH - 4)}px`;
         el.style.background = chip.enabled ? chip.color : SAFE_GREEN;
         el.style.opacity = chip.enabled ? '1' : '0.55';
         // Solid-style chips get a dark inset outline so the burn style is
@@ -2320,6 +2307,24 @@ export function mountEditor(els, hooks) {
         if (chip.track.source === 'manual') {
           el.style.outline = '1px dashed rgba(232, 236, 241, 0.6)';
           el.style.outlineOffset = '-1px';
+        }
+        // v1.48.0: the SELECTED chip draws a 2 px accent border + visible
+        // start/end edge bars — the edges are grab zones (col-resize) at
+        // all times, not just on hover.
+        if (isSelected) {
+          el.style.borderColor = 'var(--accent)';
+          el.style.borderWidth = '2px';
+          el.style.zIndex = '5';
+          const startBar = doc.createElement('div');
+          startBar.style.cssText =
+            'position:absolute;left:0;top:0;bottom:0;width:3px;' +
+            'background:var(--accent);cursor:col-resize;pointer-events:none;';
+          const endBar = doc.createElement('div');
+          endBar.style.cssText =
+            'position:absolute;right:0;top:0;bottom:0;width:3px;' +
+            'background:var(--accent);cursor:col-resize;pointer-events:none;';
+          el.appendChild(startBar);
+          el.appendChild(endBar);
         }
         chipsContainer.appendChild(el);
       }
@@ -2340,8 +2345,8 @@ export function mountEditor(els, hooks) {
       if (sel && sel.keyframes instanceof Map && sel.keyframes.size > 0) {
         const entries = [...sel.keyframes.entries()].sort((a, b) => a[0] - b[0]);
         // v1.43.2: markers sit in the SELECTED track's lane (lane center).
-        const selLane = laneInfo.lanes.get(sel.id) ?? 0;
-        const laneMidPct = ((selLane + 0.5) / laneInfo.laneCount) * 100;
+        const selIdx = visibleChips.findIndex((c) => c.track.id === sel.id);
+        const laneMidPct = ((selIdx + 0.5) / Math.max(1, visibleChips.length)) * 100;
         for (const [kt] of entries) {
           if (!Number.isFinite(kt)) continue;
           const marker = doc.createElement('div');
